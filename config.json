@@ -1,0 +1,155 @@
+{
+  "deepseek_model": "deepseek-v4-flash",
+  "comfyui_url": "http://127.0.0.1:8188",
+  "comfy_url": "http://127.0.0.1:8188",
+  "comfy_input_dir": "../ComfyUI/input",
+  "comfy_output_dir": "../ComfyUI/output",
+  "output_dir": "./outputs",
+  "output_root": "outputs",
+  "python_executable": "",
+  "workflow_mode": "licon_msr_direct",
+  "template_api_path": "templates/Ltx2.3 Licon-MSRV2-bfs_api.json",
+  "output_mode": "api",
+  "brand_public_key_path": "resources/brand/brand_public_key.pem",
+  "submit_to_comfyui": true,
+  "video_submit_backend": "comfyui",
+  "video_generation_concurrency_limit": 3,
+  "model_registry": {
+    "default_model_id": "minimax_h3_local_ref2va"
+  },
+  "models": {
+    "ltx23_licon_msr_v2": {
+      "enabled": true,
+      "display_name": "LTX 2.3 / LiconMSR",
+      "pipeline": "ltx_licon",
+      "revision": "1",
+      "template_api_path": "templates/Ltx2.3 Licon-MSRV2-bfs_api.json",
+      "execution_profiles": {
+        "runninghub": {
+          "workflow_id": "2064586545209888769"
+        }
+      }
+    },
+    "minimax_h3_local_ref2va": {
+      "enabled": true,
+      "display_name": "MiniMax H3 / Ref2VA（本地）",
+      "pipeline": "minimax_h3_ref2va",
+      "revision": "h3-base-ref2va",
+      "template_api_path": "templates/MiniMaxH3_Ref2VA_8step_lora16_9_api.json",
+      "workflow_profile": {
+        "prompt_node": "167",
+        "prompt_input": "value",
+        "seed_node": "154",
+        "seed_input": "noise_seed",
+        "duration_node": "157",
+        "duration_input": "value",
+        "resolution_node": "158",
+        "resolution_aspect_input": "aspect_ratio",
+        "resolution_megapixels_input": "megapixels",
+        "resolution_multiple_input": "multiple",
+        "condition_node": "170",
+        "output_node": "160",
+        "output_prefix_input": "filename_prefix",
+        "ref_image_size_input": "ref_image_size",
+        "ref_image_size": "match",
+        "reference_slots": {
+          "image_loader_node_ids": [
+            "161",
+            "205",
+            "206",
+            "207",
+            "208",
+            "209",
+            "210",
+            "211",
+            "212"
+          ],
+          "video_loader_node_ids": [
+            "246",
+            "247",
+            "248"
+          ],
+          "video_components_node_ids": [
+            "169",
+            "238",
+            "241"
+          ],
+          "audio_loader_node_ids": [
+            "164",
+            "244",
+            "245"
+          ]
+        },
+        "image_loader": {
+          "class_type": "LoadImage",
+          "input_name": "image",
+          "output_index": 0
+        },
+        "video_loader": {
+          "class_type": "LoadVideo",
+          "input_name": "file",
+          "keep_audio_input": "keep_audio",
+          "output_index": 0
+        },
+        "video_components": {
+          "class_type": "GetVideoComponents",
+          "input_name": "video",
+          "frames_output_index": 0,
+          "audio_output_index": 1
+        },
+        "audio_loader": {
+          "class_type": "LoadAudio",
+          "input_name": "audio",
+          "output_index": 0
+        }
+      },
+      "execution_profiles": {
+        "comfyui": {
+          "enabled": true
+        },
+        "runninghub": {
+          "enabled": true,
+          "workflow_id": "2087406299922391041"
+        }
+      }
+    }
+  },
+  "submit_backends": {
+    "comfyui": {
+      "enabled": true,
+      "url": "http://127.0.0.1:8188",
+      "input_dir": "../ComfyUI/input",
+      "output_dir": "../ComfyUI/output"
+    },
+    "runninghub": {
+      "enabled": true,
+      "base_url": "https://www.runninghub.cn",
+      "poll_seconds": 5,
+      "timeout_seconds": 7200,
+      "video_generation_concurrency_limit": 3,
+      "use_plus_instance": false,
+      "reuse_uploaded_assets": true,
+      "workflow_payload_mode": "string"
+    }
+  },
+  "fps": 50,
+  "default_video_duration": 15,
+  "reference_image_min": 0,
+  "reference_image_max": 4,
+  "background_required": true,
+  "max_important_visible_roles": 4,
+  "licon_prompt_expander_enabled": true,
+  "licon_prompt_expander_max_tokens": 2600,
+  "licon_prompt_node": "5",
+  "licon_totalframe_node": "50",
+  "licon_reference_nodes": [
+    "80",
+    "81",
+    "82",
+    "83"
+  ],
+  "licon_background_node": "84",
+  "licon_msr_node": "28",
+  "licon_output_prefix": "LTX-2/MSR_direct",
+  "ui_theme": "cursor"
+}

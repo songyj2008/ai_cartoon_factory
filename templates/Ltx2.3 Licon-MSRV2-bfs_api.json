@@ -1,0 +1,488 @@
+{
+  "3": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors"
+    },
+    "class_type": "LowVRAMCheckpointLoader",
+    "_meta": {
+      "title": "🅛🅣🅧 Low VRAM Checkpoint Loader"
+    }
+  },
+  "5": {
+    "inputs": {
+      "text": "Describe the video to generate. The application replaces this prompt before submission.",
+      "clip": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "worst quality, blurry, jittery, distorted, inconsistent appearance，",
+      "clip": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "7": {
+    "inputs": {
+      "frame_rate": 50,
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXV条件"
+    }
+  },
+  "8": {
+    "inputs": {
+      "width": [
+        "43",
+        0
+      ],
+      "height": [
+        "44",
+        0
+      ],
+      "length": [
+        "50",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "空Latent视频（LTXV）"
+    }
+  },
+  "9": {
+    "inputs": {
+      "frame_idx": 0,
+      "strength": 1,
+      "latent_downscale_factor": 1,
+      "crop": "center",
+      "use_tiled_encode": false,
+      "tile_size": 256,
+      "tile_overlap": 64,
+      "positive": [
+        "7",
+        0
+      ],
+      "negative": [
+        "7",
+        1
+      ],
+      "vae": [
+        "3",
+        2
+      ],
+      "latent": [
+        "8",
+        0
+      ],
+      "image": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "LTXAddVideoICLoRAGuide",
+    "_meta": {
+      "title": "🅛🅣🅧 Add Video IC-LoRA Guide"
+    }
+  },
+  "10": {
+    "inputs": {
+      "lora_name": "LTX-2.3-Licon-MSR-V2.safetensors",
+      "strength_model": 1,
+      "model": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "LTXICLoRALoaderModelOnly",
+    "_meta": {
+      "title": "🅛🅣🅧 IC-LoRA Loader Model Only"
+    }
+  },
+  "13": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "15": {
+    "inputs": {
+      "noise_seed": 86279001573959
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "16": {
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "37",
+        0
+      ],
+      "sampler": [
+        "13",
+        0
+      ],
+      "sigmas": [
+        "27",
+        0
+      ],
+      "latent_image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "17": {
+    "inputs": {
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ],
+      "latent": [
+        "24",
+        0
+      ]
+    },
+    "class_type": "LTXVCropGuides",
+    "_meta": {
+      "title": "LTXV裁剪指导"
+    }
+  },
+  "19": {
+    "inputs": {
+      "fps": 50,
+      "images": [
+        "38",
+        0
+      ],
+      "audio": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "创建视频"
+    }
+  },
+  "20": {
+    "inputs": {
+      "filename_prefix": "LTX-2/MSR_verify_iclora_guide",
+      "format": "auto",
+      "codec": "auto",
+      "video-preview": "",
+      "video": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  },
+  "22": {
+    "inputs": {
+      "frames_number": [
+        "50",
+        0
+      ],
+      "frame_rate": 50,
+      "batch_size": 1,
+      "audio_vae": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": {
+      "title": "LTXV 空音频潜空间"
+    }
+  },
+  "23": {
+    "inputs": {
+      "video_latent": [
+        "9",
+        2
+      ],
+      "audio_latent": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "24": {
+    "inputs": {
+      "av_latent": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXV分离音视频潜空间"
+    }
+  },
+  "25": {
+    "inputs": {
+      "samples": [
+        "24",
+        1
+      ],
+      "audio_vae": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV音频VAE解码"
+    }
+  },
+  "26": {
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it.safetensors",
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors",
+      "device": "default"
+    },
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": {
+      "title": "LTXV音频文本编码器加载器"
+    }
+  },
+  "27": {
+    "inputs": {
+      "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "自定义Sigmas"
+    }
+  },
+  "28": {
+    "inputs": {
+      "1": [
+        "80",
+        0
+      ],
+      "2": [
+        "81",
+        0
+      ],
+      "3": [
+        "82",
+        0
+      ],
+      "4": [
+        "83",
+        0
+      ],
+      "width": [
+        "43",
+        0
+      ],
+      "height": [
+        "44",
+        0
+      ],
+      "frame_count": 41,
+      "background": [
+        "84",
+        0
+      ]
+    },
+    "class_type": "LiconMSR",
+    "_meta": {
+      "title": "Licon MSR"
+    }
+  },
+  "37": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "91",
+        0
+      ],
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG引导器"
+    }
+  },
+  "38": {
+    "inputs": {
+      "samples": [
+        "17",
+        2
+      ],
+      "vae": [
+        "3",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "43": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "44": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "50": {
+    "inputs": {
+      "value": 750
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "totalframe"
+    }
+  },
+  "80": {
+    "inputs": {
+      "file_name": "reference_1.png"
+    },
+    "class_type": "LoadImageFromFile",
+    "_meta": {
+      "title": "loadimage1"
+    }
+  },
+  "81": {
+    "inputs": {
+      "file_name": "reference_2.png"
+    },
+    "class_type": "LoadImageFromFile",
+    "_meta": {
+      "title": "loadimage2"
+    }
+  },
+  "82": {
+    "inputs": {
+      "file_name": "reference_3.png"
+    },
+    "class_type": "LoadImageFromFile",
+    "_meta": {
+      "title": "loadimage3"
+    }
+  },
+  "83": {
+    "inputs": {
+      "file_name": "reference_4.png"
+    },
+    "class_type": "LoadImageFromFile",
+    "_meta": {
+      "title": "loadimage4"
+    }
+  },
+  "84": {
+    "inputs": {
+      "file_name": "background.png"
+    },
+    "class_type": "LoadImageFromFile",
+    "_meta": {
+      "title": "loadimagebg"
+    }
+  },
+  "86": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors"
+    },
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": {
+      "title": "LTXV音频VAE加载器"
+    }
+  },
+  "90": {
+    "inputs": {
+      "lora_name": "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "strength_model": 0.30000000000000004,
+      "model": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "LTXICLoRALoaderModelOnly",
+    "_meta": {
+      "title": "LTXIC LoRA Loader Model Only (Ingredients)"
+    }
+  },
+  "91": {
+    "inputs": {
+      "lora_name": "Best_FaceID_CharacterSheet_v1.0_LoRA.safetensors",
+      "strength_model": 1.0000000000000002,
+      "model": [
+        "90",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA (Best FaceID CharacterSheet)"
+    }
+  }
+}

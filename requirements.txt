@@ -1,0 +1,6 @@
+gradio==6.15.0
+python-multipart==0.0.29
+openai==2.38.0
+requests==2.34.2
+pydantic==2.13.4
+Pillow==12.2.0
