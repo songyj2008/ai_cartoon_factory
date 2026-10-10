@@ -53,6 +53,13 @@ def project_name():
 
 
 def ui_run_config_path(project=None):
+    from services.text_jobs import current
+    job = current()
+    if job and project in (None, job['project']):
+        return Path(job['work']) / 'project_meta' / UI_RUN_CONFIG_NAME
+    from services.context import get_current_episode_name, get_project_dir
+    if project is None and get_current_episode_name():
+        return get_project_dir() / 'project_meta' / UI_RUN_CONFIG_NAME
     name = str(project or project_name() or "current").strip() or "current"
     return BASE_DIR / "projects" / name / UI_RUN_CONFIG_NAME
 

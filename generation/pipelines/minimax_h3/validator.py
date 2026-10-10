@@ -63,9 +63,8 @@ class H3Ref2VAValidator:
     video_limit = 3
     audio_limit = 3
     total_asset_limit = 12
-    media_duration_min_sec = 2
-    media_duration_max_sec = 15
-    media_total_duration_max_sec = 15
+    video_duration_min_sec = 2
+    video_duration_max_sec = 15
     image_size_limit_bytes = 30 * 1024 * 1024
     video_size_limit_bytes = 50 * 1024 * 1024
     audio_size_limit_bytes = 15 * 1024 * 1024
@@ -119,8 +118,7 @@ class H3Ref2VAValidator:
                 require_media_metadata=require_media_metadata,
             )
 
-        self._validate_media_total(report, videos, "video")
-        self._validate_media_total(report, audios, "audio")
+        self._validate_video_duration_total(report, videos)
         if config.prompt_override is not None:
             self.validate_prompt(config.prompt_override, report=report)
         return report
@@ -245,7 +243,7 @@ class H3Ref2VAValidator:
         if size_bytes is not None and size_bytes > max_size:
             report.add_error("asset_too_large", f"{asset.type.value} exceeds H3 per-file size limit", asset.asset_id)
         self._validate_dimensions(report, asset, require_media_metadata=require_media_metadata)
-        if asset.type in {H3AssetType.VIDEO, H3AssetType.AUDIO}:
+        if asset.type is H3AssetType.VIDEO:
             self._validate_reference_duration(report, asset, require_media_metadata=require_media_metadata)
 
     def _validate_dimensions(self, report: H3ValidationReport, asset: H3ReferenceAsset, *, require_media_metadata: bool) -> None:
@@ -279,27 +277,26 @@ class H3Ref2VAValidator:
             else:
                 report.add_warning("unknown_duration", "reference media duration has not been probed", asset.asset_id)
             return
-        if duration < self.media_duration_min_sec or duration > self.media_duration_max_sec:
+        if duration < self.video_duration_min_sec or duration > self.video_duration_max_sec:
             report.add_error(
                 "reference_duration_out_of_range",
-                f"H3 reference {asset.type.value} duration must be between {self.media_duration_min_sec} and {self.media_duration_max_sec} seconds",
+                f"H3 reference video duration must be between {self.video_duration_min_sec} and {self.video_duration_max_sec} seconds",
                 asset.asset_id,
             )
 
-    def _validate_media_total(
+    def _validate_video_duration_total(
         self,
         report: H3ValidationReport,
         assets: tuple[H3ReferenceAsset, ...],
-        media_name: str,
     ) -> None:
         durations = [asset.duration_sec for asset in assets]
         if not assets or any(value is None for value in durations):
             return
         total = sum(float(value or 0) for value in durations)
-        if total > self.media_total_duration_max_sec:
+        if total > self.duration_max_sec:
             report.add_error(
-                f"{media_name}_duration_total_out_of_range",
-                f"H3 total reference {media_name} duration must be at most {self.media_total_duration_max_sec} seconds",
+                "video_duration_total_out_of_range",
+                f"H3 total reference video duration must be at most {self.duration_max_sec} seconds",
             )
 
 

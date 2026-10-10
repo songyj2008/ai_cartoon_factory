@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "视频提示词修正助手",
+  "version": "0.4.30",
+  "description": "自动处理已登录网页中的 LLM 文字任务与豆包视频生成任务，并将结果回传本机项目。",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "sidePanel", "scripting", "alarms", "offscreen", "debugger", "downloads"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.deepseek.com/*", "https://*.doubao.com/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "action": {"default_title": "打开视频提示词修正助手"},
+  "side_panel": {"default_path": "panel.html"},
+  "background": {"service_worker": "worker.js"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'"}
+}

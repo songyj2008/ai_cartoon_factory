@@ -1,0 +1,8 @@
+[
+  {
+    "id": "doubao_web",
+    "url": "https://www.doubao.com/chat/",
+    "hostname": "doubao.com",
+    "script": "video/doubao.js"
+  }
+]

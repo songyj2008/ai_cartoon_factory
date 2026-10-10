@@ -35,3 +35,17 @@ dist/
 .vscode/
 .idea/
 NUL
+
+# Media, local state and packaged artifacts
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.svg
+*.zip
+*.sqlite3*
+*.pptx
+*.pdf
+.local/
+config.local.json

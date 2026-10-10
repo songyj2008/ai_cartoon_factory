@@ -2,6 +2,87 @@
 
 APP_JS = r"""
 window.AICF = window.AICF || {};
+window.AICF.bindProjectAssetCardSelection = function() {
+    if (window.__AICF_PROJECT_ASSET_SELECTION_BOUND__) return;
+    window.__AICF_PROJECT_ASSET_SELECTION_BOUND__ = true;
+    var previewDialog = document.createElement('dialog');
+    previewDialog.className = 'aicf-asset-image-preview';
+    previewDialog.setAttribute('aria-label', '素材图片放大预览');
+    previewDialog.innerHTML = '<button type="button" class="aicf-asset-preview-close" aria-label="关闭图片预览">×</button><img alt="素材图片"><p></p>';
+    document.body.appendChild(previewDialog);
+    var previewTrigger = null;
+    var closePreview = function() { previewDialog.close(); };
+    previewDialog.querySelector('button').addEventListener('click', closePreview);
+    previewDialog.addEventListener('click', function(event) { if(event.target === previewDialog) closePreview(); });
+    previewDialog.addEventListener('close', function() {
+        previewDialog.querySelector('img').removeAttribute('src');
+        if(previewTrigger && previewTrigger.isConnected) previewTrigger.focus();
+    });
+    var openPreview = function(control) {
+        var card = control.closest('.thumbnail-item');
+        var image = card && card.querySelector('img');
+        if(!image) return;
+        previewTrigger = control;
+        var caption = card.querySelector('.caption, figcaption');
+        previewDialog.querySelector('img').src = image.currentSrc || image.src;
+        previewDialog.querySelector('img').alt = image.alt || '素材图片';
+        previewDialog.querySelector('p').textContent = caption ? caption.textContent : image.alt || '';
+        previewDialog.showModal();
+    };
+    var decoratePreviews = function() {
+        document.querySelectorAll('#project_assets_page .project-assets-gallery .thumbnail-item').forEach(function(card) {
+            if(card.querySelector('.aicf-asset-preview-trigger')) return;
+            // Gallery cards are buttons; use an accessible span to avoid nested buttons.
+            var control = document.createElement('span');
+            control.className = 'aicf-asset-preview-trigger';
+            control.setAttribute('role', 'button'); control.tabIndex = 0;
+            control.setAttribute('aria-label', '放大预览图片'); control.title = '放大预览';
+            control.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            card.appendChild(control);
+        });
+    };
+    new MutationObserver(decoratePreviews).observe(document.body, {childList:true, subtree:true});
+    decoratePreviews();
+    document.addEventListener('keydown', function(event) {
+        var control = event.target.closest && event.target.closest('.aicf-asset-preview-trigger');
+        if(control && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault(); event.stopImmediatePropagation(); openPreview(control);
+        }
+    }, true);
+    var clearSelection = function() {
+        document.querySelectorAll('#project_assets_page .project-assets-gallery .thumbnail-item.aicf-project-asset-selected').forEach(function(card) {
+            card.classList.remove('aicf-project-asset-selected');
+            card.style.removeProperty('outline');
+            card.style.removeProperty('outline-offset');
+        });
+    };
+    document.addEventListener('click', function(event) {
+        var target = event.target;
+        if (!target || !target.closest) return;
+        var previewControl = target.closest('.aicf-asset-preview-trigger');
+        if(previewControl) {
+            event.preventDefault(); event.stopImmediatePropagation(); openPreview(previewControl); return;
+        }
+        if (target.closest('#project_assets_project, #project_assets_open_btn, #close_project_assets_btn, #project_assets_save_owners_btn, #project_assets_unbind_btn')) {
+            clearSelection();
+            return;
+        }
+        var card = target.closest('#project_assets_page .project-assets-gallery .thumbnail-item');
+        if (!card) return;
+        var selected = card.classList.toggle('aicf-project-asset-selected');
+        if (selected) {
+            card.style.setProperty('outline', '3px solid var(--success)', 'important');
+            card.style.setProperty('outline-offset', '-3px', 'important');
+        } else {
+            card.style.removeProperty('outline');
+            card.style.removeProperty('outline-offset');
+        }
+    }, true);
+    document.addEventListener('change', function(event) {
+        var target = event.target;
+        if (target && target.closest && target.closest('#project_assets_project')) clearSelection();
+    }, true);
+};
 window.toggleDevDrawer = function() {
     var overlay = document.getElementById('dev-overlay');
     var drawer = document.getElementById('settings-panel') || document.getElementById('dev-drawer');
@@ -21,6 +102,7 @@ window.switchDevTab = function(evt, tabId) {
     }
 };
 function initAICF() {
+window.AICF.bindProjectAssetCardSelection();
 try {
     document.body.classList.toggle('minimal-mode', localStorage.getItem('ui_minimal_mode') === 'true');
 } catch (e) {}
@@ -290,7 +372,9 @@ window.AICF.refreshEpisodePicker = async function() {
         if (!response.ok) return;
         var data = await response.json();
         var current = data.current_episode || '';
-        window.AICF.setArchiveReadOnly(Boolean(data.readonly || current), current);
+        // A named episode can still be an editable draft. The server's
+        // readonly flag distinguishes archived episodes from active drafts.
+        window.AICF.setArchiveReadOnly(Boolean(data.readonly), current);
         var apiItems = Array.isArray(data.episode_items) ? data.episode_items : [];
         var episodes = Array.isArray(data.episodes) ? data.episodes : [];
         var currentItem = apiItems.find(function(item) {
@@ -693,10 +777,30 @@ window.AICF.radioValueFromEventTarget = function(target) {
     }
     return '';
 };
+window.AICF.openAssetManagement = function(open) {
+    window.__AICF_ASSET_MANAGEMENT_OPEN__ = open;
+    window.AICF.syncPageTabs();
+};
+document.addEventListener('click', function(event) {
+    var target=event.target;
+    if(!target || !target.closest) return;
+    if(target.closest('#project_assets_open_btn')) window.AICF.openAssetManagement(true);
+    if(target.closest('#close_project_assets_btn')) window.AICF.openAssetManagement(false);
+}, true);
+document.addEventListener('change', function(event) {
+    if(event.target.closest && event.target.closest('#main_page_tabs')) {
+        window.__AICF_ASSET_MANAGEMENT_OPEN__=false;
+        window.AICF.syncPageTabs();
+    }
+}, true);
 window.AICF.syncPageTabs = function() {
     var mainMap = {
         'Workbench': 'workbench',
         'Assets': 'assets',
+        '素材管理': 'assets',
+        '素材库': 'assets',
+        '创作工作台': 'workbench',
+        '设置': 'settings',
         'Settings': 'settings',
         'workbench': 'workbench',
         'assets': 'assets',
@@ -705,9 +809,10 @@ window.AICF.syncPageTabs = function() {
     var mainPage = window.AICF.readRadioValue('main_page_tabs', window.__AICF_MAIN_PAGE__ || 'workbench');
     mainPage = mainMap[mainPage] || 'workbench';
     window.__AICF_MAIN_PAGE__ = mainPage;
-    window.AICF.setPanelVisible('workbench_page', mainPage === 'workbench');
-    window.AICF.setPanelVisible('asset_library_page', mainPage === 'assets');
-    window.AICF.setPanelVisible('settings_page', mainPage === 'settings');
+    var assetsOpen=!!window.__AICF_ASSET_MANAGEMENT_OPEN__;
+    window.AICF.setPanelVisible('workbench_page', !assetsOpen && mainPage === 'workbench');
+    window.AICF.setPanelVisible('asset_library_page', assetsOpen);
+    window.AICF.setPanelVisible('settings_page', !assetsOpen && mainPage === 'settings');
 
     var settingsMap = {
         'Model': 'model',
@@ -1304,7 +1409,89 @@ window.AICF.selectUsageAttemptVideo = function(segmentIndex, taskId, button) {
     });
     return false;
 };
-window.AICF.triggerSegmentVideoRegen = function(segmentIndex, button) {
+window.AICF.mountVideoChannels = async function(segmentIndex) {
+    var modal = document.getElementById('aicf-prompt-modal');
+    if (!modal || String(modal.dataset.segmentIndex) !== String(segmentIndex)) return;
+    var channelSession = String(modal.dataset.h3Session || '');
+    var pane = modal && modal.querySelector('.aicf-review-pane');
+    if (!pane) return;
+    var old = pane.querySelector('.video-channel-options');
+    var previousChoice = old && old.querySelector('input:checked');
+    var previousChannel = previousChoice ? previousChoice.value : '';
+    if (old) old.remove();
+    var field = document.createElement('fieldset');
+    field.className = 'video-channel-options';
+    var legend = document.createElement('legend'); legend.textContent = '视频生成渠道';
+    field.appendChild(legend); pane.prepend(field);
+    var hint = document.createElement('p'); hint.textContent = '正在读取渠道…'; field.appendChild(hint);
+    try {
+        var response = await fetch('/api/video-channels/segments/' + encodeURIComponent(segmentIndex));
+        var data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.message || '无法读取视频渠道');
+        if (String(modal.dataset.segmentIndex) !== String(segmentIndex) || String(modal.dataset.h3Session || '') !== channelSession || !field.isConnected) return;
+        field._channels = data.channels || [];
+        hint.textContent = '渠道按分段自动保存，重新生成时使用已保存的渠道。';
+        field._channels.forEach(function(item) {
+            var label = document.createElement('label');
+            label.style.cssText = 'display:block;padding:8px;margin:6px 0;border:1px solid #dce2ea;border-radius:6px';
+            var input = document.createElement('input'); input.type = 'radio';
+            input.name = 'editor-video-channel'; input.value = item.id;
+            input.disabled = !item.available || !!window.AICF.archiveReadOnly;
+            input.checked = item.id === (data.selected || 'runninghub');
+            input.addEventListener('change', function() {
+                if (!input.checked) return;
+                hint.textContent = '正在保存渠道…';
+                field.disabled = true;
+                field._savePending = (async function() {
+                    const savedResponse = await fetch('/api/video-channels/segments/' + encodeURIComponent(segmentIndex), {
+                        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel_id:input.value})
+                    });
+                    const saved = await savedResponse.json();
+                    if (!savedResponse.ok || !saved.ok) throw new Error(saved.message || '渠道保存失败');
+                    data.selected = saved.selected;
+                    if(field.isConnected)hint.textContent = '渠道已保存，后续重新生成将使用此渠道。';
+                })();
+                field._savePending.catch(function(error) {
+                    if(field.isConnected) {
+                        hint.textContent = error.message;
+                        field.querySelectorAll('input').forEach(function(option) {option.checked=option.value===data.selected;});
+                    }
+                }).finally(function() {field.disabled = false;});
+            });
+            label.append(input, document.createTextNode(' ' + item.label));
+            if (item.reason) { var reason = document.createElement('small'); reason.textContent = item.reason; reason.style.display = 'block'; label.appendChild(reason); }
+            field.appendChild(label);
+        });
+    } catch (error) { hint.textContent = error.message || '无法读取视频渠道'; }
+};
+window.AICF.chooseVideoChannel = async function(segmentIndex) {
+    var modal = document.getElementById('aicf-prompt-modal');
+    var field = modal && String(modal.dataset.segmentIndex) === String(segmentIndex)
+        ? modal.querySelector('.video-channel-options') : null;
+    var selected = field && field.querySelector('input:checked:not(:disabled)');
+    if(field && field._savePending)await field._savePending;
+    if (!selected) throw new Error('请先在全屏编辑器右侧选择视频生成渠道。');
+    return (field._channels || []).find(function(item) { return item.id === selected.value; });
+};
+window.AICF.watchWebVideoTask = function(segmentIndex, taskId) {
+    if (!taskId) return;
+    const started = Date.now();
+    const check = async () => {
+        try {
+            const response = await fetch('/api/web-video/tasks/' + encodeURIComponent(taskId));
+            const result = await response.json();
+            if (response.ok && result.ok && ['complete','error','uncertain'].includes(result.task.state)) {
+                const panelResponse = await fetch('/api/video-channels/segments/' + encodeURIComponent(segmentIndex) + '/panel');
+                const panel = await panelResponse.json();
+                if (panelResponse.ok && panel.ok) window.AICF.replaceSegmentCardFromResponse(segmentIndex, panel);
+                return;
+            }
+        } catch (error) { console.warn('Video task status check failed', error); }
+        if (Date.now() - started < 45 * 60 * 1000) setTimeout(check, 5000);
+    };
+    setTimeout(check, 5000);
+};
+window.AICF.triggerSegmentVideoRegen = async function(segmentIndex, button) {
     if (window.AICF.archiveReadOnly) return false;
     if (window.AICF.syncSegmentDirectorEditors) window.AICF.syncSegmentDirectorEditors();
     var textarea = window.AICF.segmentEditorFromButton
@@ -1333,15 +1520,16 @@ window.AICF.triggerSegmentVideoRegen = function(segmentIndex, button) {
         scene_id: typeof materialData.scene_id === 'string' ? materialData.scene_id : ''
     };
     var card = textarea && textarea.closest ? textarea.closest('.group-card') : null;
-    var button = card ? card.querySelector('.primary-mini') : null;
+    button = button || (card ? card.querySelector('.primary-mini') : null);
     var oldText = button ? button.textContent : '';
+    let channel;
+    try { channel = await window.AICF.chooseVideoChannel(segmentIndex); }
+    catch (error) { alert(error.message || '无法选择视频渠道'); return false; }
+    if (!channel) return false;
+    payload.channel_id = channel.id;
     if (button) {
         button.disabled = true;
         button.textContent = 'Submitting...';
-    }
-    if (window.AICF.triggerSegmentVideoRegenViaGradio(segmentIndex, payload, button)) {
-        if (button) button.textContent = 'Submitted';
-        return false;
     }
     fetch('/api/segment/regenerate_video', {
         method: 'POST',
@@ -1354,13 +1542,10 @@ window.AICF.triggerSegmentVideoRegen = function(segmentIndex, button) {
             }
             if (button) button.textContent = 'Submitted';
             window.AICF.replaceSegmentCardFromResponse(segmentIndex, data, card, '.primary-mini');
+            if (data.web_video_task_id) window.AICF.watchWebVideoTask(segmentIndex, data.web_video_task_id);
         });
     }).catch(function(error) {
         console.error('triggerSegmentVideoRegen failed', error);
-        if (window.AICF.triggerSegmentVideoRegenViaGradio(segmentIndex, payload, button)) {
-            if (button) button.textContent = 'Submitted';
-            return;
-        }
         alert(error && error.message ? error.message : 'Regenerate video submit failed');
         if (button) {
             button.disabled = false;
@@ -1578,6 +1763,33 @@ window.AICF.segmentFromResponse = function(segmentIndex, response) {
         return segment && Number(segment.segment_index || 0) === Number(segmentIndex || 0);
     }) || null;
 };
+window.AICF.formatPromptVersion = function(info, fallbackLabel) {
+    info = info && typeof info === 'object' ? info : {};
+    var version = Number(info.version || 0);
+    var providerId = String(info.provider || fallbackLabel || '来源未记录');
+    var provider = ({deepseek:'DeepSeek',chatgpt:'ChatGPT',doubao:'豆包',api:'DeepSeek API'})[providerId] || providerId;
+    var rawTime = info.updated_at;
+    var date = rawTime ? new Date(typeof rawTime === 'number' ? rawTime * 1000 : rawTime) : null;
+    var time = date && !Number.isNaN(date.getTime()) ? date.toLocaleString('zh-CN', {hour12:false}) : '时间未记录';
+    return (version ? '第 ' + version + ' 版' : '版本未记录') + ' · ' + provider + ' · ' + time;
+};
+window.AICF.promptTextMatches = function(left, right) {
+    var normalise = function(value) { return String(value || '').trim().replace(/\r\n?/g, '\n'); };
+    return !!normalise(right) && normalise(left) === normalise(right);
+};
+window.AICF.renderH3PromptVersion = function(root, data) {
+    if (!root) return;
+    data = data && typeof data === 'object' ? data : {};
+    var node = root.querySelector('.aicf-prompt-version-meta');
+    if (!node) return;
+    var current = data.current || {};
+    var revision = data.revision || {};
+    var comparison = revision.prompt ? (data.matches ? '与最新修正版一致' : '与最新修正版不一致') : '暂无修正版可比对';
+    node.textContent = 'H3 当前：' + window.AICF.formatPromptVersion(current, 'H3') + ' · ' + comparison;
+    node.classList.toggle('is-match', !!data.matches);
+    node.classList.toggle('is-different', !!revision.prompt && !data.matches);
+    node.hidden = false;
+};
 window.AICF.updateSegmentCardState = function(segmentIndex, response) {
     var segment = window.AICF.segmentFromResponse(segmentIndex, response);
     var card = document.querySelector('.group-card[data-segment-index="' + String(segmentIndex || '') + '"]');
@@ -1604,6 +1816,25 @@ window.AICF.updateSegmentCardState = function(segmentIndex, response) {
     var task = card.querySelector('[data-segment-task] b');
     if (backend) backend.textContent = String(segment.backend || '未提交');
     if (task) task.textContent = String(segment.task_id || segment.prompt_id || '无');
+    var config = segment.generation_config && typeof segment.generation_config === 'object' ? segment.generation_config : {};
+    var job = segment.job && typeof segment.job === 'object' ? segment.job : {};
+    var currentPrompt = String(config.prompt_override || job.final_prompt || job.prompt || '');
+    var revision = config.latest_prompt_revision && typeof config.latest_prompt_revision === 'object' ? config.latest_prompt_revision : {};
+    var matches = window.AICF.promptTextMatches(currentPrompt, revision.prompt);
+    var saveBadge = card.querySelector('[data-prompt-save-status]');
+    if (saveBadge) {
+        saveBadge.classList.remove('status-success', 'status-pending');
+        saveBadge.classList.add(matches ? 'status-success' : 'status-pending');
+        saveBadge.textContent = revision.prompt ? (matches ? '提示词已保存' : '提示词未保存') : '提示词暂无修正版';
+        saveBadge.title = revision.prompt ? (matches ? 'H3 提示词与最新修正版一致' : 'H3 提示词与最新修正版不一致') : '还没有可用于比对的修正后完整提示词';
+    }
+    var versionData = {current:config.prompt_version_info || {}, revision:revision, matches:matches};
+    var versionSource = card.querySelector('.h3-prompt-version-source');
+    if (versionSource) versionSource.dataset.versionInfo = JSON.stringify(versionData);
+    var modal = document.getElementById('aicf-prompt-modal');
+    if (modal && modal.classList.contains('open') && String(modal.dataset.segmentIndex || '') === String(segmentIndex || '')) {
+        window.AICF.renderH3PromptVersion(modal, versionData);
+    }
     card.dataset.segmentStatus = status;
     return card;
 };
@@ -1630,10 +1861,8 @@ window.AICF.workflowPromptDataFromButton = function(button) {
     var directorPrompt = window.AICF.promptTextFromButton(button);
     return {
         directorPrompt: directorPrompt || '',
-        // The fullscreen editor and the card editor are two views of the
-        // same editable field: the director prompt.  Keep the compiled node-5
-        // text as metadata for saving/previewing references, but never show a
-        // different prompt in the editor after changing episodes.
+        // The card's hidden source is the canonical director prompt. Keep the
+        // compiled node-5 text as metadata for saving and reference previews.
         workflowPrompt: directorPrompt || '',
         compiledWorkflowPrompt: workflowSource ? (workflowSource.textContent || '') : (directorPrompt || ''),
         prefix: prefixSource ? (prefixSource.textContent || '') : ''
@@ -1641,7 +1870,9 @@ window.AICF.workflowPromptDataFromButton = function(button) {
 };
 window.AICF.segmentIndexFromButton = function(button) {
     var textarea = window.AICF.segmentEditorFromButton(button);
-    return textarea ? (textarea.dataset.segmentIndex || '') : '';
+    if (textarea) return textarea.dataset.segmentIndex || '';
+    var card = window.AICF.segmentCardFromButton(button);
+    return card && card.dataset ? String(card.dataset.segmentIndex || '') : '';
 };
 window.AICF.triggerSegmentPromptSaveViaGradio = function(payload) {
     var box = window.AICF.findGradioInput('segment_prompt_save_payload');
@@ -1676,6 +1907,9 @@ window.AICF.saveSegmentPrompt = async function(segmentIndex, button, overrideTex
     }
     if (materialSelection && typeof materialSelection.full_prompt === 'string') {
         payload.full_prompt = materialSelection.full_prompt;
+    }
+    if (materialSelection && materialSelection.build_workflow === false) {
+        payload.build_workflow = false;
     }
     var hasFullPrompt = typeof payload.full_prompt === 'string' && payload.full_prompt.trim();
     if (!payload.segment_index || (!payload.director_prompt.trim() && !hasFullPrompt)) {
@@ -2231,12 +2465,22 @@ window.AICF.openPromptModalFromButton = function(button) {
     var segmentCard = window.AICF.segmentCardFromButton(button);
     var modelId = segmentCard && segmentCard.dataset ? String(segmentCard.dataset.modelId || '') : '';
     var isH3 = modelId === 'minimax_h3_local_ref2va';
+    if (isH3 && segmentCard) {
+        // The H3 fullscreen button sits in the card header, outside the prompt
+        // block. Resolve its editor value from the card's canonical hidden source.
+        var h3PromptSource = segmentCard.querySelector('.h3-card-prompt-source');
+        if (h3PromptSource) {
+            promptData.directorPrompt = String(h3PromptSource.textContent || '');
+            promptData.workflowPrompt = promptData.directorPrompt;
+            promptData.compiledWorkflowPrompt = promptData.directorPrompt;
+        }
+    }
     var ov = document.getElementById('aicf-prompt-modal');
     if (!ov) {
         ov = document.createElement('div');
         ov.id = 'aicf-prompt-modal';
         ov.className = 'aicf-prompt-modal';
-        ov.innerHTML = '<div class="aicf-prompt-modal-card" role="dialog" aria-modal="true" aria-labelledby="aicf-prompt-modal-title"><div class="aicf-prompt-modal-head"><div class="aicf-prompt-modal-context"><strong id="aicf-prompt-modal-title">导演分镜全屏编辑</strong><div class="aicf-prompt-modal-segment" aria-label="当前编辑分段"><span class="aicf-prompt-modal-part">当前分段</span><span class="aicf-prompt-modal-segment-title">未命名分段</span></div></div><div class="aicf-prompt-modal-actions"><button class="aicf-prompt-modal-save" onclick="window.AICF.savePromptModal()">保存</button><button class="aicf-prompt-modal-force-save" hidden title="按页面当前图片顺序和提示词保存，并更新素材绑定" onclick="window.AICF.savePromptModal(true)">强制保存</button><button class="aicf-prompt-modal-close" aria-label="关闭" title="关闭" onclick="window.AICF.closePromptModal()">&#10005;</button></div></div><div class="aicf-prompt-modal-content"><aside class="aicf-prompt-material-panel"><div class="aicf-material-panel-title">本段参考素材</div><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>人物参考图</strong><span class="aicf-character-count">已选 0/4</span></div><div class="aicf-material-grid aicf-character-materials"></div></section><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>背景参考图</strong><span>单选</span></div><div class="aicf-material-grid aicf-background-materials"></div></section><div class="aicf-material-feedback" role="status" aria-live="polite"></div></aside><div class="aicf-prompt-editor-pane"><div class="aicf-prompt-editor-head"><label for="aicf-prompt-modal-editor">导演分镜提示词</label><small>此处与页面提示词框编辑同一内容。可从项目已选人物中最多选择 4 张参考图；保存后会同步参考绑定。</small><div class="aicf-prompt-modal-feedback" role="status" aria-live="polite"></div></div><textarea id="aicf-prompt-modal-editor" class="aicf-prompt-modal-body" spellcheck="false"></textarea></div></div></div>';
+        ov.innerHTML = '<div class="aicf-prompt-modal-card" role="dialog" aria-modal="true" aria-labelledby="aicf-prompt-modal-title"><div class="aicf-prompt-modal-head"><div class="aicf-prompt-modal-context"><strong id="aicf-prompt-modal-title">导演分镜全屏编辑</strong><div class="aicf-prompt-modal-segment" aria-label="当前编辑分段"><span class="aicf-prompt-modal-part">当前分段</span><span class="aicf-prompt-modal-segment-title">未命名分段</span></div></div><div class="aicf-prompt-modal-actions"><button class="aicf-prompt-modal-save" onclick="window.AICF.savePromptModal()">保存</button><button class="aicf-prompt-modal-replan" hidden onclick="window.AICF.replanPromptModal()">保存上下文并重新规划</button><button class="aicf-prompt-modal-force-save" hidden title="按页面当前图片顺序和提示词保存，并更新素材绑定" onclick="window.AICF.savePromptModal(true)">强制保存</button><button class="aicf-prompt-modal-close" aria-label="关闭" title="关闭" onclick="window.AICF.closePromptModal()">&#10005;</button></div></div><div class="aicf-prompt-modal-content"><aside class="aicf-prompt-material-panel"><div class="aicf-material-panel-title">本段参考素材</div><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>人物参考图</strong><span class="aicf-character-count">已选 0/4</span></div><div class="aicf-material-grid aicf-character-materials"></div></section><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>背景参考图</strong><span>单选</span></div><div class="aicf-material-grid aicf-background-materials"></div></section><div class="aicf-material-feedback" role="status" aria-live="polite"></div></aside><div class="aicf-prompt-editor-pane"><div class="aicf-prompt-source-context"><label for="aicf-prompt-source-excerpt">剧情上下文（source_excerpt）</label><small>补充理解本段所需的前因背景；镜头仍只表现当前 Beat。</small><textarea id="aicf-prompt-source-excerpt" spellcheck="false" aria-label="剧情上下文"></textarea></div><div class="aicf-prompt-editor-head"><label for="aicf-prompt-modal-editor">导演分镜提示词</label><small>仅在此处编辑本段提示词；可从项目已选人物中最多选择 4 张参考图，保存后会同步参考绑定。</small><div class="aicf-prompt-version-meta" hidden></div><div class="aicf-prompt-modal-feedback" role="status" aria-live="polite"></div></div><textarea id="aicf-prompt-modal-editor" class="aicf-prompt-modal-body" spellcheck="false"></textarea></div></div></div>';
         var modalContent = ov.querySelector('.aicf-prompt-modal-content');
         var ltxPanel = ov.querySelector('.aicf-prompt-material-panel');
         var editorPane = ov.querySelector('.aicf-prompt-editor-pane');
@@ -2269,6 +2513,8 @@ window.AICF.openPromptModalFromButton = function(button) {
     ov.dataset.segmentIndex = segmentIndex || '';
     ov.dataset.modelId = modelId;
     ov.dataset.h3Session = String(ov._h3Session);
+    delete ov.dataset.promptRevisionPrompt;
+    delete ov.dataset.promptProvenance;
     window.AICF.updatePromptModalSegmentContext(ov, button);
     var modalTitle = ov.querySelector('#aicf-prompt-modal-title');
     var promptLabel = ov.querySelector('.aicf-prompt-editor-head > label');
@@ -2298,6 +2544,12 @@ window.AICF.openPromptModalFromButton = function(button) {
             ? '左侧配置图片、视频和音频参考；右侧编辑最终提交给 H3 的提示词。保存后会重新编译本段工作流。'
             : '此处与页面提示词框编辑同一内容。可从项目已选人物中最多选择 4 张参考图；保存后会同步参考绑定。';
     }
+    var promptVersionSource = segmentCard && segmentCard.querySelector('.h3-prompt-version-source');
+    var promptVersionData = {};
+    try { promptVersionData = JSON.parse(promptVersionSource && promptVersionSource.dataset.versionInfo || '{}'); } catch (error) {}
+    var promptVersionMeta = ov.querySelector('.aicf-prompt-version-meta');
+    if (promptVersionMeta) promptVersionMeta.hidden = !isH3;
+    if (isH3) window.AICF.renderH3PromptVersion(ov, promptVersionData);
     var body = ov.querySelector('.aicf-prompt-modal-body');
     if (body) {
         body.value = ov._directorPrompt;
@@ -2305,8 +2557,17 @@ window.AICF.openPromptModalFromButton = function(button) {
         body.setAttribute('aria-readonly', window.AICF.archiveReadOnly ? 'true' : 'false');
         body.setAttribute('aria-busy', 'false');
     }
+    var excerpt = ov.querySelector('#aicf-prompt-source-excerpt');
+    var excerptSource = segmentCard && segmentCard.querySelector('.segment-source-excerpt-source');
+    if (excerpt) {
+        excerpt.value = excerptSource ? String(excerptSource.textContent || '') : '';
+        excerpt.dataset.savedValue = excerpt.value;
+        excerpt.readOnly = !!window.AICF.archiveReadOnly;
+    }
     var saveBtn = ov.querySelector('.aicf-prompt-modal-save');
     if (saveBtn) saveBtn.disabled = !!window.AICF.archiveReadOnly;
+    var replanBtn = ov.querySelector('.aicf-prompt-modal-replan');
+    if (replanBtn) { replanBtn.hidden = !isH3; replanBtn.disabled = !!window.AICF.archiveReadOnly; }
     var forceSaveBtn = ov.querySelector('.aicf-prompt-modal-force-save');
     if (forceSaveBtn) { forceSaveBtn.hidden = !isH3; forceSaveBtn.disabled = !!window.AICF.archiveReadOnly; }
     if (isH3) {
@@ -2323,6 +2584,8 @@ window.AICF.openPromptModalFromButton = function(button) {
         window.AICF.renderPromptModalMaterials(materialData);
     }
     ov.classList.add('open');
+    if (window.AICF.mountPromptRevision) window.AICF.mountPromptRevision(ov);
+    window.AICF.mountVideoChannels(ov.dataset.segmentIndex);
     setTimeout(function() { if (body && !window.AICF.archiveReadOnly) body.focus(); }, 30);
 };
 window.AICF.savePromptModal = async function(forceSave) {
@@ -2337,8 +2600,16 @@ window.AICF.savePromptModal = async function(forceSave) {
     var modalSession = String((ov.dataset && ov.dataset.h3Session) || '');
     var body = ov.querySelector('.aicf-prompt-modal-body');
     var directorText = body ? String(body.value || '').trim() : '';
+    try { await window.AICF.savePromptSourceExcerpt(false); }
+    catch (error) { window.AICF.setPromptModalFeedback(error.message || '保存剧情上下文失败', true); return; }
     if (!directorText) {
         window.AICF.setPromptModalFeedback('导演分镜提示词不能为空。', true);
+        return;
+    }
+    try {
+        if (ov._savePromptDuration) await ov._savePromptDuration();
+    } catch (error) {
+        window.AICF.setPromptModalFeedback(error.message || '保存时长失败', true);
         return;
     }
     if (String(ov.dataset.modelId || '') === 'minimax_h3_local_ref2va') {
@@ -2354,6 +2625,9 @@ window.AICF.savePromptModal = async function(forceSave) {
                 h3CardTextarea.value = savedDirectorText;
                 h3CardTextarea.dispatchEvent(new Event('input', {bubbles: true}));
             }
+            var h3Card = window.AICF.segmentCardFromButton(ov._sourceButton);
+            var h3PromptSource = h3Card && h3Card.querySelector('.h3-card-prompt-source');
+            if (h3PromptSource) h3PromptSource.textContent = savedDirectorText;
             window.AICF.setPromptModalFeedback(forceSave === true ? '已按页面图片顺序和提示词强制保存，素材绑定已更新' : 'H3 提示词与参考配置已保存', false);
             setTimeout(function() {
                 if (
@@ -2400,9 +2674,62 @@ window.AICF.savePromptModal = async function(forceSave) {
         window.AICF.setPromptModalFeedback(error && error.message ? error.message : '保存失败', true);
     }
 };
+window.AICF.savePromptSourceExcerpt = async function(replan) {
+    var ov = document.getElementById('aicf-prompt-modal');
+    var field = ov && ov.querySelector('#aicf-prompt-source-excerpt');
+    if (!ov || !field || window.AICF.archiveReadOnly) return null;
+    var value = String(field.value || '');
+    if (value === String(field.dataset.savedValue || '') && !replan) return null;
+    var index = Number(ov.dataset.segmentIndex || 0);
+    var response = await fetch('/api/segment/source-excerpt', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({segment_index:index, source_excerpt:value, regenerate_prompt:replan === true, editors:{story_editor:document.querySelector('#story_editor textarea')?.value ?? '', beats_editor:document.querySelector('#beats_editor textarea')?.value ?? ''}})
+    });
+    var result = await response.json().catch(function(){return {};});
+    if (!response.ok || !result.ok) throw new Error(result.message || '保存剧情上下文失败');
+    field.dataset.savedValue = value;
+    var card = window.AICF.segmentCardFromButton(ov._sourceButton);
+    var source = card && card.querySelector('.segment-source-excerpt-source');
+    var view = card && card.querySelector('.segment-source-excerpt');
+    if (source) source.textContent = value;
+    if (view) view.value = value;
+    if (result.operation_id) { window.AICF.setPromptModalFeedback(result.message, false); return result; }
+    if (replan && result.canonical_prompt) {
+        var prompt = ov.querySelector('.aicf-prompt-modal-body');
+        if (prompt) { prompt.value = result.canonical_prompt; prompt.dispatchEvent(new Event('input',{bubbles:true})); }
+        var h3SaveButton = ov.querySelector('.aicf-prompt-modal-save');
+        if (h3SaveButton && window.AICF.saveH3GenerationConfig) {
+            await window.AICF.saveH3GenerationConfig(index, h3SaveButton, ov);
+        }
+        card = window.AICF.segmentCardFromButton(ov._sourceButton) || card;
+        var cardPrompt = card && card.querySelector('.h3-prompt-override');
+        if (cardPrompt) cardPrompt.value = result.canonical_prompt;
+        var preview = card && card.querySelector('.h3-card-prompt-source, .prompt-modal-source');
+        if (preview) preview.textContent = result.canonical_prompt;
+        var summary = card && card.querySelector('.prompt-summary small');
+        if (summary) summary.textContent = result.canonical_prompt.length + ' 字符 / ' + (result.canonical_prompt ? result.canonical_prompt.split('\n').length : 0) + ' 行';
+        window.AICF.setPromptModalFeedback('剧情上下文已保存，镜头提示词已重新规划。', false);
+    }
+    return result;
+};
+window.AICF.replanPromptModal = async function() {
+    var ov = document.getElementById('aicf-prompt-modal');
+    if (!ov || window.AICF.archiveReadOnly) return;
+    var button = ov.querySelector('.aicf-prompt-modal-replan');
+    if (button) { button.disabled=true; button.textContent='正在重新规划…'; }
+    try {
+        await window.AICF.savePromptSourceExcerpt(true);
+    } catch (error) {
+        window.AICF.setPromptModalFeedback(error.message || '重新规划失败', true);
+    } finally {
+        if (button) { button.disabled=false; button.textContent='保存上下文并重新规划'; }
+    }
+};
 window.AICF.closePromptModal = function() {
     var ov = document.getElementById('aicf-prompt-modal');
     if (!ov) return;
+    if (ov._webRevisionStop) ov._webRevisionStop();
+    ov.querySelectorAll('audio').forEach(function(player) { player.pause(); });
     ov.classList.remove('open');
     if (ov._previousFocus && typeof ov._previousFocus.focus === 'function') {
         ov._previousFocus.focus();
@@ -3197,6 +3524,40 @@ window._findGradioInput = window.AICF.findGradioInput;
             replaceBtn.onclick = function() { window.AICF.beginH3ImageReplacement(root, assetId); };
             actions.appendChild(replaceBtn);
             actions.appendChild(removeBtn);
+            var identity = (item.metadata || {}).identity_id;
+            if (identity) {
+                var voice = (item.metadata || {}).library_voice;
+                var alreadyBound = manifest.some(function(a) {
+                    return a.type === 'audio' && (a.metadata || {}).identity_id === identity;
+                });
+                var voiceBtn = document.createElement('button');
+                voiceBtn.type = 'button'; voiceBtn.className = 'card-regen-btn action-utility';
+                voiceBtn.textContent = alreadyBound ? '音色已添加' : voice ? '添加参考音色' : '未设置参考音色';
+                voiceBtn.disabled = !!window.AICF.archiveReadOnly || alreadyBound || !voice;
+                voiceBtn.setAttribute('aria-label', String(item.label || item.role || '') + ' ' + voiceBtn.textContent);
+                voiceBtn.onclick = function() {
+                    var m = _h3Manifest(root);
+                    if (m.some(function(a) { return a.type === 'audio' && (a.metadata || {}).identity_id === identity; })) return;
+                    if (m.filter(function(a) { return a.type === 'audio'; }).length >= 3 || m.length >= 12) {
+                        _h3Status(root, '参考音频最多 3 个，参考文件合计最多 12 个，请先移除一项。', true);
+                        return;
+                    }
+                    m.push({asset_id: 'voice_' + identity, type: 'audio', path: voice.path,
+                        label: String(item.label || item.role || '') + '参考音色',
+                        role: '仅用于' + String(item.label || item.role || '') + '的音色参考，台词使用当前剧情',
+                        source: 'character_library', metadata: {identity_id: identity,
+                            role_id: (item.metadata || {}).role_id, binding_source: 'manual_character_voice',
+                            voice_only: true, duration_sec: voice.duration_sec}});
+                    var source = root.querySelector('.h3-asset-list');
+                    if (source) source.dataset.manifest = JSON.stringify(m);
+                    window.AICF.renderH3SelectedPreview(root);
+                    window.AICF.renderH3AssetRows(root);
+                    window.AICF.refreshH3AssetCount(root);
+                    _h3Status(root, '已添加人物参考音色，正在自动保存。', false);
+                    _scheduleH3ConfigAutosave(root);
+                };
+                actions.appendChild(voiceBtn);
+            }
             li.appendChild(actions);
             list.appendChild(li);
         });
@@ -3233,6 +3594,65 @@ window._findGradioInput = window.AICF.findGradioInput;
             role.addEventListener('change', function() { window.AICF.setH3AssetRole(segmentIndex, role); });
             row.appendChild(name);
             row.appendChild(role);
+            if (itemType === 'audio') {
+                var player = document.createElement('audio');
+                player.controls = true; player.preload = 'none';
+                player.style.width = '100%'; player.style.minWidth = '0';
+                player.src = '/gradio_api/file=' + String(item.path || '').replace(/\\/g, '/');
+                player.setAttribute('aria-label', '试听 ' + String(item.label || '参考音频'));
+                row.appendChild(player);
+                var detail = document.createElement('small');
+                detail.textContent = ((item.metadata || {}).binding_source === 'character_voice' ? '人物素材库自动带入' : '手动上传') + ' · ' + String((item.metadata || {}).duration_sec || '?') + ' 秒';
+                row.appendChild(detail);
+                if ((item.metadata || {}).binding_source !== 'character_voice') {
+                    var owner = document.createElement('select');
+                    owner.setAttribute('aria-label', '音频绑定人物');
+                    owner.add(new Option('通用音频参考（不绑定人物）', ''));
+                    var seen = new Set();
+                    manifest.forEach(function(image) {
+                        var identity = (image.metadata || {}).identity_id;
+                        if (image.type === 'image' && identity && !seen.has(identity)) {
+                            seen.add(identity); owner.add(new Option(image.label || image.role || identity, identity));
+                        }
+                    });
+                    owner.value = (item.metadata || {}).identity_id || '';
+                    owner.disabled = !!window.AICF.archiveReadOnly;
+                    owner.addEventListener('change', function() {
+                        item.metadata = Object.assign({}, item.metadata || {});
+                        if (owner.value) {
+                            item.metadata.identity_id = owner.value; item.metadata.voice_only = true;
+                        } else {
+                            delete item.metadata.identity_id; delete item.metadata.voice_only;
+                        }
+                        source.dataset.manifest = JSON.stringify(manifest);
+                        _scheduleH3ConfigAutosave(_h3EditorRoot(root));
+                    });
+                    row.appendChild(owner);
+                }
+            }
+            var imageIdentity = (item.metadata || {}).identity_id;
+            var hasCharacterVoice = imageIdentity && manifest.some(function(asset) {
+                var metadata = asset && asset.metadata || {};
+                return String(asset && asset.type || '').toLowerCase() === 'audio' &&
+                    String(metadata.identity_id || '') === String(imageIdentity) &&
+                    metadata.binding_source === 'character_voice';
+            });
+            if (itemType === 'image' && imageIdentity && hasCharacterVoice) {
+                var voiceLabel = document.createElement('label');
+                var voiceEnabled = document.createElement('input');
+                voiceEnabled.type = 'checkbox'; voiceEnabled.checked = !(item.metadata || {}).voice_disabled;
+                voiceEnabled.disabled = !!window.AICF.archiveReadOnly;
+                voiceEnabled.addEventListener('change', function() {
+                    manifest.forEach(function(asset) {
+                        if (asset.type === 'image' && (asset.metadata || {}).identity_id === item.metadata.identity_id)
+                            asset.metadata = Object.assign({}, asset.metadata, {voice_disabled: !voiceEnabled.checked});
+                    });
+                    source.dataset.manifest = JSON.stringify(manifest);
+                    _scheduleH3ConfigAutosave(_h3EditorRoot(root));
+                });
+                voiceLabel.appendChild(voiceEnabled); voiceLabel.appendChild(document.createTextNode('自动使用人物参考音色'));
+                row.appendChild(voiceLabel);
+            }
             if (itemType === 'video') {
                 var audioLabel = document.createElement('label');
                 audioLabel.className = 'h3-video-audio-toggle';
@@ -3528,6 +3948,12 @@ window._findGradioInput = window.AICF.findGradioInput;
             return String(item && (item.id || item.asset_id) || '') === assetId;
         });
         var removedItem = removedIndex >= 0 ? originalManifest[removedIndex] : {};
+        if ((removedItem.metadata || {}).binding_source === 'character_voice') {
+            originalManifest.forEach(function(asset) {
+                if (asset.type === 'image' && (asset.metadata || {}).identity_id === removedItem.metadata.identity_id)
+                    asset.metadata = Object.assign({}, asset.metadata, {voice_disabled: true});
+            });
+        }
         var removedPictureIndex = originalManifest.slice(0, Math.max(0, removedIndex + 1)).filter(function(item) {
             return String(item && item.type || '').toLowerCase() === 'image';
         }).length;
@@ -3612,7 +4038,10 @@ window._findGradioInput = window.AICF.findGradioInput;
         try {
             var manifest = _h3Manifest(root);
             var promptField = root.querySelector('.h3-prompt-override, .aicf-prompt-modal-body');
-            var submittedPrompt = promptField ? String(promptField.value || '') : '';
+            var promptSource = !promptField ? root.querySelector('.h3-card-prompt-source') : null;
+            var submittedPrompt = promptField
+                ? String(promptField.value || '')
+                : String(promptSource && promptSource.textContent || '');
             var inputs = root.querySelectorAll('.h3-asset-input');
             for (var index = 0; index < inputs.length; index += 1) {
                 var input = inputs[index];
@@ -3637,6 +4066,10 @@ window._findGradioInput = window.AICF.findGradioInput;
                     generation_mode: 'ref2va',
                     asset_manifest: manifest,
                     prompt_override: submittedPrompt,
+                    prompt_provenance: (function() {
+                        if (!root.dataset || !root.dataset.promptProvenance || !window.AICF.promptTextMatches(submittedPrompt, root.dataset.promptRevisionPrompt)) return null;
+                        try { return JSON.parse(root.dataset.promptProvenance); } catch (error) { return null; }
+                    })(),
                     force_save: forceSave === true
                 })
             });
@@ -3667,8 +4100,15 @@ window._findGradioInput = window.AICF.findGradioInput;
             if (promptSource) promptSource.textContent = canonicalPrompt;
             if (promptField) promptField.value = canonicalPrompt;
             if (cardPrompt && cardPrompt !== promptField) cardPrompt.value = canonicalPrompt;
+            if (root.dataset) {
+                delete root.dataset.promptRevisionPrompt;
+                delete root.dataset.promptProvenance;
+            }
             window.AICF.refreshH3AssetCount(root);
             _h3Status(root, forceSave === true ? '已按页面图片顺序和提示词强制保存，素材绑定已更新。' : 'H3 素材、主体定义与参考关系已同步保存。', false);
+            if (root.classList.contains('aicf-prompt-modal')) {
+                await window.AICF.mountVideoChannels(segmentIndex);
+            }
             return response;
         } catch (error) {
             _h3Status(root, error && error.message ? error.message : '保存 H3 配置失败', true);
@@ -3690,6 +4130,9 @@ window._findGradioInput = window.AICF.findGradioInput;
                 ? root.querySelector('.aicf-prompt-modal-save')
                 : card ? card.querySelector('.h3-prompt-save') : null;
             await window.AICF.saveH3GenerationConfig(segmentIndex, saveButton, root);
+            var channel = await window.AICF.chooseVideoChannel(segmentIndex);
+            if (!channel) { if (button) {button.disabled = false; button.textContent = originalText;} return false; }
+            if (channel.uses_workflow) {
             var validation = await _requestJson('/api/segment/validate', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -3698,13 +4141,15 @@ window._findGradioInput = window.AICF.findGradioInput;
             if (validation.errors && validation.errors.length) {
                 throw new Error(_validationMessage(validation.errors));
             }
+            }
             if (button) button.textContent = '提交中…';
             var submission = await _requestJson('/api/segment/regenerate_video', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({segment_index: Number(segmentIndex)})
+                body: JSON.stringify({segment_index: Number(segmentIndex), channel_id: channel.id})
             });
             window.AICF.replaceSegmentCardFromResponse(segmentIndex, submission, card, '.primary-mini');
+            if (submission.web_video_task_id) window.AICF.watchWebVideoTask(segmentIndex, submission.web_video_task_id);
         } catch (error) {
             _h3Status(root, error && error.message ? error.message : 'H3 重新生成失败', true);
             if (button) { button.disabled = false; button.textContent = originalText || '验证并重新生成'; }
@@ -3717,4 +4162,9 @@ window._findGradioInput = window.AICF.findGradioInput;
 initAICF();
 """
 
+from ui.web_llm_ui import WEB_LLM_JS
+
+APP_JS += WEB_LLM_JS
+from ui.text_jobs_ui import PANEL_JS
+APP_JS += PANEL_JS
 APP_JS_FUNCTION = APP_JS

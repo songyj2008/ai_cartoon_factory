@@ -131,9 +131,9 @@ def _record_runninghub_result(segment: dict[str, Any], result: dict[str, Any]) -
     )
 
 
-def _video_submit_concurrency_limit() -> int:
+def _video_submit_concurrency_limit(backend: str | None = None) -> int:
     """Return the safe submission width for the configured backend."""
-    backend = str(CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
+    backend = str(backend or CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
     return GenerationScheduler().concurrency_limit(LTX_LICON_MODEL_ID, backend)
 
 
@@ -585,7 +585,8 @@ def delete_runninghub_attempt_video(segment_index: int, task_id: str) -> dict[st
     target = next((item for item in segments if int(item.get("segment_index") or 0) == idx), None)
     if not target:
         raise ValueError(f"segment {idx} not found in video_jobs.json")
-    attempts = target.get("runninghub_attempts") if isinstance(target.get("runninghub_attempts"), list) else []
+    from generation.video_history import video_attempts
+    attempts = video_attempts(target)
     attempt = next(
         (item for item in attempts if isinstance(item, dict) and str(item.get("task_id") or "").strip() == normalized_task_id),
         None,
@@ -680,7 +681,8 @@ def select_runninghub_attempt_video(segment_index: int, task_id: str) -> dict[st
     target = next((item for item in segments if int(item.get("segment_index") or 0) == idx), None)
     if not target:
         raise ValueError(f"segment {idx} not found in video_jobs.json")
-    attempts = target.get("runninghub_attempts") if isinstance(target.get("runninghub_attempts"), list) else []
+    from generation.video_history import video_attempts
+    attempts = video_attempts(target)
     attempt = next(
         (item for item in attempts if isinstance(item, dict) and str(item.get("task_id") or "").strip() == normalized_task_id),
         None,
@@ -732,6 +734,7 @@ def save_segment_director_prompt(
     reference_image_ids: dict[str, str] | None = None,
     scene_id: str | None = None,
     full_prompt_override: str | None = None,
+    build_workflow: bool = True,
 ) -> dict[str, Any]:
     """Persist one edited director prompt to video_jobs.json and its workflow JSON."""
     idx = int(segment_index or 0)
@@ -754,9 +757,10 @@ def save_segment_director_prompt(
     if not target:
         raise ValueError(f"segment {idx} not found in video_jobs.json")
 
-    if str(target.get("status") or "").strip().lower() == "running" and _active_task_id(target):
+    if (str(target.get("status") or "").strip().lower() in {"queued", "running", "pending"}
+            and (target.get("task_id") or _active_task_id(target))):
         part_id = str(target.get("part_id") or f"part_{idx:03d}")
-        raise RuntimeError(f"{part_id} 正在 RunningHub 生成中，请等待完成后再重新生成")
+        raise RuntimeError(f"{part_id} 正在生成中，请等待完成后再重新生成")
 
     job = target.get("job") if isinstance(target.get("job"), dict) else {}
     old_video_path = (
@@ -832,7 +836,7 @@ def save_segment_director_prompt(
         submit=False,
         part_id=part_id,
         wait=False,
-    )
+    ) if build_workflow else {}
 
     target["workflow_path"] = result.get("workflow_path") or target.get("workflow_path") or ""
     target["backend"] = result.get("backend", "")
@@ -921,7 +925,7 @@ def save_segment_director_prompts_batch(edits: list[dict[str, Any]]) -> dict[str
 
 
 @_serialize_video_jobs
-def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, merge_after: bool = False, wait: bool = True) -> dict[str, Any]:
+def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, merge_after: bool = False, wait: bool = True, backend: str | None = None) -> dict[str, Any]:
     """Submit existing saved segment workflows without regenerating prompts from beats."""
     payload = load_video_jobs()
     segments = [item for item in payload.get("segments") or [] if isinstance(item, dict)]
@@ -929,8 +933,8 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
         raise ValueError("video_jobs.json 为空，请先点击生成分段提示词")
 
     selected = set(int(x) for x in segment_indices) if segment_indices else None
-    concurrency_limit = _video_submit_concurrency_limit()
-    backend = str(CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
+    backend = str(backend or CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
+    concurrency_limit = _video_submit_concurrency_limit(backend)
     wait_for_result = bool(wait) and concurrency_limit == 1
     log(f"[LICON_MSR] submit saved workflows selected={sorted(selected) if selected else 'all'}", "STEP")
     log(f"[LICON_MSR] video submit concurrency={concurrency_limit} wait={wait_for_result}", "STEP")
@@ -1041,6 +1045,7 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
             submit=True,
             part_id=item["part_id"],
             wait=wait_for_result,
+            backend=backend,
         )
 
     failures: list[str] = []
@@ -1128,6 +1133,7 @@ def dispatch_queued_runninghub_segments() -> dict[str, Any] | None:
         for segment in payload.get("segments") or []
         if isinstance(segment, dict)
         and int(segment.get("segment_index") or 0) > 0
+        and str(segment.get("backend") or "").strip().lower() == "runninghub"
         and (
             str(segment.get("status") or "").strip().lower() == "queued"
             or (
@@ -1150,4 +1156,7 @@ def dispatch_queued_runninghub_segments() -> dict[str, Any] | None:
     log(f"[generation] dispatch local RunningHub queue: {sorted(selected)}", "STEP")
     from generation.service import get_generation_service
 
-    return get_generation_service().submit_saved_segments(selected, merge_after=False, wait=False)
+    return get_generation_service()._submit_saved_direct(
+        selected, merge_after=False, wait=False,
+        backend="runninghub", expected_backend="runninghub",
+    )

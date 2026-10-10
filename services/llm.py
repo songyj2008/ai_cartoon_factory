@@ -354,7 +354,13 @@ def _log_usage(label, details):
         )
 
 
-def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型"):
+def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型", provider_override="inherit"):
+    from services.web_llm_bridge import entry_for_label, routes_for, wait_for_llm
+    entry = entry_for_label(label)
+    providers = routes_for(entry, provider_override)
+    if providers != ["api"]:
+        return wait_for_llm(system_prompt, user_prompt, kind="json", entry=entry,
+                            provider=providers if len(providers)>1 else providers[0],call_hint=label)
     model_name = CONFIG.get("deepseek_model", "deepseek-v4-flash")
     temperature = float(CONFIG.get("temperature", 0.1))
     max_tokens = max(int(max_tokens or 0), 3000)
@@ -400,7 +406,13 @@ def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型"):
     return data, cost
 
 
-def call_llm_text(system_prompt, user_prompt, max_tokens=2000, label="大模型"):
+def call_llm_text(system_prompt, user_prompt, max_tokens=2000, label="大模型", provider_override="inherit"):
+    from services.web_llm_bridge import entry_for_label, routes_for, wait_for_llm
+    entry = entry_for_label(label)
+    providers = routes_for(entry, provider_override)
+    if providers != ["api"]:
+        return wait_for_llm(system_prompt, user_prompt, kind="text", entry=entry,
+                            provider=providers if len(providers)>1 else providers[0],call_hint=label)
     model_name = CONFIG.get("deepseek_model", "deepseek-v4-flash")
     temperature = float(CONFIG.get("temperature", 0.1))
     log(f"{label} 调用开始")

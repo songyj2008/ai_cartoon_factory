@@ -1,6 +1,7 @@
 """Model-neutral entry points used by UI and orchestration code."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from functools import wraps
 
@@ -195,6 +196,36 @@ class GenerationService:
         *,
         merge_after: bool = False,
         wait: bool = True,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
+        if channel_id:
+            from generation.channels import get_channel
+            from workflow.video_merge import load_video_jobs
+
+            selected = {int(value) for value in segment_indices or set()}
+            if len(selected) != 1:
+                raise ValueError("选择视频渠道时必须指定一个分段")
+            index = next(iter(selected))
+            payload = normalize_video_jobs_payload(load_video_jobs())
+            segment = next((item for item in payload.get("segments") or [] if isinstance(item, dict)
+                            and int(item.get("segment_index") or 0) == index), None)
+            if segment is None:
+                raise ValueError(f"segment not found: {index}")
+            channel = get_channel(channel_id)
+            reason = channel.unavailable_reason(segment, payload)
+            if reason:
+                raise ValueError(reason)
+            return channel.submit(self, index, wait=wait)
+        return self._submit_saved_direct(segment_indices, merge_after=merge_after, wait=wait)
+
+    def _submit_saved_direct(
+        self,
+        segment_indices: set[int] | None = None,
+        *,
+        merge_after: bool = False,
+        wait: bool = True,
+        backend: str | None = None,
+        expected_backend: str | None = None,
     ) -> dict[str, Any]:
         # Dispatch each model's selected segments independently.  The LTX-only
         # release has one group; later models add a group without changing the
@@ -204,6 +235,11 @@ class GenerationService:
         payload = normalize_video_jobs_payload(load_video_jobs())
         segments = [item for item in payload.get("segments") or [] if isinstance(item, dict)]
         selected = {int(value) for value in segment_indices} if segment_indices else None
+        if expected_backend:
+            owned = {int(item.get("segment_index") or 0) for item in segments
+                     if str(item.get("backend") or "").strip().lower() == expected_backend}
+            if selected is None or not selected <= owned:
+                raise ValueError(f"queued segments no longer belong to {expected_backend}")
         groups: dict[str, set[int]] = {}
         for segment in segments:
             index = int(segment.get("segment_index") or 0)
@@ -220,7 +256,8 @@ class GenerationService:
             raise ValueError("selected segments use unregistered video models: " + ", ".join(unsupported))
 
         for model_id, indices in groups.items():
-            self._pipeline_for(model_id).submit_saved(indices, merge_after=False, wait=wait)
+            options = {"backend": backend} if backend else {}
+            self._pipeline_for(model_id).submit_saved(indices, merge_after=False, wait=wait, **options)
 
         result = normalize_video_jobs_payload(load_video_jobs())
         if merge_after:
@@ -389,6 +426,40 @@ class GenerationService:
         return {"model_id": selected_id, "ok": True, "errors": [], "warnings": []}
 
     @_serialized_submission
+    def update_segment_duration(self, segment_index: int, duration_sec) -> dict:
+        """Use the same beat-duration synchronizer as the Beats editor."""
+        import json
+        import math
+        from services.context import get_project_dir, assert_current_runtime_writable
+        from ui.project_handlers import _beat_duration_seconds, _sync_video_jobs_with_beat_durations
+
+        assert_current_runtime_writable("修改分段时长")
+        value = float(duration_sec)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("时长必须为正数")
+        duration = _beat_duration_seconds(value)
+        root = get_project_dir()
+        beats_path = root / "beats.json"
+        data = json.loads(beats_path.read_text(encoding="utf-8-sig"))
+        beats = data.get("beats") or []
+        if not 0 < segment_index <= len(beats) or not isinstance(beats[segment_index - 1], dict):
+            raise ValueError("找不到分段对应的 Beat")
+        jobs_path = root / "video_jobs.json"
+        jobs = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
+        if not any(int(s.get("segment_index") or 0) == segment_index for s in jobs.get("segments", [])):
+            raise ValueError("找不到当前分段")
+        beat = beats[segment_index - 1]
+        beat["estimated_duration_sec"] = duration
+        if "duration_sec" in beat:
+            beat["duration_sec"] = duration
+        data["total_duration_sec"] = sum(_beat_duration_seconds(b.get("estimated_duration_sec") or b.get("duration_sec") or 15) for b in beats)
+        if not data.get("target_duration_sec"):
+            data["target_duration_sec"] = data["total_duration_sec"]
+        result = _sync_video_jobs_with_beat_durations(data, jobs_path)
+        beats_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return json.loads(result)
+
+    @_serialized_submission
     def update_segment_generation_config(
         self,
         segment_index: int,
@@ -396,6 +467,7 @@ class GenerationService:
         generation_mode: str | None = None,
         asset_manifest: list[dict[str, Any]] | None = None,
         prompt_override: str | None = None,
+        prompt_provenance: dict[str, Any] | None = None,
         force_save: bool = False,
     ) -> dict[str, Any]:
         """Persist declarative per-segment model inputs, never workflow nodes.
@@ -421,7 +493,16 @@ class GenerationService:
             if asset_manifest is None or not str(prompt_override or "").strip():
                 raise ValueError("强制保存需要当前素材列表和非空提示词")
         old_config = dict(segment.get("generation_config") or {})
+        preserve_revision = (prompt_provenance or {}).get("source") == "web_revision"
         config = dict(old_config)
+        job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
+        compiled_snapshot = str(
+            segment.get("compiled_prompt_snapshot")
+            or job.get("final_prompt")
+            or job.get("prompt")
+            or ""
+        ).strip()
+        old_prompt = str(old_config.get("prompt_override") or compiled_snapshot).strip()
         if generation_mode is not None:
             config["generation_mode"] = str(generation_mode or "").strip() or "ref2va"
         config.setdefault("generation_mode", "ref2va")
@@ -429,18 +510,15 @@ class GenerationService:
             config["asset_manifest"] = self._normalise_asset_manifest(asset_manifest)
         else:
             config["asset_manifest"] = self._normalise_asset_manifest(config.get("asset_manifest"))
+        if resolved_model_id(segment, payload) == "minimax_h3_local_ref2va":
+            from services.character_voice import attach_character_voices
+            from services.context import ASSETS_DIR
+            config["asset_manifest"] = attach_character_voices(config["asset_manifest"], {}, ASSETS_DIR)
         if prompt_override is not None:
             submitted_prompt = str(prompt_override or "").strip()
-            job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
-            compiled_snapshot = str(
-                segment.get("compiled_prompt_snapshot")
-                or job.get("final_prompt")
-                or job.get("prompt")
-                or ""
-            ).strip()
             pipeline = self._pipeline_for(resolved_model_id(segment, payload))
             reconcile = getattr(pipeline, "reconcile_generation_config", None)
-            if force_save:
+            if force_save or preserve_revision:
                 # The editor's current numbering is authoritative. Persist this
                 # manifest as the baseline for subsequent ordinary saves.
                 config["prompt_override"] = submitted_prompt
@@ -451,6 +529,45 @@ class GenerationService:
                 config["prompt_override"] = submitted_prompt
             else:
                 config.pop("prompt_override", None)
+        if resolved_model_id(segment, payload) == "minimax_h3_local_ref2va":
+            from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+            from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
+            from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+            parsed = H3GenerationConfig.from_mapping(config)
+            if config.get("prompt_override") and not preserve_revision:
+                config["prompt_override"] = H3PromptCompiler._with_character_voices(config["prompt_override"], H3AssetBinder().bind(parsed))
+        if prompt_override is not None:
+            current_prompt = str(config.get("prompt_override") or compiled_snapshot).strip()
+            current_info = old_config.get("prompt_version_info") if isinstance(old_config.get("prompt_version_info"), dict) else {}
+            latest_revision = old_config.get("latest_prompt_revision") if isinstance(old_config.get("latest_prompt_revision"), dict) else {}
+            previous_version = max(
+                int(current_info.get("version") or 0),
+                int(latest_revision.get("version") or 0),
+            )
+            provenance = dict(prompt_provenance or {})
+            is_revision = provenance.get("source") == "web_revision"
+            if is_revision:
+                version = max(1, int(provenance.get("version") or previous_version + 1))
+                updated_at = provenance.get("updated_at") or datetime.now(timezone.utc).isoformat()
+                if isinstance(updated_at, (int, float)):
+                    updated_at = datetime.fromtimestamp(updated_at, tz=timezone.utc).isoformat()
+                info = {
+                    "version": version,
+                    "updated_at": updated_at,
+                    "provider": str(provenance.get("provider") or "网页 LLM"),
+                    "source": "web_revision",
+                    "task_id": str(provenance.get("task_id") or ""),
+                }
+                config["prompt_version_info"] = info
+                config["latest_prompt_revision"] = {**info, "prompt": current_prompt}
+            elif current_prompt != old_prompt or not current_info:
+                config["prompt_version_info"] = {
+                    "version": previous_version + 1,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "provider": "手动编辑",
+                    "source": "manual",
+                    "task_id": "",
+                }
         segment["generation_config"] = config
         from generation.deferred_regeneration import defer_regeneration_for_active_submission
 

@@ -10,22 +10,21 @@ from services.context import CONFIG, EPISODES_DIR, FPS, OUTPUT_DIR, get_current_
 from services.file_utils import load_json_file_silent
 from services.brand import is_brand_verified, render_brand_card
 from services.ui_run_config import load_ui_run_config
-from ui.scripts import APP_JS_FUNCTION
-from ui.styles import CSS
 from ui.progress_panel import render_workflow_progress
-from ui.project_bible_panel import project_bible_asset_choices, project_bible_selected_asset_ids, selected_project_asset_gallery
+from ui.project_bible_panel import UNASSIGNED_PROJECT_FILTER, project_asset_management_state, project_bible_asset_choices, project_bible_selected_asset_ids
 from ui.project_handlers import (
     _episode_choices,
     _project_choices,
     available_video_models,
     current_default_video_model,
     latest_final_video_path,
-    list_projects,
     secret_key_placeholders,
     workflow_model_settings,
 )
 from ui.video_feedback import ISSUE_TYPES, video_part_choices
+from ui.web_llm_ui import SETTINGS_HTML, route_controls
 from ui.asset_library_panel import asset_library_choices, asset_target_dir_choices
+from services.project_assets import list_asset_project_names
 from ui.group_panel import group_total_pages
 from ui.gradio_components import null_safe_multiselect_dropdown
 
@@ -141,11 +140,12 @@ def build_layout():
         segment_prompt_batch_payload = gr.Textbox(elem_id="segment_prompt_batch_payload", elem_classes=["aicf-hidden-trigger"])
         episode_select_payload = gr.Textbox(elem_id="episode_select_payload", elem_classes=["aicf-hidden-trigger"])
         episode_select_btn = gr.Button("select episode", elem_id="episode_select_btn", elem_classes=["aicf-hidden-trigger"])
+        operation_refresh_btn = gr.Button("refresh text operation result", elem_id="operation_refresh_btn", elem_classes=["aicf-hidden-trigger"])
         open_videos_dir_btn = gr.Button("open videos dir", elem_id="open_videos_dir_btn", elem_classes=["aicf-hidden-trigger"])
 
         main_page = gr.Radio(
             label=None,
-            choices=[("创作工作台", "workbench"), ("素材库", "assets"), ("设置", "settings")],
+            choices=[("创作工作台", "workbench"), ("设置", "settings")],
             value="workbench",
             show_label=False,
             elem_id="main_page_tabs",
@@ -153,51 +153,38 @@ def build_layout():
         )
 
         with gr.Group(elem_id="main_pages"):
+            from ui.text_jobs_ui import PANEL_HTML
+            gr.HTML(PANEL_HTML)
             with gr.Column(visible=True, elem_id="workbench_page", elem_classes=["page-panel"]) as workbench_page:
                 with gr.Row(elem_classes=["app-shell"]):
                     with gr.Column(scale=1, min_width=260, elem_classes=["sidebar-column"]):
-                        gr.HTML('<div class="side-card"><div class="side-title">项目管理</div><div class="side-copy">选择项目并管理当前运行目录。</div>')
-                        project_name = gr.Dropdown(
-                            label="当前项目",
-                            choices=_project_choices(),
-                            value=get_current_project_name() or "current",
-                        )
-                        project_episode = gr.Dropdown(
-                            label="生成 / 归档",
-                            choices=_episode_choices(get_current_project_name() or "current"),
-                            value=get_current_episode_name(),
-                            visible=True,
-                        )
-                        project_rename_text = gr.Textbox(label="重命名项目", placeholder="输入新项目名称", lines=1)
-                        rename_project_btn = gr.Button("重命名项目")
-                        archive_episode_name = gr.Textbox(label="归档名称", placeholder="留空自动生成：自动顺延到下一集", lines=1)
-                        archive_generation_btn = gr.Button("归档当前生成", elem_id="archive_generation_btn")
-                        archive_path_box = gr.Textbox(value="", visible=False)
-                        clean_btn = gr.Button("清空当前生成")
-                        gr.HTML("</div>")
-
-                        gr.HTML('<div class="side-card"><div class="side-title">项目素材选择</div><div class="side-copy">为角色、物品和场景绑定参考素材。</div>')
-                        character_choices, background_choices = project_bible_asset_choices()
-                        selected_character_ids, selected_background_ids = project_bible_selected_asset_ids()
-                        bible_character_select = null_safe_multiselect_dropdown(
-                            label="核心人物 / 物品参考图",
-                            choices=character_choices,
-                            value=selected_character_ids,
-                        )
-                        bible_background_select = null_safe_multiselect_dropdown(
-                            label="背景参考图",
-                            choices=background_choices,
-                            value=selected_background_ids,
-                        )
-                        manual_bible_btn = gr.Button("保存已选素材")
-                        selected_asset_gallery = gr.Gallery(
-                            label="已选参考图 / 背景图",
-                            value=selected_project_asset_gallery(selected_character_ids, selected_background_ids),
-                            columns=2,
-                            height=300,
-                            object_fit="contain",
-                        )
-                        gr.HTML("</div>")
+                        with gr.Group(elem_id="project_management_panel", elem_classes=["project-management-card"]):
+                            gr.HTML('<div class="project-management-heading"><strong>项目与草稿</strong><p>选择项目和集数，继续创作。</p></div>')
+                            project_name = gr.Dropdown(
+                                label="当前项目", choices=_project_choices(),
+                                value=get_current_project_name() or "current", elem_id="project_name",
+                            )
+                            project_episode = gr.Dropdown(
+                                label="当前草稿 / 归档集数", choices=_episode_choices(get_current_project_name() or "current"),
+                                value=get_current_episode_name(), visible=True, elem_id="project_episode",
+                            )
+                            gr.Markdown("切换前请保存当前编辑内容。", elem_classes=["project-management-hint"])
+                            with gr.Accordion("新建草稿", open=False, elem_classes=["project-management-section"]):
+                                draft_name = gr.Textbox(label="草稿名称（选填）", placeholder="如：第007集；留空自动编号", lines=1)
+                                create_draft_btn = gr.Button("创建草稿", variant="primary", elem_classes=["project-management-primary"])
+                            with gr.Accordion("归档当前草稿", open=False, elem_classes=["project-management-section"]):
+                                gr.Markdown("制作完成后归档，保留本集生成记录。", elem_classes=["project-management-hint"])
+                                archive_episode_name = gr.Textbox(label="归档名称（选填）", placeholder="留空自动使用下一集编号", lines=1)
+                                archive_generation_btn = gr.Button("确认归档", elem_id="archive_generation_btn", elem_classes=["project-management-secondary"])
+                                archive_path_box = gr.Textbox(value="", visible=False)
+                            with gr.Accordion("项目设置", open=False, elem_classes=["project-management-section"]):
+                                project_rename_text = gr.Textbox(label="新的项目名称", placeholder="输入项目名称", lines=1)
+                                rename_project_btn = gr.Button("保存项目名称", elem_classes=["project-management-secondary"])
+                                gr.Markdown("清空前请确认当前草稿内容已保存。", elem_classes=["project-management-hint"])
+                                clean_btn = gr.Button("清空当前草稿", elem_classes=["project-management-danger"])
+                        with gr.Group(elem_classes=["project-management-card", "project-materials-entry"]):
+                            gr.HTML('<div class="project-management-heading"><strong>素材管理</strong><p>上传角色与场景，管理项目素材归属。</p></div>')
+                            project_assets_open_btn = gr.Button("打开项目素材管理", elem_id="project_assets_open_btn", elem_classes=["project-management-secondary"])
 
                     with gr.Column(scale=3, min_width=640, elem_classes=["workspace-column"]):
                         gr.HTML('<div class="workspace-card hero-card"><div class="section-kicker">创作控制台</div><div class="section-title">从主题到成片的一键流水线</div><div class="section-subtitle">保留原有流程，优化输入、执行与反馈的视觉层级。</div>')
@@ -248,20 +235,20 @@ def build_layout():
                                     )
 
                         with gr.Row(elem_classes=["main-action-row"]):
-                            gen_story_btn = gr.Button("生成完整剧情", elem_classes=["primary-btn", "step-action"])
-                            split_beats_btn = gr.Button("拆分剧情 Beats", elem_classes=["primary-btn", "step-action"])
-                            generate_segment_prompts_btn = gr.Button("生成分段提示词", elem_classes=["quick-btn", "quick-blue", "step-action"])
+                            gen_story_btn = gr.Button("生成完整剧情", elem_id="gen_story_btn", elem_classes=["primary-btn", "step-action"])
+                            split_beats_btn = gr.Button("拆分剧情 Beats", elem_id="split_beats_btn", elem_classes=["primary-btn", "step-action"])
+                            generate_segment_prompts_btn = gr.Button("生成分段提示词", elem_id="generate_segment_prompts_btn", elem_classes=["quick-btn", "quick-blue", "step-action"])
                             render_video_btn = gr.Button("生成视频", elem_classes=["primary-btn", "step-action"])
                             merge_video_btn = gr.Button("合并最终视频", elem_classes=["primary-btn", "step-action"])
                         with gr.Row(elem_classes=["one-click-action-row"]):
-                            one_click_full_btn = gr.Button("一键全流程生成", elem_classes=["primary-btn", "one-click-main"])
+                            one_click_full_btn = gr.Button("后台准备剧情、Beats 与提示词", elem_id="one_click_full_btn", elem_classes=["primary-btn", "one-click-main"])
                         gr.HTML("</div>")
 
                         with gr.Accordion("已有完整小说？生成 Beats 再生成 Segments", open=False, elem_classes=["novel-segments-panel"]):
                             gr.HTML('<div class="section-subtitle">先把小说切分为 Beats（保留对白与原文），再按当前模型生成分段。会覆盖已有 Beats 与分段信息。</div>')
                             novel_text = gr.Textbox(label="完整小说段", lines=12, max_lines=36, placeholder="粘贴已有小说内容（支持几千字）。系统将保留小说对白与原文，按模型规则切分 Beats 后生成视频 Segments。", elem_id="novel_text_editor")
                             novel_segment_count = gr.Number(label="目标视频分段数", value=4, minimum=1, step=1, precision=0)
-                            generate_novel_segments_btn = gr.Button("生成 Beats → Segments", elem_classes=["primary-btn", "step-action"])
+                            generate_novel_segments_btn = gr.Button("生成 Beats → Segments", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
 
                         with gr.Accordion("剧情简介（可编辑）", open=True):
                             story_json = gr.Textbox(
@@ -270,7 +257,7 @@ def build_layout():
                                 lines=10,
                                 max_lines=24,
                                 interactive=True,
-                                placeholder="请输入剧情简介，或修改 AI 生成后的完整剧情。生成完整剧情、拆分 Beats、生成分段提示词都会使用这里的最新内容。",
+                                placeholder="生成完整剧情会先清空这里的内容，并始终根据上方主题重新生成。可编辑生成结果；拆分 Beats、生成分段提示词使用这里的最新内容。",
                                 elem_id="story_editor",
                             )
 
@@ -298,7 +285,7 @@ def build_layout():
                                         elem_classes=["beat-split-index"],
                                     )
                                     detect_beat_risk_btn = gr.Button("检测 Beat 风险", elem_classes=["quick-btn", "beat-risk-detect-btn"])
-                                    split_complex_beat_btn = gr.Button("继续拆分指定 Beat", elem_classes=["quick-btn", "quick-blue", "beat-split-submit-btn"])
+                                    split_complex_beat_btn = gr.Button("继续拆分指定 Beat", elem_id="split_complex_beat_btn", elem_classes=["quick-btn", "quick-blue", "beat-split-submit-btn"])
                                     add_beat_btn = gr.Button("新增 Beat", elem_classes=["quick-btn", "beat-add-submit-btn"])
                                     delete_beat_btn = gr.Button("删除指定 Beat", elem_classes=["quick-btn", "beat-delete-submit-btn"])
                                 with gr.Row():
@@ -364,6 +351,7 @@ def build_layout():
                             final_video_preview_payload = gr.Textbox(elem_id="final_video_preview_payload", visible=False)
 
                         with gr.Accordion("视频问题反馈 → 质检规则", open=False):
+                            gr.HTML(route_controls(["feedback"]))
                             feedback_part_select = gr.CheckboxGroup(
                                 label="选择问题视频 Part",
                                 choices=video_part_choices(),
@@ -380,7 +368,7 @@ def build_layout():
                                 lines=4,
                                 placeholder="例如：part_003 里说话人变成了旁边的人，背景里多出一个清晰人物……",
                             )
-                            feedback_analyze_btn = gr.Button("提交问题并分析")
+                            feedback_analyze_btn = gr.Button("提交问题并分析", elem_id="feedback_analyze_btn")
                             feedback_analysis = gr.Code(
                                 label="LLM 归因与候选质检规则（可编辑）",
                                 value="",
@@ -389,81 +377,174 @@ def build_layout():
                             )
                             feedback_apply_rules_btn = gr.Button("将候选规则加入质检函数")
 
-            with gr.Column(visible=False, elem_id="asset_library_page", elem_classes=["page-panel", "asset-library-tab"]) as asset_library_page:
-                with gr.Column(elem_classes=["asset-library-workspace"]):
-                    with gr.Row(elem_classes=["asset-library-grid"]):
-                        with gr.Column(scale=1, min_width=280, elem_classes=["asset-panel", "asset-upload-panel"]):
-                            gr.HTML('<div class="asset-panel-title">选择 / 上传图片</div><div class="asset-panel-subtitle">先选 assets 里的现有素材；只有外部新图片才需要上传。</div>')
-                            asset_existing_select = gr.Dropdown(
-                                label="现有素材",
-                                choices=asset_library_choices(),
-                                value=None,
-                                elem_classes=["asset-existing-select"],
+            project_assets_header, project_assets_topic_init, project_assets_owned, project_assets_unassigned, project_assets_owned_records_init, project_assets_unassigned_records_init, project_assets_selected_init, project_assets_selected_name_init, project_assets_owners_init = project_asset_management_state(get_current_project_name() or "current")
+            with gr.Column(visible=False, elem_id="asset_library_page", elem_classes=["page-panel"]) as asset_library_page:
+                with gr.Row(elem_classes=["project-assets-topbar"]):
+                    gr.HTML('<div><div class="section-kicker">素材管理</div><div class="section-title">素材管理</div></div>')
+                    close_project_assets_btn = gr.Button("返回工作台", elem_id="close_project_assets_btn", elem_classes=["project-assets-close"])
+                with gr.Tabs(selected="upload", elem_id="asset_management_tabs") as asset_management_tabs:
+                    with gr.Tab("素材库 / 上传", id="upload"):
+                        with gr.Column(elem_id="asset_upload_page", elem_classes=["asset-library-tab"]):
+                            with gr.Column(elem_classes=["asset-library-workspace"]):
+                                with gr.Row(elem_classes=["asset-library-grid"]):
+                                    with gr.Column(scale=1, min_width=280, elem_classes=["asset-panel", "asset-upload-panel"]):
+                                        gr.HTML('<div class="asset-panel-title">选择 / 上传图片</div><div class="asset-panel-subtitle">先选 assets 里的现有素材；只有外部新图片才需要上传。</div>')
+                                        asset_filter_project = gr.Dropdown(
+                                            label="项目选择",
+                                            choices=[("全部项目", "__all__"), ("未分配项目", "__unassigned__")] + [(name, name) for name in list_asset_project_names()],
+                                            value=get_current_project_name() or "current",
+                                            info="按项目筛选并保存归属；全部项目仅浏览，保存时保留已有归属。",
+                                        )
+                                        asset_type = gr.Radio(
+                                            label="素材类型",
+                                            choices=[("人物/物品", "character"), ("背景", "background")],
+                                            value="character",
+                                            elem_classes=["asset-type-switch"],
+                                        )
+                                        asset_existing_select = gr.Dropdown(
+                                            label="现有素材",
+                                            choices=asset_library_choices(get_current_project_name() or "current", "character"),
+                                            value="",
+                                            elem_classes=["asset-existing-select"],
+                                        )
+                                        asset_upload_file = gr.File(
+                                            label="上传外部新图片",
+                                            file_types=["image"],
+                                            type="filepath",
+                                            elem_classes=["asset-upload-dropzone"],
+                                        )
+                                        asset_target_dir = gr.Dropdown(
+                                            label="素材归属",
+                                            choices=asset_target_dir_choices(),
+                                            value="__new__",
+                                            allow_custom_value=False,
+                                            info="默认新建；同一人物或物品的其他参考图，请选择已有素材。背景自动归档。",
+                                            elem_classes=["asset-path-box"],
+                                        )
+                                        with gr.Accordion("高级选项", open=False):
+                                            asset_id = gr.Textbox(
+                                                label="图片文件名（可选）",
+                                                placeholder="留空自动生成；也可填写正面、侧面等名称",
+                                                lines=1,
+                                                elem_classes=["asset-text-field", "asset-id-field"],
+                                            )
+                                        asset_target_path = gr.Textbox(
+                                            label="当前/保存路径",
+                                            value="",
+                                            interactive=False,
+                                            lines=2,
+                                            elem_classes=["asset-path-box"],
+                                        )
+                                    with gr.Column(scale=2, min_width=480, elem_classes=["asset-panel", "asset-preview-panel"]):
+                                        gr.HTML('<div class="asset-panel-title">素材预览</div><div class="asset-panel-subtitle">这里只显示当前选择的图片。</div>')
+                                        asset_current_path = gr.Textbox(
+                                            label="当前素材路径",
+                                            value="",
+                                            interactive=False,
+                                            lines=2,
+                                            elem_classes=["asset-path-box"],
+                                        )
+                                        asset_gallery = gr.Image(
+                                            label="",
+                                            value=None,
+                                            height=560,
+                                            type="filepath",
+                                            elem_classes=["asset-preview-gallery"],
+                                        )
+                                    with gr.Column(scale=1, min_width=340, elem_classes=["asset-panel", "asset-meta-panel"]):
+                                        gr.HTML('<div class="asset-panel-title">当前素材描述</div><div class="asset-panel-subtitle">这里编辑的是中间正在预览的素材；素材描述和图片为全局共享，项目归属单独管理。</div>')
+                                        asset_metadata_paste = gr.Textbox(
+                                            label="素材初始描述", lines=4, max_lines=8,
+                                            placeholder="先上传或选择图片，再描述素材的名称、外观、用途等信息，点击智能补全生成下方字段。",
+                                            elem_classes=["asset-text-field"],
+                                        )
+                                        gr.HTML(route_controls(["other"]))
+                                        asset_metadata_result = gr.State(None)
+                                        asset_metadata_parse_btn = gr.Button("智能补全", elem_id="asset_metadata_parse_btn", elem_classes=["quick-btn"])
+                                        asset_metadata_parse_status = gr.Markdown("")
+                                        asset_display_name = gr.Textbox(label="显示名", placeholder="蓝衣小男孩 / 露天足球场", lines=1, elem_classes=["asset-text-field"])
+                                        asset_aliases = gr.Textbox(label="别名", placeholder="用逗号分隔", lines=2, elem_classes=["asset-text-field"])
+                                        asset_tags_cn = gr.Textbox(label="中文标签", placeholder="卡通, 小孩, 正面", lines=2, elem_classes=["asset-text-field"])
+                                        asset_description_cn = gr.Textbox(label="描述", lines=5, max_lines=8, elem_classes=["asset-text-field"])
+                                        asset_use_for = gr.Textbox(label="适用场景", placeholder="用逗号分隔", lines=2, elem_classes=["asset-text-field"])
+                                        asset_pose = gr.Textbox(label="姿态/用途", lines=1, elem_classes=["asset-text-field"])
+                                        with gr.Accordion("人物参考音色（可选）", open=False) as asset_voice_panel:
+                                            asset_voice_audio = gr.Audio(label="上传 / 试听参考音色", type="filepath", sources=["upload"])
+                                            asset_voice_transcript = gr.Textbox(label="音频原文（可选）", lines=3, info="填写样本实际说的话；不是视频剧情台词，留空也可保存。WAV/MP3，2–15 秒，最多 15 MB。")
+                                            asset_voice_remove = gr.Button("移除人物音色")
+                                            asset_voice_status = gr.Markdown("参考音色随人物素材一起保存。")
+                                        asset_save_meta_btn = gr.Button("保存当前素材描述", elem_classes=["quick-btn"])
+                                        asset_save_status = gr.Markdown("", elem_classes=["asset-save-status"])
+                                        with gr.Accordion("删除人物素材", open=False):
+                                            gr.Markdown("删除整个人物、全部参考图及音色，并解除所有项目绑定。已有视频保留；后续使用该人物的任务需重新选择素材。")
+                                            asset_delete_snapshot = gr.State(None)
+                                            asset_delete_preview = gr.Button("查看删除范围")
+                                            asset_delete_status = gr.Markdown("")
+                                            asset_delete_confirm = gr.Button("确认删除整个人物及图片", interactive=False)
+
+                                asset_library_log = gr.State("")
+
+                    with gr.Tab("项目素材", id="project"):
+                        with gr.Column(elem_id="project_assets_page", elem_classes=["page-panel"]) as project_assets_page:
+                            with gr.Row(elem_classes=["project-assets-layout"]):
+                                with gr.Column(scale=1, min_width=220, elem_classes=["project-assets-sidebar"]):
+                                    gr.Markdown("### 项目")
+                                    initial_project_choices = _project_choices()
+                                    project_assets_project = gr.Radio(
+                                        label="", choices=initial_project_choices + [("未分配素材", UNASSIGNED_PROJECT_FILTER)],
+                                        value=get_current_project_name() or "current", elem_id="project_assets_project", elem_classes=["project-assets-project-list"],
+                                    )
+                                with gr.Column(scale=4, min_width=600, elem_classes=["project-assets-content"]):
+                                    project_assets_heading = gr.Markdown(project_assets_header)
+                                    project_assets_topic = gr.Textbox(label="项目主题", value=project_assets_topic_init.get("value", ""), placeholder="可选；留空保留现有主题", lines=1)
+                                    with gr.Row(elem_classes=["project-assets-galleries"]):
+                                        with gr.Column(scale=3, elem_classes=["project-assets-section"]):
+                                            gr.Markdown("#### 已分配给所选项目")
+                                            gr.Markdown("点击素材卡片可多选；也可将已分配素材共享给其他项目。")
+                                            project_assets_owned_gallery = gr.Gallery(
+                                                label="", show_label=False, value=project_assets_owned, columns=4, height=420,
+                                                object_fit="contain", allow_preview=False, elem_classes=["project-assets-gallery"],
+                                            )
+                                        with gr.Column(scale=2, elem_classes=["project-assets-section", "project-assets-unassigned-section"]):
+                                            gr.Markdown("#### 未分配素材")
+                                            gr.Markdown("选择素材后，在下方勾选要分配到的项目。")
+                                            project_assets_unassigned_gallery = gr.Gallery(
+                                                label="", show_label=False, value=project_assets_unassigned, columns=3, height=420,
+                                                object_fit="contain", allow_preview=False, elem_classes=["project-assets-gallery"],
+                                            )
+                                    project_assets_owned_records = gr.State(project_assets_owned_records_init)
+                                    project_assets_unassigned_records = gr.State(project_assets_unassigned_records_init)
+                                    project_assets_selected_key = gr.State(project_assets_selected_init)
+                                    with gr.Group(elem_classes=["project-assets-assignment-editor"]):
+                                        project_assets_selected_name = gr.Textbox(
+                                            label="已选择素材", value=project_assets_selected_name_init, interactive=False,
+                                            elem_classes=["project-assets-selected-summary"],
+                                        )
+                                        project_assets_owner_select = gr.CheckboxGroup(
+                                            label="将所选素材分配到项目（可多选）", choices=project_assets_owners_init.get("choices", []),
+                                            value=project_assets_owners_init.get("value", []),
+                                            info="先在上方多选素材，再勾选目标项目。保存后，所选素材只归属到这里勾选的项目；取消全部勾选会将素材设为未分配。",
+                                            elem_classes=["project-assets-owner-checkboxes"],
+                                        )
+                                        with gr.Row(elem_classes=["project-assets-assignment-actions"]):
+                                            project_assets_save_owners_btn = gr.Button("保存所选素材归属", elem_id="project_assets_save_owners_btn", variant="primary")
+                                            project_assets_unbind_btn = gr.Button("解除所选素材绑定", elem_id="project_assets_unbind_btn")
+                                        project_assets_status = gr.Markdown("", elem_classes=["project-assets-assignment-status"])
+
+                        # Generation handlers still consume Project Bible state. Keep its
+                        # synchronized fields hidden; material selection now happens only
+                        # in the project ownership manager above.
+                        with gr.Column(visible=False, elem_id="project_bible_runtime_state") as project_bible_section:
+                            character_choices, background_choices = project_bible_asset_choices()
+                            selected_character_ids, selected_background_ids = project_bible_selected_asset_ids()
+                            bible_character_select = null_safe_multiselect_dropdown(
+                                label="", choices=character_choices, value=selected_character_ids,
                             )
-                            asset_type = gr.Radio(
-                                label="素材类型",
-                                choices=[("人物/物品", "character"), ("背景", "background")],
-                                value="character",
-                                elem_classes=["asset-type-switch"],
+                            bible_background_select = null_safe_multiselect_dropdown(
+                                label="", choices=background_choices, value=selected_background_ids,
                             )
-                            asset_upload_file = gr.File(
-                                label="上传外部新图片",
-                                file_types=["image"],
-                                type="filepath",
-                                elem_classes=["asset-upload-dropzone"],
-                            )
-                            asset_id = gr.Textbox(
-                                label="图片 ID / 文件名",
-                                placeholder="支持中文，如张明_正面或 front；留空则使用原文件名",
-                                lines=1,
-                                elem_classes=["asset-text-field", "asset-id-field"],
-                            )
-                            asset_target_dir = gr.Dropdown(
-                                label="目标目录",
-                                choices=asset_target_dir_choices(),
-                                allow_custom_value=True,
-                                elem_classes=["asset-path-box"],
-                            )
-                            asset_target_path = gr.Textbox(
-                                label="当前/保存路径",
-                                value="",
-                                interactive=False,
-                                lines=2,
-                                elem_classes=["asset-path-box"],
-                            )
-                        with gr.Column(scale=2, min_width=480, elem_classes=["asset-panel", "asset-preview-panel"]):
-                            gr.HTML('<div class="asset-panel-title">素材预览</div><div class="asset-panel-subtitle">这里只显示当前选择的图片。</div>')
-                            asset_current_path = gr.Textbox(
-                                label="当前素材路径",
-                                value="",
-                                interactive=False,
-                                lines=2,
-                                elem_classes=["asset-path-box"],
-                            )
-                            asset_gallery = gr.Image(
-                                label="",
-                                value=None,
-                                height=560,
-                                type="filepath",
-                                elem_classes=["asset-preview-gallery"],
-                            )
-                        with gr.Column(scale=1, min_width=340, elem_classes=["asset-panel", "asset-meta-panel"]):
-                            gr.HTML('<div class="asset-panel-title">当前素材描述</div><div class="asset-panel-subtitle">这里编辑的是中间正在预览的素材。</div>')
-                            asset_metadata_paste = gr.Textbox(
-                                label="粘贴素材信息", lines=4, max_lines=8,
-                                placeholder="粘贴显示名、别名、中文标签、描述、适用场景、姿态/用途；支持 Markdown 格式。",
-                                elem_classes=["asset-text-field"],
-                            )
-                            asset_metadata_parse_btn = gr.Button("解析并填入下方字段", elem_classes=["quick-btn"])
-                            asset_metadata_parse_status = gr.Markdown("")
-                            asset_display_name = gr.Textbox(label="显示名", placeholder="蓝衣小男孩 / 露天足球场", lines=1, elem_classes=["asset-text-field"])
-                            asset_aliases = gr.Textbox(label="别名", placeholder="用逗号分隔", lines=2, elem_classes=["asset-text-field"])
-                            asset_tags_cn = gr.Textbox(label="中文标签", placeholder="卡通, 小孩, 正面", lines=2, elem_classes=["asset-text-field"])
-                            asset_description_cn = gr.Textbox(label="描述", lines=5, max_lines=8, elem_classes=["asset-text-field"])
-                            asset_use_for = gr.Textbox(label="适用场景", placeholder="用逗号分隔", lines=2, elem_classes=["asset-text-field"])
-                            asset_pose = gr.Textbox(label="姿态/用途", placeholder="front / fullbody / in_car / outdoor scene", lines=1, elem_classes=["asset-text-field"])
-                            asset_save_meta_btn = gr.Button("保存当前素材描述", elem_classes=["quick-btn"])
-                    asset_library_log = gr.State("")
+                            selected_asset_gallery = gr.Gallery(label="", value=[], show_label=False)
+
 
             with gr.Column(visible=False, elem_id="settings_page", elem_classes=["page-panel", "settings-panel"]) as settings_page:
                 with gr.Column(elem_id="settings-panel", elem_classes=["settings-panel-inner"]):
@@ -507,6 +588,7 @@ def build_layout():
                         elem_classes=["settings-subpage-tabs"],
                     )
                     with gr.Column(visible=True, elem_id="dev-tab1", elem_classes=["dev-tab-content"]) as settings_model_page:
+                        gr.HTML(SETTINGS_HTML)
                         deepseek_key_value, runninghub_key_value = secret_key_placeholders()
                         with gr.Column(elem_classes=["kv-settings-form"]):
                             with gr.Row(elem_classes=["kv-row"]):
@@ -642,9 +724,13 @@ def build_layout():
                                 archive_episode_name,
                                 archive_generation_btn,
                                 clean_btn,
+                                project_assets_open_btn,
+                                project_assets_project,
+                                project_assets_owner_select,
+                                project_assets_save_owners_btn,
+                                project_assets_unbind_btn,
                                 bible_character_select,
                                 bible_background_select,
-                                manual_bible_btn,
                                 topic,
                                 duration_select,
                                 custom_duration_box,
@@ -685,6 +771,7 @@ def build_layout():
                                 segment_prompt_batch_payload,
                                 episode_select_payload,
                                 episode_select_btn,
+                                operation_refresh_btn,
                                 open_videos_dir_btn,
                                 feedback_part_select,
                                 feedback_refresh_btn,
@@ -692,6 +779,9 @@ def build_layout():
                                 feedback_note,
                                 feedback_analyze_btn,
                                 feedback_apply_rules_btn,
+                                asset_delete_preview,
+                                asset_delete_confirm,
+                                asset_filter_project,
                                 asset_existing_select,
                                 asset_type,
                                 asset_upload_file,
@@ -708,6 +798,9 @@ def build_layout():
                                 asset_use_for,
                                 asset_pose,
                                 asset_save_meta_btn,
+                                asset_voice_audio,
+                                asset_voice_transcript,
+                                asset_voice_remove,
                             ):
                                 try:
                                     locked_component.interactive = False

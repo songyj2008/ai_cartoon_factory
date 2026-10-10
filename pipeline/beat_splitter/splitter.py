@@ -65,6 +65,13 @@ def _scene_info_for_beat(beat: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_splitter_llm(config: dict[str, Any], messages: list[dict[str, str]], temp_dir: Path) -> dict[str, Any]:
+    from services.web_llm_bridge import routes_for, wait_for_llm
+    providers = routes_for('beats')
+    if providers != ['api']:
+        data, _ = wait_for_llm('\n'.join(m['content'] for m in messages if m['role']=='system'),
+            '\n'.join(m['content'] for m in messages if m['role']!='system'),
+            kind='json',entry='beats',provider=providers if len(providers)>1 else providers[0],call_hint='beat_splitter')
+        return data
     temp_dir.mkdir(parents=True, exist_ok=True)
     text, full_data, details = call_deepseek_chat_sdk(
         config,

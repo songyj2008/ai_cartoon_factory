@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -266,6 +266,13 @@ def _beat_writer_profile_name(policy) -> str:
     return rules_for_model(policy.model_id).beat_writer_profile_name
 
 
+def _additional_duration_policy_prompt(policy) -> str:
+    # H3's model-owned writer already states its duration and split rules.
+    if policy.model_id == "minimax_h3_local_ref2va":
+        return ""
+    return beat_policy_prompt(policy.model_id)
+
+
 def _target_count_range(target_duration_sec: int, policy=None) -> tuple[int, int]:
     policy = policy or project_beat_policy()
     target = max(policy.min_duration_sec, int(target_duration_sec or 60))
@@ -308,7 +315,14 @@ def fit_beats_to_segment_count(beats, target_duration_sec, target_beat_count=Non
     return selected
 
 
-def distribute_seconds(total_sec, count, source_durations, min_segment_sec=MIN_VIDEO_SEGMENT_SEC, max_segment_sec=MAX_VIDEO_SEGMENT_SEC):
+def distribute_seconds(
+    total_sec,
+    count,
+    source_durations,
+    min_segment_sec=MIN_VIDEO_SEGMENT_SEC,
+    max_segment_sec=MAX_VIDEO_SEGMENT_SEC,
+    preserve_proportions=False,
+):
     total_sec = int(total_sec or 60)
     count = max(1, int(count or 1))
     min_segment_sec = max(1, int(min_segment_sec or MIN_VIDEO_SEGMENT_SEC))
@@ -323,25 +337,44 @@ def distribute_seconds(total_sec, count, source_durations, min_segment_sec=MIN_V
     while len(durations) < count:
         durations.append(min_segment_sec)
 
+    weights = [max(min_segment_sec, min(max_segment_sec, value)) for value in durations]
     current = sum(durations)
     while current < total_sec:
-        changed = False
-        for index in range(count):
-            if durations[index] < max_segment_sec and current < total_sec:
+        eligible = [index for index in range(count) if durations[index] < max_segment_sec]
+        if not eligible:
+            break
+        if preserve_proportions:
+            index = min(eligible, key=lambda item: durations[item] / weights[item])
+            durations[index] += 1
+            current += 1
+        else:
+            changed = False
+            for index in eligible:
+                if current >= total_sec:
+                    break
                 durations[index] += 1
                 current += 1
                 changed = True
-        if not changed:
-            break
+            if not changed:
+                break
     while current > total_sec:
-        changed = False
-        for index in range(count - 1, -1, -1):
-            if durations[index] > min_segment_sec and current > total_sec:
+        eligible = [index for index in range(count) if durations[index] > min_segment_sec]
+        if not eligible:
+            break
+        if preserve_proportions:
+            index = max(eligible, key=lambda item: durations[item] / weights[item])
+            durations[index] -= 1
+            current -= 1
+        else:
+            changed = False
+            for index in reversed(eligible):
+                if current <= total_sec:
+                    break
                 durations[index] -= 1
                 current -= 1
                 changed = True
-        if not changed:
-            break
+            if not changed:
+                break
     if sum(durations) != total_sec:
         raise ValueError(f"cannot distribute {total_sec}s into {count} segments of {min_segment_sec}-{max_segment_sec}s")
     return durations
@@ -355,12 +388,12 @@ def beat_structure_policy_prompt(policy=None):
     role_limit = model_rules.max_visible_roles or min(max_important_visible_roles(), 4)
     return f"""
 
-Runtime limits:
-- reference_roles length must be <= {role_limit}.
-- visible_roles length should be <= {role_limit}; split the beat if more clear in-frame roles are needed.
-- important_roles must contain every role from visible_roles, reference_roles, offscreen_speakers, and mentioned_roles.
-- important_roles may include visible roles, offscreen speakers, and mentioned roles, but only reference_roles get images.
-- background_extras must always be present; use [] when there are no extras.
+结构限制：
+- reference_roles 的数量不得超过 {role_limit}。
+- visible_roles 的数量应不超过 {role_limit}；如果需要更多清晰出镜角色，应拆分叙事段。
+- important_roles 必须包含 visible_roles、reference_roles、offscreen_speakers 和 mentioned_roles 中的全部角色。
+- important_roles 可以包含出镜角色、画外说话者和被提及角色，但只有 reference_roles 分配参考图片。
+- 必须提供 background_extras 字段；没有群众演员时填 []。
 """
 
 
@@ -371,16 +404,28 @@ def beat_count_policy_prompt(target_duration_sec=None, target_beat_count=None, p
         return ""
     total = int(target_duration_sec or 60)
     average = total / count
+    short_rule = "" if policy.model_id == "minimax_h3_local_ref2va" else (
+        f"- 指定 target_beat_count 时，允许 {policy.targeted_min_duration_sec}–{min(12, policy.max_duration_sec)} 秒的短段。\n"
+        "- 不得为了凑数量而创建无剧情价值的转场、走路、进入、离开或事后反应段落。\n"
+    )
+    duration_guidance = (
+        "- 不要把总时长平均切给每个 Beat，也不要为了整齐让各 Beat 时长相同。\n"
+        "- 逐个判断剧情事件需要的实际呈现时间：综合对白字数与自然语速、动作步骤、信息密度、情绪推进、悬念停顿和事件结果，给每个 Beat 独立分配时长。\n"
+        "- 多轮对白、复杂动作、关键转折或情绪爆发可以更长；单一动作、简短反应或快速揭示可以更短，但必须完整表达事件。\n"
+        "- 先确定每个 Beat 的剧情所需时长，再微调个别 Beat 使全体总和精确等于目标；只在模型允许的单段时长范围内调整。"
+        if policy.model_id == "minimax_h3_local_ref2va"
+        else "- 依据每段剧情的信息量、对白、动作步骤和情绪节奏独立分配时长，不要平均分配；所有时长必须符合模型范围且总和精确等于目标。"
+    )
     return f"""
 
-Target beat count:
-- Output exactly {count} beats. Do not output fewer or more.
-- Total target duration is {total}s, so each beat should average about {average:.1f}s.
-- The sum of all estimated_duration_sec values must equal exactly {total}s.
-- Short beats of {policy.targeted_min_duration_sec}-{min(12, policy.max_duration_sec)}s are allowed when target_beat_count is specified.
-- Do not create empty transition, walking, entering, leaving, or aftermath beats just to reach the count.
-- If the story currently feels like fewer events, split the richest events into smaller complete video events with clear dramatic value.
-- If the source contains more events than the target count, merge adjacent cause-and-effect moments into one complete beat instead of dropping story turns.
+目标分段数量：
+- 必须恰好输出 {count} 个叙事段，不得增加或减少。
+- 目标总时长为 {total} 秒（平均 {average:.1f} 秒仅用于检查总时长和分段数量是否可行，不是每段的时长要求）。
+- 所有 estimated_duration_sec 的总和必须恰好为 {total} 秒。
+{duration_guidance}
+{short_rule.rstrip()}
+- 如果剧情事件少于目标数量，将内容最丰富的事件拆成更小但完整、具有明确戏剧价值的视频事件。
+- 如果原文事件多于目标数量，将相邻的因果过程合并为完整叙事段，不要删掉剧情转折。
 """
 
 
@@ -561,6 +606,14 @@ def _normalize_model_hints(value, beat, model_id):
 
 
 def _call_deepseek_messages(config, messages, temp_dir, name="beats_deepseek"):
+    from services.web_llm_bridge import routes_for, wait_for_llm
+    providers = routes_for("beats")
+    if providers != ["api"]:
+        system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+        user = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") != "system")
+        data, _ = wait_for_llm(system, user, kind="json", entry="beats",
+                               provider=providers if len(providers)>1 else providers[0],call_hint=name)
+        return data
     config = config or {}
     # Detailed Beats repeat excerpts, dialogue and shot descriptions. Give V4
     # enough output room while preserving explicit user token budgets.
@@ -604,7 +657,7 @@ def call_deepseek(config, payload, output_path, temp_dir):
         for part in (
             beat_structure_policy_prompt(policy),
             beat_count_policy_prompt(payload.get("target_duration_sec"), payload.get("target_beat_count"), policy=policy),
-            beat_policy_prompt(policy.model_id),
+            _additional_duration_policy_prompt(policy),
         )
         if str(part or "").strip()
     )
@@ -630,7 +683,7 @@ def repair_deepseek_beats(config, payload, raw_data, validation_error, temp_dir,
         for part in (
             beat_structure_policy_prompt(policy),
             beat_count_policy_prompt(payload.get("target_duration_sec"), payload.get("target_beat_count"), policy=policy),
-            beat_policy_prompt(policy.model_id),
+            _additional_duration_policy_prompt(policy),
         )
         if str(part or "").strip()
     )
@@ -759,9 +812,12 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
         )
         model_hints = _normalize_model_hints(beat.get("model_hints"), beat, policy.model_id)
         try:
-            duration = int(beat.get("estimated_duration_sec", 25))
-        except Exception:
-            duration = 25
+            value = float(beat["estimated_duration_sec"])
+            if not value.is_integer():
+                raise ValueError("时长必须是整数秒")
+            duration = int(value)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("每个 Beat 必须明确给出合法的 estimated_duration_sec，不能使用默认时长") from exc
         raw_durations.append(duration)
         cleaned_beat = {
             "id": index,
@@ -792,29 +848,15 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
             "visible_roles": list(visible_roles),
             "reference_roles": list(reference_roles),
         }
-    if target_beat_count:
-        average_duration = target_duration_sec / max(1, len(cleaned))
-        min_segment_sec = (
-            policy.min_duration_sec
-            if policy.min_duration_sec <= average_duration < policy.targeted_min_duration_sec
-            else policy.targeted_min_duration_sec
-        )
-    else:
-        min_segment_sec = policy.min_duration_sec
-    durations = distribute_seconds(
-        target_duration_sec,
-        len(cleaned),
-        raw_durations,
-        min_segment_sec=min_segment_sec,
-        max_segment_sec=policy.max_duration_sec,
-    )
-    timeline_normalizer = model_rules.beat_planning.timeline_normalizer
-    normalized_cleaned = []
-    for item, raw_duration, duration in zip(cleaned, raw_durations, durations):
-        normalized = timeline_normalizer(item, int(raw_duration), int(duration)) if timeline_normalizer else item
-        normalized["estimated_duration_sec"] = int(duration)
-        normalized_cleaned.append(normalized)
-    cleaned = normalized_cleaned
+    # Duration is a creative decision owned by the model. Never redistribute
+    # seconds locally: invalid totals trigger the existing model repair path.
+    durations = raw_durations
+    if any(value < policy.min_duration_sec or value > policy.max_duration_sec for value in durations):
+        raise ValueError(f"每段时长须在 {policy.min_duration_sec}-{policy.max_duration_sec} 秒内；请根据剧情重新分配时长")
+    if sum(durations) != target_duration_sec:
+        raise ValueError(f"剧情分段时长总和 {sum(durations)} 秒不等于目标 {target_duration_sec} 秒；请根据对白、动作和节奏修复，禁止平均分配")
+    for item, duration in zip(cleaned, durations):
+        item["estimated_duration_sec"] = duration
     return ensure_event_fields_on_beats(
         {
             "title": title,
@@ -892,7 +934,7 @@ def generate_novel_beats(payload, config=None, model_id="", temp_dir=None, extra
         for part in (
             beat_structure_policy_prompt(policy),
             beat_count_policy_prompt(target_duration_sec, target_beat_count, policy=policy),
-            beat_policy_prompt(policy.model_id),
+            _additional_duration_policy_prompt(policy),
         )
         if str(part or "").strip()
     )

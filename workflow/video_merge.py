@@ -16,6 +16,7 @@ from services.logger import log
 
 
 _VIDEO_JOBS_LOCK = RLock()
+_VIDEO_JOBS_LOCKS = {}
 
 
 def _even(value: Any, fallback: int) -> int:
@@ -201,9 +202,12 @@ def _normalize_segments_for_concat(
 
 
 @contextmanager
-def video_jobs_lock():
-    """Serialize read-modify-write operations on the active project's job file."""
+def video_jobs_lock(path=None):
+    """Serialize read-modify-write operations for one project runtime."""
+    key = str(Path(path or get_project_dir()).resolve())
     with _VIDEO_JOBS_LOCK:
+        lock = _VIDEO_JOBS_LOCKS.setdefault(key, RLock())
+    with lock:
         yield
 
 
@@ -264,7 +268,7 @@ def load_video_jobs() -> dict[str, Any]:
 def save_video_jobs(payload: dict[str, Any]) -> None:
     path = get_project_dir() / "video_jobs.json"
     temp_path = path.with_suffix(".json.tmp")
-    with _VIDEO_JOBS_LOCK:
+    with video_jobs_lock():
         from generation.job_schema import normalize_video_jobs_payload
         from workflow.runninghub_history import normalize_runninghub_history
 

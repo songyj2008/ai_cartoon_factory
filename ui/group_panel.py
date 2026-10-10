@@ -27,6 +27,27 @@ PROMPT_PREVIEW_ICON = (
     '<circle cx="17.75" cy="16.5" r=".65"/>'
     '</svg>'
 )
+
+
+def _normalise_prompt_comparison(value: Any) -> str:
+    return str(value or "").strip().replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _prompt_revision_state(segment: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
+    config = segment.get("generation_config") if isinstance(segment.get("generation_config"), dict) else {}
+    job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
+    current_prompt = str(config.get("prompt_override") or job.get("final_prompt") or job.get("prompt") or "").strip()
+    current_info = config.get("prompt_version_info") if isinstance(config.get("prompt_version_info"), dict) else {}
+    revision = config.get("latest_prompt_revision") if isinstance(config.get("latest_prompt_revision"), dict) else {}
+    revision_prompt = str(revision.get("prompt") or "").strip()
+    matches = bool(revision_prompt) and _normalise_prompt_comparison(current_prompt) == _normalise_prompt_comparison(revision_prompt)
+    if not revision_prompt:
+        label, css_class, title = "暂无修正版", "status-pending", "还没有可用于比对的修正后完整提示词"
+    elif matches:
+        label, css_class, title = "已保存", "status-success", "H3 提示词与最新修正版一致"
+    else:
+        label, css_class, title = "未保存", "status-pending", "H3 提示词与最新修正版不一致"
+    return label, css_class, title, {"current": current_info, "revision": revision, "matches": matches}
 SELECT_VIDEO_ICON = (
     '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
     '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/>'
@@ -97,14 +118,36 @@ def _model_selector_html(segment: dict[str, Any], payload: dict[str, Any]) -> st
 
 
 def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
-    """Keep the card prompt-first and move H3-specific controls fullscreen."""
+    """Keep prompt text hidden on the card and route editing through fullscreen."""
     config = segment.get("generation_config") if isinstance(segment.get("generation_config"), dict) else {}
     manifest = [item for item in config.get("asset_manifest") or [] if isinstance(item, dict)]
+    from services.character_voice import read_voice, voice_path
+    from services.context import ASSETS_DIR
+    root = (Path(ASSETS_DIR) / "characters" / "identities").resolve()
+    manifest = [{**item, "metadata": dict(item.get("metadata") or {})} for item in manifest]
+    for item in manifest:
+        identity_id = str(item["metadata"].get("identity_id") or "")
+        if item.get("type") != "image" or not identity_id:
+            continue
+        directory = (root / identity_id).resolve()
+        if directory.parent != root:
+            continue
+        _, voice = read_voice(directory)
+        path = voice_path(directory, voice)
+        item["metadata"].pop("library_voice", None)
+        if path:
+            item["metadata"]["library_voice"] = {"path": str(path), "duration_sec": voice.get("duration_sec")}
+    # Display the prepared segment manifest, including its bound speaker voices.
+    # An empty Beat here would incorrectly remove those audio references.
     by_type = {kind: [item for item in manifest if str(item.get("type") or "").lower() == kind] for kind in ("image", "video", "audio")}
     job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
     prompt = str(config.get("prompt_override") or job.get("final_prompt") or job.get("prompt") or "").strip()
-    prompt_lines = prompt.count("\n") + 1 if prompt else 0
-    prompt_chars = len(prompt)
+    from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+    from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
+    from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+    bindings = H3AssetBinder().bind(H3GenerationConfig.from_mapping({**config, "asset_manifest": manifest}))
+    if prompt:
+        prompt = H3PromptCompiler._with_character_voices(prompt, bindings)
     source_excerpt = str(segment.get("source_excerpt") or "").strip()
     source_lines = source_excerpt.count("\n") + 1 if source_excerpt else 0
     source_chars = len(source_excerpt)
@@ -139,39 +182,28 @@ def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
             "</li>"
         )
     manifest_json = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
-    source_block = ""
-    if source_excerpt:
-        source_block = f"""
-        <details class="prompt-block segment-source-block" open>
-            <summary class="prompt-summary">
-                <span>原文参考</span>
-                <small>{source_chars} 字符 / {source_lines} 行</small>
-            </summary>
-            <div class="prompt-toolbar segment-editor-toolbar" role="group" aria-label="本段原文参考操作">
-                <button type="button" class="card-regen-btn action-utility" onclick="window.AICF.copySegmentSourceExcerpt(this)">复制原文</button>
-            </div>
+    _, _, _, version_data = _prompt_revision_state(segment)
+    version_json = json.dumps(version_data, ensure_ascii=False, separators=(",", ":"))
+    source_block = f"""
+        <div class="segment-source-block">
             <textarea class="segment-source-excerpt prompt-full" data-segment-index="{index}" data-render-key="segment-source-{index}" readonly spellcheck="false">{esc(source_excerpt)}</textarea>
             <pre class="segment-source-excerpt-source" hidden>{esc(source_excerpt)}</pre>
-        </details>
+        </div>
         """
     return f"""
-        <details class="prompt-block segment-editor-block h3-prompt-block" open>
-            <summary class="prompt-summary">
-                <span>H3 视频提示词</span>
-                <small>{prompt_chars} 字符 / {prompt_lines} 行</small>
-            </summary>
-            <div class="prompt-toolbar segment-editor-toolbar" role="group" aria-label="本段 H3 视频提示词操作">
-                <button type="button" class="card-regen-btn primary-mini h3-prompt-save" onclick="window.AICF.saveH3GenerationConfig('{index}', this).catch(function(error){{alert(error.message || '保存 H3 提示词失败')}})">保存本段提示词</button>
-                <button type="button" class="card-regen-btn" onclick="window.AICF.openPromptModalFromButton(this)">全屏编辑</button>
-                <button type="button" class="card-regen-btn action-utility" onclick="window.AICF.copyPromptFromButton(this)">复制提示词</button>
+        <div class="prompt-block segment-editor-block h3-prompt-block">
+            <div class="prompt-toolbar segment-editor-toolbar" role="group" aria-label="本段提示词操作">
+                <span class="h3-source-count">{source_chars} 字符 / {source_lines} 行</span>
+                <button type="button" class="card-regen-btn action-utility h3-copy-source" aria-label="复制本段原文" onclick="window.AICF.copySegmentSourceExcerpt(this)">复制原文</button>
+                <button type="button" class="card-regen-btn action-utility" aria-label="复制本段提示词" onclick="window.AICF.copyPromptFromButton(this)">复制提示词</button>
             </div>
-            <textarea id="segment-director-editor-{index}" name="segment-director-editor-{index}" class="segment-director-editor h3-prompt-override prompt-full" data-segment-index="{index}" data-render-key="segment-{index}" spellcheck="false">{esc(prompt)}</textarea>
-            <pre class="prompt-preview prompt-full prompt-modal-source" hidden>{esc(prompt)}</pre>
+            <pre class="prompt-modal-source h3-card-prompt-source" data-segment-index="{index}" hidden>{esc(prompt)}</pre>
+            <div class="h3-prompt-version-source" data-version-info="{esc(version_json)}" hidden></div>
             <div class="h3-asset-list h3-card-config-source" data-segment-index="{index}" data-manifest="{esc(manifest_json)}" hidden></div>
             <div class="segment-material-source" data-materials="{esc(material_payload)}" hidden></div>
             <span class="h3-config-status" role="status" aria-live="polite"></span>
-        </details>
-        {source_block}
+            {source_block}
+        </div>
         <template class="h3-fullscreen-config-template">
             <div class="aicf-material-panel-title">H3 Ref2VA 参考素材</div>
             <p class="h3-config-hint" data-h3-count>图片 {len(by_type['image'])}/9 · 视频 {len(by_type['video'])}/3 · 音频 {len(by_type['audio'])}/3 · 合计 {len(manifest)}/12。音频需至少搭配一项图片或视频参考。</p>
@@ -248,9 +280,11 @@ def _format_task_duration(value: Any) -> str:
 def _runninghub_usage_history(segment: dict[str, Any]) -> str:
     from workflow.runninghub_usage import runninghub_attempt_model_id
 
-    attempts = [item for item in segment.get("runninghub_attempts") or [] if isinstance(item, dict)]
+    from generation.video_history import video_attempts
+    attempts = video_attempts(segment)
     if not attempts:
         return ""
+    rh_count = len([item for item in attempts if item.get('backend') != 'doubao_web'])
     usage = segment.get("runninghub_usage") if isinstance(segment.get("runninghub_usage"), dict) else {}
     total_task_cost = _format_task_duration(usage.get("total_task_cost_seconds")) if usage.get("task_cost_seconds_known") else "待同步"
     total_coins = _format_usage_number(usage.get("total_consume_coins"), " RH币") if usage.get("consume_coins_known") else "待同步"
@@ -275,6 +309,9 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
         task_id = str(attempt.get("task_id") or "").strip()
         attempt_model_id = runninghub_attempt_model_id(segment, attempt)
         attempt_model_label = _model_label(attempt_model_id) if attempt_model_id else "未标注"
+        is_web = attempt.get('backend') == 'doubao_web'
+        if is_web:
+            attempt_model_label = '豆包网页视频'
         video_path = "" if attempt.get("video_deleted") else str(attempt.get("video_path") or "").strip()
         # Attempts created before task-video history was introduced can still
         # preview/delete the currently active completed task.
@@ -317,7 +354,7 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
             f"<td class=\"usage-task-id\">{esc(task_id or '—')}</td>"
             f"<td>{esc(status_text)}</td>"
             f"<td>{esc(_format_task_duration(attempt.get('task_cost_seconds')))}</td>"
-            f"<td>{esc(_format_usage_number(attempt.get('consume_coins'), ' RH币'))}</td>"
+            f"<td>{esc('免费渠道' if is_web else _format_usage_number(attempt.get('consume_coins'), ' RH币'))}</td>"
             '<td class="usage-delete-cell">'
             '<div class="usage-row-actions">'
             f"{prompt_button}"
@@ -332,7 +369,7 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
         )
     return f"""
         <details class="usage-history">
-            <summary>生成与计费明细（生成 {len(attempts)} 次，重试 {max(0, len(attempts) - 1)} 次，累计 {total_coins}，耗时 {total_task_cost}）</summary>
+            <summary>视频列表与计费明细（生成 {len(attempts)} 次，RH 重试 {max(0, rh_count - 1)} 次，RH 累计 {total_coins}，RH 耗时 {total_task_cost}）</summary>
             <div class="usage-table-wrap">
                 <table>
                     <thead><tr><th>次数</th><th>生成模型</th><th>任务 ID</th><th>状态</th><th>任务耗时</th><th>RH币</th><th aria-label="任务操作"></th></tr></thead>
@@ -792,11 +829,16 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         workflow_prompt_prefix = _workflow_prompt_prefix(workflow_prompt, director_prompt, generated_prefix)
         prompt_lines = director_prompt.count("\n") + 1 if director_prompt else 0
         prompt_chars = len(director_prompt)
-        saved_label = "已保存" if segment.get("prompt_saved", True) else "未保存"
-        saved_class = "status-success" if segment.get("prompt_saved", True) else "status-pending"
+        desired_model_id = _model_id_for_segment(segment, data)
+        if desired_model_id == "minimax_h3_local_ref2va":
+            saved_label, saved_class, saved_title, _ = _prompt_revision_state(segment)
+        else:
+            prompt_saved = bool(segment.get("prompt_saved", True))
+            saved_label = "已保存" if prompt_saved else "未保存"
+            saved_class = "status-success" if prompt_saved else "status-pending"
+            saved_title = "提示词已保存" if prompt_saved else "提示词有未保存修改"
         beat = beats[idx - 1] if 0 < idx <= len(beats) else {}
         material_payload = _material_selector_payload(segment, beat, project_materials)
-        desired_model_id = _model_id_for_segment(segment, data)
         desired_model_html = _model_selector_html(segment, data)
         actual_model = _render_model_label(segment)
         actual_model_html = (
@@ -806,15 +848,15 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         )
         if desired_model_id == "minimax_h3_local_ref2va":
             editor_html = _h3_config_html(segment, material_payload)
+            editor_action_html = (
+                f'<button type="button" class="card-regen-btn h3-prompt-open-action" aria-label="全屏编辑本段提示词" '
+                'onclick="window.AICF.openPromptModalFromButton(this)">全屏编辑</button>'
+            )
             video_regen_action_html = (
                 f'<button type="button" class="card-regen-btn primary-mini" {regen_disabled} '
                 f'onclick="return window.AICF.regenerateH3Segment(\'{idx}\', this)">{regen_label}</button>'
             )
-            prompt_regen_action_html = f"""
-                <button type="button" class="card-regen-btn" onclick="return window.AICF.triggerSegmentRegen('{idx}', this)">
-                    重新生成提示词
-                </button>
-            """
+            prompt_regen_action_html = ""
         else:
             editor_html = f"""
                 <details class="prompt-block segment-editor-block" open>
@@ -835,6 +877,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
                     <div class="segment-material-source" data-materials="{esc(material_payload)}" hidden></div>
                 </details>
             """
+            editor_action_html = ""
             video_regen_action_html = f"""
                 <button type="button" class="card-regen-btn primary-mini" {regen_disabled} onclick="return window.AICF.triggerSegmentVideoRegen('{idx}', this)">
                     {regen_label}
@@ -848,19 +891,20 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
 
         cards.append(
             f"""
-            <div class="group-card" data-segment-index="{idx}" data-model-id="{esc(desired_model_id)}" data-video-ok="{str(protected_video_ok).lower()}">
+            <div class="group-card" data-segment-index="{idx}" data-segment-uid="{esc(str(segment.get('segment_uid') or ''))}" data-beat-uid="{esc(str(segment.get('beat_uid') or ''))}" data-model-id="{esc(desired_model_id)}" data-video-ok="{str(protected_video_ok).lower()}">
                 <div class="group-head">
                     <div class="segment-title-block">
                         <div class="segment-id">{esc(part_id)}</div>
                         <div class="segment-title">{esc(title)}</div>
                     </div>
-                    <div class="group-actions">
+                    <div class="group-actions{' h3-group-actions' if editor_action_html else ''}">
                         <div class="segment-status-row">
                             <span class="status-badge {esc(status_class)}" data-segment-status>{esc(status_label)}</span>
                             {protected_badge}
-                            <span class="status-badge {esc(saved_class)}">提示词{esc(saved_label)}</span>
+                            <span class="status-badge {esc(saved_class)}" data-prompt-save-status title="{esc(saved_title)}">提示词{esc(saved_label)}</span>
                         </div>
-                        <div class="segment-action-row" role="group" aria-label="{esc(part_id)} 分段操作">
+                        <div class="segment-action-row{' h3-segment-action-row' if editor_action_html else ''}" role="group" aria-label="{esc(part_id)} 分段操作">
+                            {editor_action_html}
                             {video_regen_action_html}
                             {prompt_regen_action_html}
                             <button type="button" class="card-regen-btn action-utility" aria-pressed="{protected_button_pressed}" title="{esc(protected_button_title)}" {protected_button_disabled} onclick="return window.AICF.toggleSegmentVideoOk('{idx}', {str(protected_video_ok).lower()}, this)">

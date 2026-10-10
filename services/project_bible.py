@@ -16,25 +16,32 @@ def _as_list(value):
     return [str(value)] if str(value) else []
 
 
-def _project_storage_dir():
-    project_name = get_current_project_name() or "current"
+def _project_storage_dir(project_name=None):
+    from services.text_jobs import current
+    job = current()
+    if job and project_name in (None, job['project']):
+        return Path(job['work']) / 'project_meta'
+    from services.context import get_current_episode_name
+    project_name = str(project_name or get_current_project_name() or "current")
+    if project_name == get_current_project_name() and get_current_episode_name() and (get_project_dir() / 'project_meta').is_dir():
+        return get_project_dir() / 'project_meta'
     path = BASE_DIR / "projects" / project_name
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def project_bible_path():
-    return _project_storage_dir() / PROJECT_BIBLE_NAME
+def project_bible_path(project_name=None):
+    return _project_storage_dir(project_name) / PROJECT_BIBLE_NAME
 
 
 def _legacy_project_bible_path():
     return get_project_dir() / PROJECT_BIBLE_NAME
 
 
-def _migrate_legacy_project_bible():
-    target = project_bible_path()
+def _migrate_legacy_project_bible(project_name=None):
+    target = project_bible_path(project_name)
     legacy = _legacy_project_bible_path()
-    if target.exists() or not legacy.exists():
+    if target.exists() or not legacy.exists() or (project_name and project_name != get_current_project_name()):
         return target
     try:
         text = legacy.read_text(encoding="utf-8-sig")
@@ -45,8 +52,8 @@ def _migrate_legacy_project_bible():
     return target
 
 
-def load_project_bible():
-    path = _migrate_legacy_project_bible()
+def load_project_bible(project_name=None):
+    path = _migrate_legacy_project_bible(project_name)
     if not path.exists():
         return {}
     try:
@@ -56,8 +63,8 @@ def load_project_bible():
         return {}
 
 
-def save_project_bible(data):
-    path = project_bible_path()
+def save_project_bible(data, project_name=None):
+    path = project_bible_path(project_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data or {}, f, ensure_ascii=False, indent=2)
@@ -193,4 +200,3 @@ def default_character_ids(bible):
 def default_background_id(bible):
     bgs = (bible or {}).get("allowed_backgrounds") or []
     return str(bgs[0].get("id")) if bgs else ""
-

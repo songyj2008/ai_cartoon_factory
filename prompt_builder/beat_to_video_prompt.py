@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 
 from prompt_builder.beat_prompt_expander import expand_beat_to_licon_prompt
@@ -62,13 +64,11 @@ def compile_beats_to_video_jobs(beats_data: dict[str, Any]) -> list[dict[str, An
     beats = beats_data.get("beats") if isinstance(beats_data, dict) else []
     if not isinstance(beats, list) or not beats:
         raise ValueError("beats 数据为空，无法生成 LiconMSR 视频任务")
-    jobs: list[dict[str, Any]] = []
-    for index, beat in enumerate(beats, start=1):
+    def compile_one(index, beat):
         if not isinstance(beat, dict):
-            continue
+            return None
         duration = beat_duration(beat)
-        jobs.append(
-            {
+        return {
                 "segment_index": index,
                 "segment_id": f"segment_{index:03d}",
                 "part_id": f"part_{index:03d}",
@@ -89,7 +89,20 @@ def compile_beats_to_video_jobs(beats_data: dict[str, Any]) -> list[dict[str, An
                 "mentioned_roles": list(beat.get("mentioned_roles") or []),
                 "background_extras": list(beat.get("background_extras") or []),
             }
-        )
+    from services.text_jobs import current
+    operation=current()
+    providers=(operation or {}).get('provider_candidates') or [(operation or {}).get('provider') or 'api']
+    if providers==['api'] or len(beats)==1:
+        jobs=[job for index,beat in enumerate(beats,start=1)
+              if (job:=compile_one(index,beat)) is not None]
+    else:
+        from services.web_llm_bridge import get_settings
+        limits=get_settings()['concurrency']
+        workers=min(len(beats),limits['total'],sum(limits.get(provider,1) for provider in providers))
+        with ThreadPoolExecutor(max_workers=max(1,workers),thread_name_prefix='prompt-compile') as pool:
+            futures=[pool.submit(copy_context().run,compile_one,index,beat)
+                     for index,beat in enumerate(beats,start=1)]
+            jobs=[job for future in futures if (job:=future.result()) is not None]
     if not jobs:
         raise ValueError("没有有效 beat 可生成 LiconMSR 视频任务")
     return jobs

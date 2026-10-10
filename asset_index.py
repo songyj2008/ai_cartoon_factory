@@ -781,6 +781,11 @@ def build_asset_index(*args, **kwargs):
 
 
 def load_asset_index():
+    from services.text_jobs import current
+    job = current()
+    if job:
+        snapshot = Path(job['work']) / 'project_meta' / 'asset_index.json'
+        return json.loads(snapshot.read_text(encoding='utf-8-sig')) if snapshot.exists() else _empty_asset_index()
     if not ASSET_INDEX_PATH.exists():
         log(f'asset_index.json not found: {ASSET_INDEX_PATH}. Click refresh assets to generate it.', 'WARN')
         return _empty_asset_index()

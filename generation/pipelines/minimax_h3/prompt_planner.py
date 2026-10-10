@@ -15,6 +15,7 @@ from services.logger import log
 _SYSTEM_PROMPT = """
 你是 MiniMax H3 Ref2VA 的单 Beat 镜头提示词规划器。
 只根据用户提供的“当前 Beat”重新规划这个 Beat 的 H3 镜头，不得使用任何旧提示词或旧 model_hints。
+source_context 是当前 Beat 的原文背景，只用于理解人物关系、事件前因和必要的连续性；不得把上下文中不属于当前 Beat 的事件、动作或台词加入镜头。镜头主体和剧情进展严格来自 current_beat 的 plot 与对白。
 剧情、角色、地点、动作结果和台词必须来自当前 Beat，不得沿用旧版本，不得新增剧情。
 把当前 Beat 规划成一个 4-15 秒视频，可包含一个或多个按时间连续的 Shot。
 每个 Shot 使用明确的主体、动作、机位、台词、声音和连续性描述。
@@ -156,6 +157,7 @@ def regenerate_h3_prompt_plan(beats_data: dict[str, Any], segment_index: int) ->
     # Old H3 hints are deliberately excluded from the model request.  This is
     # the cache boundary that makes regeneration reflect the edited Beat.
     current_beat = copy.deepcopy(beat)
+    source_context = str(current_beat.pop("source_excerpt", "") or "").strip()
     current_beat.pop("model_hints", None)
     current_beat.pop("h3_shots", None)
     current_beat.pop("shots", None)
@@ -168,7 +170,8 @@ def regenerate_h3_prompt_plan(beats_data: dict[str, Any], segment_index: int) ->
                             "ending_shot": previous_shots[-1] if previous_shots else None}
     response, _cost = _call_model(
         _SYSTEM_PROMPT,
-        json.dumps({"segment_index": index, "duration_sec": duration, "current_beat": current_beat,
+        json.dumps({"segment_index": index, "duration_sec": duration, "source_context": source_context,
+                    "current_beat": current_beat,
                     "previous_segment_context": previous_context,
                     "context_usage": "前段仅用于空间和动作承接，不复制其剧情、对白或覆盖当前 Beat；换场重新建立空间。"}, ensure_ascii=False),
         max_tokens=int(CONFIG.get("h3_prompt_regenerator_max_tokens", 3500) or 3500),

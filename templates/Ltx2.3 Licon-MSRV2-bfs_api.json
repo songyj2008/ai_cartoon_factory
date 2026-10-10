@@ -10,7 +10,7 @@
   },
   "5": {
     "inputs": {
-      "text": "Describe the video to generate. The application replaces this prompt before submission.",
+      "text": "0-5秒 — 内景，办公室调度区，白天。中景，镜头缓慢推近，空间明亮，冷白荧光灯，背景可见忙碌的工位和闪烁的调度屏幕。李总（深蓝西装，干净利落）站在收件台前，双臂抱胸，神情严肃。老张（深色夹克，灰头土脸，胡茬明显）从画面外快步走进，手里捧着一台嗡嗡作响的破旧小电扇，神色慌张。\n\n5-8秒 — 镜头继续推近至近景。李总低头，目光紧盯老张手里呼呼转的小电扇，眉头紧锁，语气低沉克制：“老张，让你去修服务器机柜，你怀里抱的什么东西？”老张下意识把小电扇往怀里藏了藏，但电扇吹得他头发乱飞，场面滑稽。\n\n8-12秒 — 老张抹了把脸上的灰，语速飞快，一本正经地胡诌：“李总，机房太热，服务器都罢工了！我这是物理降温法，先救火再修机器！”话音刚落，老张手里的小电扇突然“咔”一声，扇叶飞了出去，擦着李总头顶飞过，钉在背后的文件柜上。李总脸色瞬间僵硬。\n\n12-15秒 — 老张望着飞出去的扇叶，尴尬地咽了口唾沫。李总缓缓转头看向文件柜，又转头看向老张，嘴角抽搐，压低声音带着颤音说：“那东西……不是让你拿去修的，是让你丢掉的报废品……”老张愣住，两人对视。背景的同事集体探头，憋笑憋到肩膀发抖。老张默默把手里的电扇底座放到桌上，低声说：“那……那咱俩赶紧跑？”李总闭眼扶额，画面定格。",
       "clip": [
         "26",
         0
@@ -405,7 +405,7 @@
   },
   "80": {
     "inputs": {
-      "file_name": "reference_1.png"
+      "file_name": "/root/ai_cartoon_factory/assets/characters/identities/dispatcher_001/dispatcher_001_fullbody.png"
     },
     "class_type": "LoadImageFromFile",
     "_meta": {
@@ -414,7 +414,7 @@
   },
   "81": {
     "inputs": {
-      "file_name": "reference_2.png"
+      "file_name": "/root/ai_cartoon_factory/assets/characters/identities/laozhang/laozhang_front.png"
     },
     "class_type": "LoadImageFromFile",
     "_meta": {
@@ -423,7 +423,7 @@
   },
   "82": {
     "inputs": {
-      "file_name": "reference_3.png"
+      "file_name": "/root/ai_cartoon_factory/assets/backgrounds/boss_office_day.png"
     },
     "class_type": "LoadImageFromFile",
     "_meta": {
@@ -432,7 +432,7 @@
   },
   "83": {
     "inputs": {
-      "file_name": "reference_4.png"
+      "file_name": "/root/ai_cartoon_factory/assets/backgrounds/boss_office_day.png"
     },
     "class_type": "LoadImageFromFile",
     "_meta": {
@@ -441,7 +441,7 @@
   },
   "84": {
     "inputs": {
-      "file_name": "background.png"
+      "file_name": "/root/ai_cartoon_factory/assets/backgrounds/boss_office_day.png"
     },
     "class_type": "LoadImageFromFile",
     "_meta": {
@@ -486,3 +486,4 @@
     }
   }
 }
+

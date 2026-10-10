@@ -16,6 +16,10 @@ def load_industry_profile(project_name=None):
     """Return a project's industry profile, or an empty dict on any failure."""
     name = _project_name(project_name)
     profile_path = BASE_DIR / "projects" / name / "industry_profile.json"
+    from services.text_jobs import current
+    job = current()
+    if job:
+        profile_path = Path(job['work']) / 'project_meta' / 'industry_profile.json'
     if not profile_path.exists():
         return {}
 

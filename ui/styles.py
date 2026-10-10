@@ -1,4 +1,4 @@
-"""Gradio application styles."""
+﻿"""Gradio application styles."""
 
 CSS = """
 /* AI Cartoon Factory UI
@@ -2762,9 +2762,13 @@ input[type="radio"]:disabled {
     min-width: 0;
     color: var(--text-card);
     font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.detail-item.path-line:not(.detail-wide) {
+    grid-column: 1 / -1;
 }
 
 .detail-wide {
@@ -2774,7 +2778,7 @@ input[type="radio"]:disabled {
 .detail-wide b {
     max-width: calc(100% - 60px);
     display: inline-block;
-    vertical-align: bottom;
+    vertical-align: top;
 }
 
 .usage-summary-line,
@@ -3150,6 +3154,76 @@ textarea.segment-source-excerpt.prompt-full {
     overflow: auto !important;
 }
 
+.h3-source-count {
+    flex: none;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.h3-prompt-block .h3-copy-source {
+    margin-left: auto !important;
+}
+
+.group-actions.h3-group-actions {
+    width: min(360px, 100%);
+}
+
+.h3-segment-action-row {
+    width: 100%;
+    justify-content: flex-end;
+}
+
+.segment-action-row.h3-segment-action-row {
+    justify-content: flex-end;
+}
+
+.h3-segment-action-row::before {
+    content: "";
+    flex: 0 0 100%;
+    height: 0;
+    order: 2;
+}
+
+.h3-segment-action-row .h3-prompt-open-action {
+    margin-right: 0;
+    order: 1;
+}
+
+.h3-segment-action-row .primary-mini {
+    order: 1;
+}
+
+.h3-segment-action-row [aria-pressed] {
+    margin-left: auto;
+    order: 3;
+}
+
+.segment-source-block .segment-source-excerpt {
+    width: calc(100% - 24px);
+    min-height: 220px;
+    height: 220px;
+    margin: 0 12px 12px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text-body);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+textarea.segment-source-excerpt.prompt-full {
+    min-height: 220px !important;
+    height: 220px !important;
+    font-family: var(--font-ui);
+}
+
 .primary-mini {
     border-color: var(--theme-accent-border-strong) !important;
     background: var(--theme-accent) !important;
@@ -3168,7 +3242,7 @@ textarea.segment-source-excerpt.prompt-full {
     display: none;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: 12px;
     background: rgba(15, 23, 42, 0.58);
     backdrop-filter: blur(8px);
 }
@@ -3180,9 +3254,10 @@ textarea.segment-source-excerpt.prompt-full {
 .aicf-prompt-modal-card {
     display: flex;
     flex-direction: column;
-    width: min(1280px, 96vw);
-    height: 92vh;
-    max-height: 92vh;
+    width: 100%;
+    max-width: none;
+    height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 24px);
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
@@ -3275,6 +3350,23 @@ textarea.segment-source-excerpt.prompt-full {
     flex: 1 1 auto;
     min-height: 0;
 }
+
+.aicf-prompt-source-context {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
+}
+.aicf-prompt-source-context label { font-size: 13px; font-weight: 700; color: var(--text-card); }
+.aicf-prompt-source-context small { font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.aicf-prompt-source-context textarea {
+    width: 100%; min-height: 96px; max-height: 260px; resize: vertical; box-sizing: border-box;
+    padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--text-body); font: inherit; font-size: 13px; line-height: 1.55;
+}
+.aicf-prompt-source-context textarea:focus-visible { outline: 2px solid var(--theme-accent); outline-offset: 2px; }
 
 .aicf-prompt-material-panel {
     min-width: 0;
@@ -3519,7 +3611,8 @@ textarea.segment-source-excerpt.prompt-full {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    gap: 6px 16px;
+    flex-wrap: wrap;
     padding: 10px 16px 8px;
 }
 
@@ -3534,6 +3627,31 @@ textarea.segment-source-excerpt.prompt-full {
     font-size: 11px;
     line-height: 1.4;
     text-align: right;
+}
+
+.aicf-prompt-version-meta {
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.45;
+}
+
+.aicf-prompt-version-meta.is-match {
+    border-color: var(--success-border);
+    background: var(--success-soft);
+    color: var(--success-text);
+}
+
+.aicf-prompt-version-meta.is-different {
+    border-color: var(--warning-border);
+    background: var(--warning-soft);
+    color: var(--warning-text);
 }
 
 .aicf-prompt-modal-feedback {
@@ -3618,8 +3736,8 @@ textarea.segment-source-excerpt.prompt-full {
 
     .aicf-prompt-modal-card {
         width: 100%;
-        height: 96vh;
-        max-height: 96vh;
+        height: calc(100dvh - 16px);
+        max-height: calc(100dvh - 16px);
     }
 
     .aicf-prompt-modal-content {
@@ -4571,6 +4689,12 @@ body.minimal-mode .one-click-action-row {
     margin: 0 12px 10px;
 }
 
+.h3-prompt-block > .h3-config-status:empty {
+    display: none;
+    min-height: 0;
+    margin: 0;
+}
+
 .aicf-prompt-material-panel[hidden] {
     display: none !important;
 }
@@ -4763,6 +4887,40 @@ body.minimal-mode .one-click-action-row {
     margin: 0 0 16px;
 }
 
+.aicf-h3-config-panel .h3-asset-list li {
+    flex-wrap: wrap;
+    min-width: 0;
+}
+.aicf-h3-config-panel .h3-asset-list li > span,
+.aicf-h3-config-panel .h3-asset-list audio,
+.aicf-h3-config-panel .h3-asset-list select {
+    width: 100%;
+    min-width: 0;
+}
+.aicf-h3-config-panel .h3-asset-role {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    box-sizing: border-box;
+}
+.aicf-h3-config-panel .h3-asset-list select {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px;
+    background: var(--surface);
+    color: var(--text-body);
+}
+.aicf-h3-config-panel .h3-asset-list label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+}
+.aicf-h3-config-panel .h3-asset-list :focus-visible {
+    outline: 2px solid var(--theme-accent);
+    outline-offset: 2px;
+}
+
 .aicf-h3-config-panel .h3-upload-grid {
     grid-template-columns: 1fr;
     margin: 0 0 16px;
@@ -4809,5 +4967,339 @@ body.minimal-mode .one-click-action-row {
         scroll-behavior: auto !important;
         transition-duration: 0.01ms !important;
     }
+}
+
+#asset_library_page {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 12000 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 20px clamp(16px, 3vw, 48px) 32px !important;
+    overflow: auto !important;
+    background: var(--bg) !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+#asset_library_page > div {
+    width: 100% !important;
+    max-width: 1680px !important;
+    margin: 0 auto !important;
+}
+
+.project-assets-topbar {
+    position: sticky !important;
+    top: -20px !important;
+    z-index: 4 !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 12px 4px 16px !important;
+    background: var(--bg) !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+
+.project-assets-topbar .section-title {
+    margin: 2px 0 0 !important;
+    font-size: 24px !important;
+}
+
+.project-assets-close {
+    min-height: 42px !important;
+}
+
+.project-assets-layout {
+    align-items: flex-start !important;
+    gap: 22px !important;
+    padding-top: 18px !important;
+}
+
+.project-assets-sidebar {
+    position: sticky !important;
+    top: 78px !important;
+    max-height: calc(100dvh - 100px) !important;
+    overflow: auto !important;
+    padding: 16px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    background: var(--surface) !important;
+}
+
+#project_assets_page :where(h1, h2, h3, p, label, .block-label, .label-wrap, .block-info) {
+    color: var(--text-label) !important;
+    opacity: 1 !important;
+}
+
+#project_assets_page :where(.block-label, .label-wrap, .block-info, .gallery-label) {
+    border-color: var(--border) !important;
+    background: var(--surface-subtle) !important;
+    color: var(--text-label) !important;
+}
+
+.project-assets-project-list :where(.wrap, .form, .block, fieldset) {
+    border-color: transparent !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.project-assets-project-list label {
+    min-height: 42px !important;
+    margin: 4px 0 !important;
+    padding: 9px 12px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 9px !important;
+    background: var(--surface-subtle) !important;
+    color: var(--text-body) !important;
+    opacity: 1 !important;
+    cursor: pointer !important;
+}
+
+.project-assets-project-list label :where(span, strong, small) {
+    background: transparent !important;
+    color: var(--text-body) !important;
+    opacity: 1 !important;
+}
+
+.project-assets-project-list label:has(input[type="radio"]:checked) {
+    border-color: var(--accent-border-strong) !important;
+    background: color-mix(in srgb, var(--accent-soft) 76%, var(--surface)) !important;
+    color: var(--accent) !important;
+    box-shadow: var(--active-ring) !important;
+}
+
+.project-assets-project-list label:has(input[type="radio"]:checked) :where(span, strong, small) {
+    color: var(--accent) !important;
+}
+
+.project-assets-content {
+    min-width: 0 !important;
+}
+
+.project-assets-galleries {
+    align-items: flex-start !important;
+    gap: 18px !important;
+}
+
+.project-assets-section {
+    min-width: 0 !important;
+    padding: 14px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    background: var(--surface) !important;
+}
+
+.project-assets-gallery {
+    min-height: 240px !important;
+    color: var(--text-body) !important;
+}
+
+.project-assets-gallery :where(.wrap, .form, .block, figure, figcaption, [data-testid="gallery-item"]) {
+    border-color: var(--border) !important;
+    background-color: var(--surface) !important;
+    color: var(--text-body) !important;
+}
+
+.project-assets-gallery :where(figcaption, .caption, [data-testid="gallery-item"] > div:last-child) {
+    background: color-mix(in srgb, var(--surface) 94%, var(--accent-soft)) !important;
+    color: var(--text-body) !important;
+    opacity: 1 !important;
+}
+
+.project-assets-gallery :where(figcaption, .caption) * {
+    color: var(--text-body) !important;
+}
+
+.project-assets-gallery [data-testid="gallery"] {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important;
+    gap: 12px !important;
+}
+
+.project-assets-gallery .thumbnail-item {
+    cursor: pointer !important;
+}
+
+.project-assets-gallery .thumbnail-item.aicf-project-asset-selected {
+    outline: 3px solid var(--success) !important;
+    outline-offset: -3px !important;
+    box-shadow: 0 0 0 2px var(--success-soft) !important;
+}
+
+.project-assets-gallery .thumbnail-item.selected:not(.aicf-project-asset-selected) {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+#project_assets_page .project-assets-selected-summary :where(input, textarea) {
+    color: var(--danger) !important;
+    -webkit-text-fill-color: var(--danger) !important;
+    font-weight: 700 !important;
+    opacity: 1 !important;
+}
+
+.project-assets-assignment-editor {
+    margin-top: 18px !important;
+    padding: 18px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    background: var(--surface) !important;
+    color: var(--text-body) !important;
+}
+
+.project-assets-assignment-editor :where(.wrap, .form, .block, .input-container, fieldset) {
+    border-color: var(--border) !important;
+    background: var(--surface) !important;
+    color: var(--text-body) !important;
+    box-shadow: none !important;
+}
+
+.project-assets-assignment-editor :where(label, span, p, .block-label, .block-info) {
+    color: var(--text-label) !important;
+    opacity: 1 !important;
+}
+
+.project-assets-assignment-editor input:disabled {
+    border-color: var(--border) !important;
+    background: var(--surface-subtle) !important;
+    color: var(--text-body) !important;
+    -webkit-text-fill-color: var(--text-body) !important;
+    opacity: 1 !important;
+}
+
+.project-assets-owner-checkboxes :where(.wrap, .form, .block) {
+    background: var(--surface) !important;
+    color: var(--text-body) !important;
+}
+
+.project-assets-owner-checkboxes label {
+    min-height: 40px !important;
+    padding: 7px 10px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    background: var(--surface-subtle) !important;
+    color: var(--text-body) !important;
+}
+
+.project-assets-owner-checkboxes label:has(input[type="checkbox"]:checked) {
+    border-color: var(--accent-border-strong) !important;
+    background: color-mix(in srgb, var(--accent-soft) 76%, var(--surface)) !important;
+    color: var(--accent) !important;
+}
+
+.project-assets-owner-checkboxes label :where(span, small) {
+    color: inherit !important;
+    opacity: 1 !important;
+}
+
+@media (max-width: 900px) {
+    #asset_library_page { padding: 12px 12px 24px !important; }
+    .project-assets-layout { flex-direction: column !important; }
+    .project-assets-sidebar { position: static !important; width: 100% !important; max-height: none !important; }
+    .project-assets-project-list { display: flex !important; flex-wrap: wrap !important; gap: 6px !important; }
+    .project-assets-galleries { flex-direction: column !important; }
+    .project-assets-section { width: 100% !important; }
+}
+"""
+
+from ui.web_llm_ui import WEB_LLM_CSS
+
+CSS += WEB_LLM_CSS
+from ui.text_jobs_ui import PANEL_CSS
+CSS += PANEL_CSS
+
+CSS += r"""
+.project-assets-gallery .thumbnail-item { position:relative; }
+.project-assets-gallery .thumbnail-item img { object-fit:contain !important; object-position:center !important; }
+.aicf-asset-preview-trigger { position:absolute;right:4px;bottom:4px;z-index:5;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:7px;background:rgba(15,23,42,.88);color:white;cursor:pointer; }
+.aicf-asset-preview-trigger:hover { background:#2563eb; }
+.aicf-asset-preview-trigger:focus-visible { outline:3px solid #60a5fa;outline-offset:2px; }
+.project-assets-gallery :where(.caption,figcaption) { padding-right:44px !important; }
+.aicf-asset-image-preview { width:min(1100px,94vw);max-width:94vw;max-height:94vh;padding:48px 16px 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface,#fff);color:var(--text-body,#111827); }
+.aicf-asset-image-preview::backdrop { background:rgba(0,0,0,.75); }
+.aicf-asset-image-preview img { display:block;width:100%;height:calc(86vh - 100px);object-fit:contain; }
+.aicf-asset-image-preview p { margin:10px 0 0;text-align:center; }
+.aicf-asset-preview-close { position:absolute;right:10px;top:6px;width:40px;height:40px;border:0;border-radius:6px;font-size:28px;cursor:pointer;background:var(--surface-subtle,#f1f5f9);color:inherit; }
+"""
+
+CSS += r"""
+#asset_management_tabs { width:100%; }
+#asset_management_tabs > .tab-nav { gap:8px;margin-bottom:16px; }
+#asset_upload_page { padding-top:8px; }
+#project_assets_page { position:relative !important;inset:auto !important;z-index:auto !important;width:100% !important;height:auto !important;padding:0 !important;overflow:visible !important; }
+"""
+
+CSS += r"""
+.sidebar-column .project-management-card { padding:16px !important;border:1px solid var(--border,#e2e8f0) !important;border-radius:12px !important;background:var(--surface,#fff) !important;gap:12px !important;box-shadow:none !important; }
+.project-management-heading strong { display:block;font-size:16px;color:var(--text-body,#172033); }
+.project-management-heading p,.project-management-hint p { margin:5px 0 0;color:var(--text-secondary,#526176) !important;font-size:12px;line-height:1.6; }
+.project-management-card :where(.block-label,.label-wrap,label) { color:var(--text-body,#243247) !important;opacity:1 !important; }
+.project-management-card :where(.block-label,.label-wrap) * { color:inherit !important;opacity:1 !important; }
+.project-management-card :where(input,textarea) { color:var(--text-body,#243247) !important; }
+.project-management-card :where(input,textarea)::placeholder { color:#64748b !important;opacity:1 !important; }
+.project-management-card .project-management-section { border:1px solid var(--border,#e2e8f0) !important;border-radius:8px !important;background:var(--surface,#fff) !important; }
+.project-management-card button { min-height:40px !important;border-radius:8px !important;font-size:13px !important;font-weight:600 !important;cursor:pointer; }
+.project-management-card button.project-management-primary { background:#2563eb !important;color:white !important;border:1px solid #2563eb !important; }
+.project-management-card button.project-management-secondary,.project-management-card .project-management-secondary button { background:var(--surface-subtle,#f1f5f9) !important;color:var(--text-body,#243247) !important;border:1px solid var(--border,#cbd5e1) !important; }
+.project-management-card button.project-management-danger { background:#fff1f2 !important;color:#b91c1c !important;border:1px solid #fecaca !important; }
+.project-management-card button:focus-visible { outline:3px solid #93c5fd !important;outline-offset:2px; }
+.project-management-card button:hover { filter:brightness(.97); }
+"""
+
+CSS += r"""
+/* Gradio Group adds an inner .styler that can retain its dark theme fill. */
+.gradio-container .project-management-card {
+    --background-fill-primary:#fff;
+    --background-fill-secondary:#f8fafc;
+    --block-background-fill:#fff;
+    --block-label-background-fill:#fff;
+    --input-background-fill:#fff;
+    --body-text-color:#243247;
+    --block-label-text-color:#243247;
+    --body-text-color-subdued:#526176;
+}
+.gradio-container .project-management-card > div,
+.gradio-container .project-management-card :where(.styler,.form,.block,.panel,.gr-group) {
+    background:#fff !important;background-color:#fff !important;color:#243247 !important;box-shadow:none !important;
+}
+.gradio-container .project-management-card :where(.block-label,.label-wrap,.block-info) {
+    background:transparent !important;color:#243247 !important;
+}
+.gradio-container .project-management-heading strong { color:#172033 !important; }
+.gradio-container .project-management-heading p,
+.gradio-container .project-management-hint p { color:#526176 !important; }
+.gradio-container .project-management-section > div { background:#fff !important; }
+"""
+
+CSS += r"""
+/* Include Gradio's caption-label; it otherwise keeps the default dark fill. */
+.gradio-container .project-assets-gallery :where(.caption,.caption-label,.caption-text,.image-caption,figcaption) {
+    background:#f1f5f9 !important;background-color:#f1f5f9 !important;
+    color:#243247 !important;opacity:1 !important;text-shadow:none !important;
+    border-top:1px solid #e2e8f0 !important;font-size:12px !important;line-height:1.5 !important;
+}
+.gradio-container .project-assets-gallery :where(.caption,.caption-label,.caption-text,.image-caption,figcaption) * {
+    color:#243247 !important;opacity:1 !important;text-shadow:none !important;
+}
+.gradio-container .project-assets-gallery .aicf-asset-preview-trigger {
+    bottom:28px;background:#fff !important;color:#334155 !important;border:1px solid #cbd5e1;box-shadow:0 1px 4px rgba(15,23,42,.12);
+}
+"""
+
+
+CSS += r"""
+/* Assignment feedback sits below actions and never uses Gradio's dark fill. */
+.gradio-container .project-assets-assignment-editor .project-assets-assignment-actions,
+.gradio-container .project-assets-assignment-editor .project-assets-assignment-status {
+    background: var(--surface, #fff) !important;
+    background-color: var(--surface, #fff) !important;
+    color: var(--text-body, #243247) !important;
+    box-shadow: none !important;
+}
+.gradio-container .project-assets-assignment-editor .project-assets-assignment-status :where(.prose, .markdown, p) {
+    background: transparent !important;
+    color: inherit !important;
 }
 """

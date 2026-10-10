@@ -8,16 +8,28 @@ import shutil
 import subprocess
 import sys
 import uuid
+from functools import wraps
 from pathlib import Path
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from services.context import BASE_DIR, CONFIG, EPISODES_DIR, assert_current_runtime_writable, get_current_episode_name, get_current_project_name, get_project_dir
 from services.file_utils import load_json_file_silent
 from services.gradio_runtime import ensure_asyncio_event_loop, ensure_gradio_app_runtime
 from services.logger import get_logs, log
 from ui.project_handlers import final_video_search_dirs, latest_final_video_path, list_project_episodes
+
+
+def _pinned_segment_route(handler):
+    """Keep one request bound to its project across background LLM waits."""
+    @wraps(handler)
+    async def wrapped(*args, **kwargs):
+        from services.context import pin_runtime
+        with pin_runtime():
+            return await handler(*args, **kwargs)
+    return wrapped
 
 
 _H3_MEDIA_SUFFIXES = {
@@ -69,7 +81,7 @@ def _current_state():
     return {
         "project_name": project_name,
         "current_episode": get_current_episode_name() or "",
-        "readonly": bool(get_current_episode_name()),
+        "readonly": bool(get_current_episode_name()) and not (project / '.draft').is_file(),
         "episodes": episodes,
         "episode_items": [
             {"label": label, "value": episode, "video_url": _runtime_video_url(project_name, episode)}
@@ -97,6 +109,11 @@ def register_api_routes(demo):
         return demo
 
     try:
+        from ui.web_llm_routes import register_web_llm_routes
+        register_web_llm_routes(app)
+        from ui.web_video_routes import register_web_video_routes
+        register_web_video_routes(app)
+
         @app.get("/api/project/current_state")
         def api_project_current_state():
             return JSONResponse(_current_state())
@@ -127,6 +144,7 @@ def register_api_routes(demo):
                 return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
         @app.post("/api/segment/regenerate_video")
+        @_pinned_segment_route
         async def api_regenerate_segment_video(request: Request):
             try:
                 payload = await request.json()
@@ -134,19 +152,27 @@ def register_api_routes(demo):
                 payload = {}
             try:
                 from generation.service import get_generation_service
+                from generation.channels import get_channel
                 from generation.job_schema import resolved_model_id
                 from workflow.runninghub_sync import sync_runninghub_video_jobs
                 from workflow.segment_runner import save_segment_director_prompt
                 from workflow.video_merge import load_video_jobs
 
                 segment_index = int(float((payload or {}).get("segment_index") or 0))
+                channel_id = str((payload or {}).get("channel_id") or "").strip() or None
+                if not channel_id:
+                    channel_payload = load_video_jobs()
+                    channel_segment = next((item for item in channel_payload.get('segments') or [] if int(item.get('segment_index') or 0) == segment_index), {})
+                    channel_id = str((channel_segment.get('generation_config') or {}).get('channel_id') or 'runninghub')
+                uses_workflow = get_channel(channel_id).uses_workflow if channel_id else True
                 if segment_index <= 0:
                     raise ValueError("invalid segment index")
+                assert_current_runtime_writable("重新生成分段视频")
                 # A task may have been cancelled directly in RunningHub after
                 # this browser loaded.  When RunningHub is the chosen backend,
                 # reconcile it before the edit/save path applies its active-task
                 # protection.
-                if str(CONFIG.get("video_submit_backend") or "").strip().lower() == "runninghub":
+                if (channel_id or str(CONFIG.get("video_submit_backend") or "")).lower() == "runninghub":
                     log("[LICON_MSR][runninghub][regen] checking remote task status before retry", "STEP")
                     sync_runninghub_video_jobs()
                 service = get_generation_service()
@@ -163,18 +189,21 @@ def register_api_routes(demo):
                     has_reference_roles = isinstance((payload or {}).get("reference_roles"), list)
                     has_reference_image_ids = isinstance((payload or {}).get("reference_image_ids"), dict)
                     has_scene_id = "scene_id" in (payload or {})
+                    has_full_prompt = "full_prompt" in (payload or {})
                     reference_roles = [str(role) for role in (payload or {}).get("reference_roles") or []] if has_reference_roles else None
                     reference_image_ids = dict((payload or {}).get("reference_image_ids") or {}) if has_reference_image_ids else None
                     scene_id = str((payload or {}).get("scene_id") or "") if has_scene_id else None
-                    if director_prompt or has_reference_roles or has_reference_image_ids or has_scene_id:
-                        save_segment_director_prompt(
+                    if director_prompt or has_reference_roles or has_reference_image_ids or has_scene_id or has_full_prompt:
+                        await run_in_threadpool(save_segment_director_prompt,
                             segment_index,
                             director_prompt,
                             reference_roles=reference_roles,
                             reference_image_ids=reference_image_ids,
                             scene_id=scene_id,
+                            full_prompt_override=str((payload or {}).get("full_prompt") or "") if has_full_prompt else None,
+                            build_workflow=uses_workflow,
                         )
-                else:
+                elif uses_workflow:
                     validation = service.validate_segment_generation_config(segment_index)
                     if validation.get("errors"):
                         raise ValueError(
@@ -195,15 +224,18 @@ def register_api_routes(demo):
                     # H3 owns a different prompt compiler, asset binder and
                     # graph.  Always rebuild its selected segment before a
                     # retry; an LTX workflow must never be submitted as H3.
-                    service.prepare_segments(beats_data, segment_indices={segment_index})
-                log(f"[generation] API regenerate video part_{segment_index:03d} model={model_id}", "STEP")
-                result = service.submit_saved_segments({segment_index}, wait=False)
+                    await run_in_threadpool(service.prepare_segments, beats_data, segment_indices={segment_index})
+                log(f"[generation] API regenerate video part_{segment_index:03d} channel={channel_id} model={model_id}", "STEP")
+                result = await run_in_threadpool(service.submit_saved_segments, {segment_index}, wait=False, channel_id=channel_id)
                 from ui.group_panel import render_segment_panel
 
                 return JSONResponse(
                     {
                         "ok": True,
                         "video_jobs": result,
+                        "web_video_task_id": str(next((item.get("task_id") for item in result.get("segments") or []
+                            if isinstance(item, dict) and int(item.get("segment_index") or 0) == segment_index), "") or "")
+                            if not uses_workflow else "",
                         "segment_panel_html": render_segment_panel(result, segment_index),
                         "log_tail": get_logs(),
                     }
@@ -213,6 +245,7 @@ def register_api_routes(demo):
                 return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=500)
 
         @app.post("/api/segment/save_prompt")
+        @_pinned_segment_route
         async def api_save_segment_prompt(request: Request):
             try:
                 payload = await request.json()
@@ -237,7 +270,7 @@ def register_api_routes(demo):
                 if segment is None:
                     raise ValueError(f"segment not found: {segment_index}")
                 if resolved_model_id(segment, jobs) != "ltx23_licon_msr_v2":
-                    result = get_generation_service().update_segment_generation_config(
+                    result = await run_in_threadpool(get_generation_service().update_segment_generation_config,
                         segment_index,
                         prompt_override=full_prompt if full_prompt is not None else director_prompt,
                     )
@@ -245,20 +278,85 @@ def register_api_routes(demo):
                     has_roles = isinstance((payload or {}).get("reference_roles"), list)
                     has_images = isinstance((payload or {}).get("reference_image_ids"), dict)
                     has_scene = "scene_id" in (payload or {})
-                    result = save_segment_director_prompt(
+                    result = await run_in_threadpool(save_segment_director_prompt,
                         segment_index,
                         director_prompt,
                         reference_roles=[str(role) for role in (payload or {}).get("reference_roles") or []] if has_roles else None,
                         reference_image_ids=dict((payload or {}).get("reference_image_ids") or {}) if has_images else None,
                         scene_id=str((payload or {}).get("scene_id") or "") if has_scene else None,
                         full_prompt_override=full_prompt,
+                        build_workflow=(payload or {}).get("build_workflow") is not False,
                     )
                 return JSONResponse({"ok": True, "video_jobs": result, "log_tail": get_logs()})
             except Exception as exc:
                 log(f"[LICON_MSR][api_save_prompt][error] {exc}", "ERROR")
                 return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=400)
 
+        @app.post("/api/segment/source-excerpt")
+        @_pinned_segment_route
+        async def api_save_segment_source_excerpt(request: Request):
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            try:
+                from workflow.video_merge import load_video_jobs, save_video_jobs, video_jobs_lock
+                from services.context import assert_current_runtime_writable
+                import json
+
+                assert_current_runtime_writable("保存分段剧情上下文")
+                index = int(float((payload or {}).get("segment_index") or 0))
+                excerpt = str((payload or {}).get("source_excerpt") or "")
+                if index <= 0:
+                    raise ValueError("invalid segment index")
+                if (payload or {}).get("regenerate_prompt") is True:
+                    with video_jobs_lock():
+                        jobs = load_video_jobs()
+                        segment = next((item for item in jobs.get("segments") or []
+                                        if isinstance(item, dict) and int(item.get("segment_index") or 0) == index), None)
+                        if segment is None:
+                            raise ValueError(f"segment not found: {index}")
+                        beats_data = json.loads((get_project_dir() / "beats.json").read_text(encoding="utf-8-sig"))
+                        beats = beats_data.get("beats") if isinstance(beats_data.get("beats"), list) else []
+                        uid = str(segment.get("beat_uid") or "")
+                        beat = next((item for item in beats if isinstance(item, dict) and uid and str(item.get("beat_uid") or "") == uid), None)
+                        if beat is None and 0 < index <= len(beats):
+                            beat = beats[index - 1]
+                        if not isinstance(beat, dict):
+                            raise ValueError("找不到分段对应的 Beat")
+                    from services.text_jobs import submit
+                    task = submit('source_replan', [index, excerpt], (payload or {}).get('editors') or {})
+                    return JSONResponse({'ok': True, 'source_excerpt': excerpt,
+                                         'operation_id': task['id'], 'message': '重新规划已加入后台任务，原项目内容会在应用结果时更新。'})
+                with video_jobs_lock():
+                    jobs = load_video_jobs()
+                    segment = next((item for item in jobs.get("segments") or []
+                                    if isinstance(item, dict) and int(item.get("segment_index") or 0) == index), None)
+                    if segment is None:
+                        raise ValueError(f"segment not found: {index}")
+                    beats_path = get_project_dir() / "beats.json"
+                    beats_data = json.loads(beats_path.read_text(encoding="utf-8-sig"))
+                    beats = beats_data.get("beats") if isinstance(beats_data.get("beats"), list) else []
+                    uid = str(segment.get("beat_uid") or "")
+                    beat = next((item for item in beats if isinstance(item, dict) and uid and str(item.get("beat_uid") or "") == uid), None)
+                    if beat is None and 0 < index <= len(beats):
+                        beat = beats[index - 1]
+                    if not isinstance(beat, dict):
+                        raise ValueError("找不到分段对应的 Beat")
+                    beat["source_excerpt"] = excerpt
+                    segment["source_excerpt"] = excerpt
+                    beats_path.write_text(json.dumps(beats_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    save_video_jobs(jobs)
+                    config = segment.get("generation_config") if isinstance(segment.get("generation_config"), dict) else {}
+                return JSONResponse({"ok": True, "source_excerpt": excerpt,
+                                     "canonical_prompt": str(config.get("prompt_override") or ""),
+                                     "video_jobs": jobs})
+            except Exception as exc:
+                log(f"[generation][api_source_excerpt][error] {exc}", "ERROR")
+                return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
         @app.post("/api/segment/model")
+        @_pinned_segment_route
         async def api_set_segment_model(request: Request):
             """Model-neutral endpoint used when a future model is registered in the UI."""
             try:
@@ -270,7 +368,7 @@ def register_api_routes(demo):
 
                 assert_current_runtime_writable("切换分段视频模型")
                 segment_index = int(float((payload or {}).get("segment_index") or 0))
-                result = get_generation_service().set_segment_model_override(
+                result = await run_in_threadpool(get_generation_service().set_segment_model_override,
                     segment_index,
                     str((payload or {}).get("model_id") or ""),
                 )
@@ -289,6 +387,7 @@ def register_api_routes(demo):
                 return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=400)
 
         @app.post("/api/segment/generation-config")
+        @_pinned_segment_route
         async def api_save_segment_generation_config(request: Request):
             try:
                 payload = await request.json()
@@ -304,11 +403,12 @@ def register_api_routes(demo):
                 manifest = (payload or {}).get("asset_manifest")
                 if manifest is not None and not isinstance(manifest, list):
                     raise ValueError("asset_manifest must be a list")
-                result = get_generation_service().update_segment_generation_config(
+                result = await run_in_threadpool(get_generation_service().update_segment_generation_config,
                     segment_index,
                     generation_mode=str((payload or {}).get("generation_mode") or "ref2va"),
                     asset_manifest=manifest,
                     prompt_override=str((payload or {}).get("prompt_override") or ""),
+                    prompt_provenance=(payload or {}).get("prompt_provenance") if isinstance((payload or {}).get("prompt_provenance"), dict) else None,
                     force_save=(payload or {}).get("force_save") is True,
                 )
                 segment = next(

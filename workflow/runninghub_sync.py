@@ -27,8 +27,10 @@ _CANCELLED_MARKERS = ("cancel", "cancell", "aborted", "terminated", "not_found",
 
 
 def _failure_message(status: dict[str, Any]) -> str:
+    if str(status.get("msg") or "").upper() == "APIKEY_TASK_NOT_FOUND":
+        return "RunningHub 远程任务不存在（可能已取消或删除），可重新生成。"
     failed_reason = status.get("failedReason") if isinstance(status.get("failedReason"), dict) else {}
-    for key in ("exception_message", "errorMessage", "message", "error"):
+    for key in ("exception_message", "errorMessage", "message", "msg", "error"):
         message = str(failed_reason.get(key) or status.get(key) or "").strip()
         if message:
             return f"RunningHub task failed: {message}"
@@ -39,9 +41,14 @@ def _sync_render_status_on_failure(segment: dict[str, Any], status_text: str) ->
     """Update the active render's status so the UI reflects a terminal failure."""
     try:
         from generation.render_history import active_render
-        render = active_render(segment)
-        if render and str(render.get("status") or "").lower() in ("running", "pending", "queued"):
+        task_id = _saved_task_id(segment)
+        render = next((item for item in reversed(segment.get("renders") or [])
+                       if task_id and str((item.get("submission") or {}).get("task_id") or "") == task_id), None)
+        if render is None:
+            render = active_render(segment)
+        if render and str(render.get("status") or "").lower() in ("running", "pending", "queued", "needs_regenerate", "workflow_ready"):
             render["status"] = "failed"
+            render.setdefault("submission", {})["submitted"] = False
             if not render.get("error"):
                 render["error"] = f"RunningHub task {status_text}"
     except Exception:
@@ -82,7 +89,7 @@ def _has_terminal_failure_status(data: Any) -> bool:
     if isinstance(data, dict):
         # Status fields are authoritative.  Some RunningHub responses put the
         # human-readable cancellation message in a nested ``data`` object.
-        for key in ("status", "taskStatus", "state", "message", "error", "failedReason", "data"):
+        for key in ("status", "taskStatus", "state", "message", "msg", "error", "failedReason", "data"):
             if key in data and _has_terminal_failure_status(data[key]):
                 return True
         return False
@@ -242,7 +249,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
                         failure_outputs = provider.client.get_task_outputs(task_id)
                     except Exception:
                         failure_outputs = []
-                    record_runninghub_attempt(segment, task_id, status=status_text, outputs=failure_outputs)
+                    record_runninghub_attempt(segment, task_id, status="failed", outputs=failure_outputs)
                     segment["status"] = "failed"
                     segment["error"] = _failure_message(status)
                     # This remote task has reached a terminal state.  Keep its
@@ -363,6 +370,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
                     }
                     if not is_retired:
                         mark_part_failed(part_id, segment["error"])
+                    _sync_render_status_on_failure(segment, "not_found")
                     finalize_deferred_regeneration(segment, task_id=task_id)
                     changed = True
                     log(f"[LICON_MSR][runninghub][sync] marked missing task failed for {part_id}: {task_id}", "WARN")

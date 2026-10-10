@@ -216,7 +216,7 @@
   },
   "161": {
     "inputs": {
-      "image": "example.png"
+      "image": "5b863fdfed892382fc05745c7c5240af730c6be9df50d12f4f8c4f8e619da541.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -225,7 +225,7 @@
   },
   "164": {
     "inputs": {
-      "audio": "None",
+      "audio": "0d9c561666721c2e4ccc4e941a77390c350f338ed77f33f9abe060c873f48e4f.mp3",
       "audioUI": ""
     },
     "class_type": "LoadAudio",
@@ -235,7 +235,7 @@
   },
   "167": {
     "inputs": {
-      "value": "Describe the video to generate. The application replaces this prompt before submission."
+      "value": "image3是背景图片地球，太空远景. image1与image2，一开始站在地球一个地方，绕着地球快速跑一圈。image1带着红色的尾迹，image2带着绿色的尾迹。"
     },
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
@@ -365,7 +365,7 @@
   },
   "205": {
     "inputs": {
-      "image": "example.png"
+      "image": "6837c2a6346cec7aa469963e6b71396cdf4137cf2692ec5ba41adedd467a7429.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -374,7 +374,7 @@
   },
   "206": {
     "inputs": {
-      "image": "example.png"
+      "image": "7f4a1b9ca6edeb026cd889e9acc6a9196e16e8104430e6e853e893703aa8654e.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -383,7 +383,7 @@
   },
   "207": {
     "inputs": {
-      "image": "example.png"
+      "image": "7f4a1b9ca6edeb026cd889e9acc6a9196e16e8104430e6e853e893703aa8654e.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -481,7 +481,7 @@
   },
   "246": {
     "inputs": {
-      "file": "None",
+      "file": "36d98c307ee98d10637580ceb6aad0e73d753edc0dcc08748fdf7f6612883a86.mp4",
       "keep_audio": true,
       "trim_time": "0",
       "video-preview": ""

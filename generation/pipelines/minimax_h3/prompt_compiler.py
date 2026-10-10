@@ -37,6 +37,7 @@ class H3PromptCompiler:
     ) -> H3CompiledPrompt:
         override = str(config.prompt_override or "").strip()
         if override:
+            override = self._with_character_voices(override, bindings)
             H3Ref2VAValidator().validate_prompt(override).raise_for_errors()
             return H3CompiledPrompt(text=override, references=bindings.prompt_references, source="prompt_override")
 
@@ -80,8 +81,29 @@ class H3PromptCompiler:
         music = str(hints.get("non_diegetic_music") or segment.get("non_diegetic_music") or "").strip()
         sections.append("【非叙事性音乐】\n" + (music or "未指定额外配乐。"))
         text = "\n\n".join(section for section in sections if section.strip()).strip()
+        text = self._with_character_voices(text, bindings)
         H3Ref2VAValidator().validate_prompt(text).raise_for_errors()
         return H3CompiledPrompt(text=text, references=bindings.prompt_references, source="compiled")
+
+    @staticmethod
+    def _with_character_voices(text, bindings):
+        # Replace only our generated block when recompiling an edited prompt.
+        text = re.sub(r"\n*【人物音色绑定】.*?【人物音色绑定结束】", "", text, flags=re.S).strip()
+        lines = []
+        for audio in bindings.audios:
+            meta = audio.asset.metadata
+            if not meta.get("voice_only"):
+                continue
+            pictures = [image.prompt_tag for image in bindings.images
+                        if image.asset.metadata.get("identity_id") == meta.get("identity_id")]
+            if not pictures:
+                raise ValueError("人物音色参考缺少对应人物图片，请重新选择音频绑定人物")
+            lines.append(f"{audio.prompt_tag} → {'、'.join(pictures)}：音色参考（锁定音色）。{audio.asset.role}。"
+                         "仅在对应人物说话时使用该音色；台词使用当前镜头对白，不复用参考录音原文，"
+                         "不作为背景音或配乐播放，不为无对白人物新增台词。")
+        if lines:
+            text += "\n\n【人物音色绑定】\n" + "\n".join(lines) + "\n【人物音色绑定结束】"
+        return text
 
     def _subject_lines(self, bindings: H3AssetBindings) -> list[str]:
         """Define reusable visible content; Picture identifies only its source asset."""
@@ -223,7 +245,7 @@ class H3PromptCompiler:
                 retention = "参考动作、镜头运动、剪辑节奏或时间结构"
             elif kind in {"audio", "video_audio"}:
                 marker = self._retention_marker(metadata, default="reference", audio=True)
-                retention = "参考音色、台词、声音质感或节奏"
+                retention = "仅参考音色，台词使用当前剧情" if metadata.get("voice_only") else "参考音色、台词、声音质感或节奏"
             else:
                 marker = self._retention_marker(metadata, default="weak_reference")
                 retention = "作为画面参考"

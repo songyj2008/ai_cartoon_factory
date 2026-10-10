@@ -30,8 +30,8 @@ def submit_backend_config(name: str | None = None, model_id: str | None = None) 
     return config
 
 
-def get_submit_provider(model_id: str | None = None) -> BaseSubmitProvider:
-    backend = str(CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
+def get_submit_provider(model_id: str | None = None, *, backend: str | None = None) -> BaseSubmitProvider:
+    backend = str(backend or CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
     backend_config = submit_backend_config(backend, model_id=model_id)
     if backend_config and backend_config.get("enabled") is False:
         raise ValueError(f"video submit backend is disabled: {backend}")

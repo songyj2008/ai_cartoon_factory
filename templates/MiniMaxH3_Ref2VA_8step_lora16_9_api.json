@@ -1,4 +1,14 @@
 {
+  "164": {
+    "inputs": {
+      "audio": "",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
   "145": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_fp16.safetensors"
@@ -217,7 +227,7 @@
   },
   "161": {
     "inputs": {
-      "image": "example.png"
+      "image": "3b2e0162a842d45404df5fa3bf1818a50f8e949632e2a118378fb1a2f4fcb9a3.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -226,7 +236,7 @@
   },
   "167": {
     "inputs": {
-      "value": "Describe the video to generate. The application replaces this prompt before submission."
+      "value": "【主体定义】\n<Subject 1>：金色熊猫；可见内容来自 <Picture 1>。圆润体型，圆脸、圆耳朵、黑色眼圈和黑色四肢；身体周围有金色火焰光芒与少量彩色光效。全片保持人物身份、脸部、发型、服装、体型和主要配色一致。\n<Subject 2>：3号糖宝宝；可见内容来自 <Picture 2>。圆润宽脸、饱满苹果肌、较短下巴，额头完整露出；头发本身是深棕色或黑色，绝不是粉色。只有发圈是粉色；粉色发圈扎成单高马尾，脸侧有深色短卷发。身穿黄衣红裤，胸前只有一个清晰、完整、黑色的数字3；不得出现数字8、绿色发圈、双低马尾或齐刘海。全片保持人物身份、脸部、发型、服装、体型和主要配色一致。\n<Subject 3>：8号禾宝宝；可见内容来自 <Picture 3>。较小圆脸、明显大眼睛、齐刘海；头发本身是深棕色或黑色，绝不是绿色。只有发圈是绿色；绿色发圈扎成双低马尾，脸侧没有短卷发。身穿黄衣红裤，胸前和背后只有一个清晰、完整、黑色的数字8；不得出现数字3、粉色发圈、单高马尾或脸侧短卷发。全片保持人物身份、脸部、发型、服装、体型和主要配色一致。\n\n【任务概述】\n[reference generation] 8 秒。飞船内部，警示灯亮起，倒计时后强行起飞，<Subject 1>、<Subject 2>、<Subject 3>被推背感压住。\n\n【参考保留关系】\n<Subject 1>（出现于 Shot 1）：fully_preserved - 保持已定义的人物身份、脸部、发型、服装、体型与主要配色。\n<Subject 2>（出现于 Shot 1、Shot 3）：fully_preserved - 保持已定义的人物身份、脸部、发型、服装、体型与主要配色。\n<Subject 3>（出现于 Shot 1、Shot 3）：fully_preserved - 保持已定义的人物身份、脸部、发型、服装、体型与主要配色。\n\n【详细镜头描述】\n多 Shot；切镜时明确景别与承接主体，保持人物和场景连续。\n[Shot 1]（0.0–2.4 秒）：中景镜头；<Subject 1>、<Subject 3>、<Subject 2>；红色警示灯亮起，舱内正面中景，轻微晃动；<Subject 1>抓住扶手，回头大喊：坐稳扶好！</d>；声音：警报声；连续性：舱内紧张气氛\n[Shot 2] At 00:02.400（2.4–4.8 秒）：近景镜头；飞船底部；飞船底部喷出巨大烈焰；舱外仰拍，火焰升腾；声音：引擎轰鸣；连续性：飞船起飞\n[Shot 3] At 00:04.800（4.8–8.0 秒）：远景镜头；<Subject 1>、<Subject 3>、<Subject 2>；飞船猛然升空，<Subject 1>、<Subject 3>、<Subject 2>被推背感压在舱内，<Subject 3>兴奋，<Subject 2>头发竖起，<Subject 1>脸变形；舱内侧面中景，剧烈晃动；声音：引擎轰鸣，风声；连续性：起飞过程\n限制：不要出现太空外部\n\n【整体声音环境】\n警报声，倒计时声；引擎轰鸣；引擎轰鸣，风声\n\n【非叙事性音乐】\n紧张刺激的配乐"
     },
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
@@ -352,7 +362,7 @@
   },
   "205": {
     "inputs": {
-      "image": "example.png"
+      "image": "5b863fdfed892382fc05745c7c5240af730c6be9df50d12f4f8c4f8e619da541.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -361,7 +371,7 @@
   },
   "206": {
     "inputs": {
-      "image": "example.png"
+      "image": "6837c2a6346cec7aa469963e6b71396cdf4137cf2692ec5ba41adedd467a7429.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -370,7 +380,7 @@
   },
   "207": {
     "inputs": {
-      "image": "example.png"
+      "image": "7f4a1b9ca6edeb026cd889e9acc6a9196e16e8104430e6e853e893703aa8654e.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -468,7 +478,7 @@
   },
   "246": {
     "inputs": {
-      "file": "None",
+      "file": "36d98c307ee98d10637580ceb6aad0e73d753edc0dcc08748fdf7f6612883a86.mp4",
       "keep_audio": true,
       "trim_time": "0",
       "video-preview": ""

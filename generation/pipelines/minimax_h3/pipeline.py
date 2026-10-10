@@ -300,6 +300,7 @@ class MiniMaxH3Ref2VAPipeline:
         *,
         merge_after: bool = False,
         wait: bool = True,
+        backend: str | None = None,
     ) -> dict[str, Any]:
         """Submit H3-owned saved workflows through the configured backend."""
 
@@ -318,7 +319,7 @@ class MiniMaxH3Ref2VAPipeline:
         if not targets:
             raise ValueError("no saved MiniMax H3 Ref2VA segment workflows are selected")
 
-        provider = self._submit_provider()
+        provider = self._submit_provider(backend) if backend else self._submit_provider()
         backend_name = str(getattr(provider, "name", "") or "").strip().lower()
         if backend_name == "runninghub":
             from generation.scheduler import GenerationScheduler
@@ -450,6 +451,12 @@ class MiniMaxH3Ref2VAPipeline:
         except Exception as exc:
             _logger.warning("H3 auto-bind skipped for %s: %s", part_id, exc)
 
+        from services.character_voice import attach_character_voices
+        from services.context import ASSETS_DIR
+        config_data["asset_manifest"] = attach_character_voices(
+            list(config_data.get("asset_manifest") or []), dict(beat), ASSETS_DIR,
+        )
+        config = H3GenerationConfig.from_mapping(config_data)
         prefix = f"MiniMax_H3/segments/{part_id}"
         segment_source = dict(beat)
         segment_source["generation_config"] = config.to_dict()
@@ -498,6 +505,9 @@ class MiniMaxH3Ref2VAPipeline:
             if not active_scene_id:
                 active_scene_id = str(beat.get("scene_id") or previous.get("scene_id") or "").strip()
 
+        saved_config = build.config.to_dict()
+        if build.config.prompt_override:
+            saved_config["prompt_override"] = build.prompt.text
         previous.update(
             {
                 "segment_id": segment_id,
@@ -507,7 +517,7 @@ class MiniMaxH3Ref2VAPipeline:
                 "model_id": self.spec.id,
                 "resolved_model": {"id": self.spec.id, "revision": self.spec.revision},
                 "generation_mode": H3_REF2VA_GENERATION_MODE,
-                "generation_config": build.config.to_dict(),
+                "generation_config": saved_config,
                 "compiled_prompt_snapshot": compiled_prompt_snapshot,
                 "job": job.to_dict(),
                 "workflow_path": str(workflow_path),
@@ -549,9 +559,12 @@ class MiniMaxH3Ref2VAPipeline:
         from generation.render_history import begin_render, update_render
 
         job_data = segment.get("job") if isinstance(segment.get("job"), Mapping) else {}
-        workflow_path = Path(str(segment.get("workflow_path") or ""))
-        if not workflow_path.exists():
-            raise FileNotFoundError(f"saved H3 workflow does not exist: {workflow_path}")
+        workflow_value = str(segment.get("workflow_path") or "").strip()
+        if not workflow_value:
+            raise ValueError("saved H3 workflow path is empty; prepare the workflow before submission")
+        workflow_path = Path(workflow_value)
+        if not workflow_path.is_file():
+            raise FileNotFoundError(f"saved H3 workflow is not a file: {workflow_path}")
         with workflow_path.open("r", encoding="utf-8-sig") as handle:
             workflow = json.load(handle)
         if not isinstance(workflow, dict):
@@ -857,7 +870,7 @@ class MiniMaxH3Ref2VAPipeline:
     def _submit_backend_name(self) -> str:
         return str(self._config.get("video_submit_backend") or "comfyui").strip().lower()
 
-    def _submit_provider(self) -> Any:
+    def _submit_provider(self, backend: str | None = None) -> Any:
         from workflow.submit_factory import get_submit_provider
 
-        return get_submit_provider(model_id=self.spec.id)
+        return get_submit_provider(model_id=self.spec.id, backend=backend) if backend else get_submit_provider(model_id=self.spec.id)

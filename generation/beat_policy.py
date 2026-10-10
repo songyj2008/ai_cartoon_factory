@@ -49,9 +49,9 @@ def beat_policy_prompt(model_id: str | None = None) -> str:
     policy = project_beat_policy(model_id)
     note = f"\n- {policy.writer_note}" if policy.writer_note else ""
     return (
-        "\nModel duration policy:\n"
-        f"- Project default model: {policy.label} ({policy.model_id}).\n"
-        f"- Each Beat must target {policy.min_duration_sec}-{policy.max_duration_sec} seconds.\n"
-        f"- Split at semantic event boundaries; do not create empty transition beats merely to meet duration."
+        "\n模型时长规则：\n"
+        f"- 项目默认模型：{policy.label}（{policy.model_id}）。\n"
+        f"- 每个叙事段的目标时长为 {policy.min_duration_sec}–{policy.max_duration_sec} 秒。\n"
+        f"- 按语义事件边界拆分，不得仅为凑时长而创建无剧情价值的转场段落。"
         f"{note}\n"
     )

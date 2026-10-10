@@ -4,7 +4,7 @@ from __future__ import annotations
 import atexit
 import threading
 
-from services.context import get_current_episode_name, get_project_dir, pin_runtime
+from services.context import get_current_episode_name, get_current_project_name, get_project_dir, pin_runtime, OUTPUT_DIR, EPISODES_DIR
 from services.logger import log
 
 
@@ -36,11 +36,23 @@ class RunningHubWorker:
         from workflow.runninghub_sync import sync_runninghub_video_jobs
         from workflow.video_merge import finish_requested_video_merge
 
-        with pin_runtime():
-            if get_current_episode_name() or not (get_project_dir() / "video_jobs.json").is_file():
-                return
-            sync_runninghub_video_jobs()
-            finish_requested_video_merge()
+        runtimes = {(get_project_dir(), get_current_project_name(), get_current_episode_name())}
+        if OUTPUT_DIR.exists():
+            runtimes.update((path, path.name, '') for path in OUTPUT_DIR.iterdir() if path.is_dir())
+        if EPISODES_DIR.exists():
+            runtimes.update((marker.parent, marker.parent.parent.name, marker.parent.name)
+                            for marker in EPISODES_DIR.glob('*/*/.draft'))
+        for runtime in runtimes:
+            with pin_runtime(runtime):
+                if runtime[2] and not (runtime[0] / '.draft').is_file():
+                    continue
+                if not (get_project_dir() / 'video_jobs.json').is_file():
+                    continue
+                try:
+                    sync_runninghub_video_jobs()
+                    finish_requested_video_merge()
+                except Exception as exc:
+                    log(f'[runninghub][worker] {runtime[1]}/{runtime[2]}: {exc}', 'WARN')
 
     def _run(self):
         while not self._stop.is_set():

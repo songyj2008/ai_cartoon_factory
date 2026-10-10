@@ -189,6 +189,7 @@ def build_and_optionally_submit(
     part_id: str = "",
     wait: bool = True,
     model_id: str = MODEL_ID,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     job = VideoJobContract(
         prompt=prompt,
@@ -207,7 +208,7 @@ def build_and_optionally_submit(
     submit_result = SubmitResult(backend="", submitted=False)
 
     if should_submit:
-        provider = get_submit_provider(model_id=job.model_id)
+        provider = get_submit_provider(model_id=job.model_id, backend=backend)
         submit_result = provider.submit(api=api, job=job, workflow_path=str(workflow_path), wait=wait)
 
     actual_media_spec: dict[str, Any] = {}

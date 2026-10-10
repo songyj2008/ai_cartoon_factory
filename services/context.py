@@ -137,9 +137,9 @@ def get_current_episode_name() -> str:
 
 
 @contextmanager
-def pin_runtime():
+def pin_runtime(runtime=None):
     """Keep file ownership stable for an operation even if the UI switches project."""
-    token = _PINNED_RUNTIME.set(_PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)
+    token = _PINNED_RUNTIME.set(runtime or _PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)
     try:
         yield
     finally:
@@ -147,7 +147,7 @@ def pin_runtime():
 
 
 def is_archive_episode_active() -> bool:
-    return bool(get_current_episode_name())
+    return bool(get_current_episode_name()) and not (get_project_dir() / '.draft').is_file()
 
 
 def assert_current_runtime_writable(action: str = "修改"):

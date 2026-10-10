@@ -139,7 +139,7 @@
   "background_required": true,
   "max_important_visible_roles": 4,
   "licon_prompt_expander_enabled": true,
-  "licon_prompt_expander_max_tokens": 2600,
+  "licon_prompt_expander_max_tokens": "",
   "licon_prompt_node": "5",
   "licon_totalframe_node": "50",
   "licon_reference_nodes": [

@@ -105,7 +105,17 @@ def split_beats(story_text, target_duration_sec=None, target_beat_count=None, mo
         log("[beats] calling generate_beats.py", "STEP")
         yield "", get_logs()
 
-        if getattr(sys, "frozen", False):
+        from services.text_jobs import current as current_text_job
+        if current_text_job():
+            # Keep runtime and route snapshots in the same context. A child
+            # process would otherwise revert to the globally selected project.
+            from scripts.story_script.generate_beats import run_generation
+            returncode = run_generation(config_path=str(CONFIG_PATH), input_path=str(input_path),
+                output_path=str(output_path), target_duration_sec=int(target_duration_sec or 60),
+                target_beat_count=count, model_id=resolved_model_id)
+            if returncode != 0:
+                raise RuntimeError('Beats generation failed; see task log')
+        elif getattr(sys, "frozen", False):
             from scripts.story_script.generate_beats import run_generation
 
             buffer = io.StringIO()

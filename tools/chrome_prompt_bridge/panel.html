@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>视频提示词修正助手</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header><div class="brand">AI CARTOON FACTORY <span>网页助手</span></div><h1>把问题变成下一版提示词</h1><p>连接已登录的对话，让修改有据可循。</p></header>
+  <main>
+    <section aria-labelledby="backend-title">
+      <h2 id="backend-title">连接项目后台</h2>
+      <label for="backend-url">项目地址</label><input id="backend-url" value="http://127.0.0.1:7860" placeholder="http://127.0.0.1:7860">
+      <label for="backend-token">配对码</label><input id="backend-token" type="password" placeholder="从项目设置中的网页 LLM 配置复制">
+      <label for="backend-deepseek">DeepSeek 专用对话</label><select id="backend-deepseek"><option value="">自动发现并绑定</option></select>
+      <label for="backend-chatgpt">ChatGPT 专用对话</label><select id="backend-chatgpt"><option value="">自动发现并绑定</option></select>
+      <label for="backend-doubao">豆包专用对话</label><select id="backend-doubao"><option value="">自动发现并绑定</option></select>
+      <div class="actions"><button id="connect-backend" type="button" class="primary">保存并启用连接</button><button id="disconnect-backend" type="button">暂停接收</button></div>
+      <button id="poll-backend" type="button">立即检查任务 / 刷新标签页</button>
+      <p id="backend-status" class="hint" role="status">连接后按服务建立标签页池，优先复用后台页，有排队任务时按需补充。并发上限在项目的“网页 LLM”设置中调整。</p>
+    </section>
+    <section aria-labelledby="connection-title">
+      <div class="section-head"><h2 id="connection-title"><b>1</b> 选择对话</h2><button id="refresh" class="small" type="button">刷新列表</button></div>
+      <label for="target">发送到哪个标签页</label><select id="target"><option value="">正在查找已打开的对话…</option></select>
+      <div class="links"><a href="https://chatgpt.com/" target="_blank" rel="noreferrer">打开 ChatGPT ↗</a><a href="https://chat.deepseek.com/" target="_blank" rel="noreferrer">打开 DeepSeek ↗</a><a href="https://www.doubao.com/chat/" target="_blank" rel="noreferrer">打开豆包 ↗</a></div>
+      <p class="hint">建议使用专门的对话。请求会发送到你选择的标签页。</p>
+    </section>
+    <section aria-labelledby="conversation-title">
+      <h2 id="conversation-title">对话策略</h2>
+      <label for="conversation-mode">默认策略</label>
+      <select id="conversation-mode"><option value="new">每次新对话（推荐）</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+      <p class="hint">在绑定标签页中开启新对话，不增加标签页。只在新任务开始前切换，读取和回传期间不切换。</p>
+      <details><summary>智能复用上限与功能覆盖</summary>
+        <p class="hint">同一视频段的连续修正可以复用；独立任务自动新开。任一上限达到后，下次任务新开对话。字符统计包含扩展发送的请求和读取的回复，不是 token 数。</p>
+        <label for="conversation-rounds">最多任务轮数</label><input id="conversation-rounds" type="number" min="1" max="50" value="5">
+        <label for="conversation-chars">最多累计字符</label><input id="conversation-chars" type="number" min="1000" max="500000" step="1000" value="30000">
+<label for="conversation-story">剧情生成</label><select id="conversation-story" data-conversation-entry="story"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+<label for="conversation-beats">Beats 拆分</label><select id="conversation-beats" data-conversation-entry="beats"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+<label for="conversation-prompt">分段提示词</label><select id="conversation-prompt" data-conversation-entry="prompt"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+<label for="conversation-feedback">视频问题分析</label><select id="conversation-feedback" data-conversation-entry="feedback"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+<label for="conversation-revision">视频反馈修正 / 手动提交</label><select id="conversation-revision" data-conversation-entry="revision"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+<label for="conversation-other">其他调用</label><select id="conversation-other" data-conversation-entry="other"><option value="inherit">跟随默认</option><option value="new">每次新对话</option><option value="smart">智能复用</option><option value="reuse">始终复用</option></select>
+      </details>
+      <button id="save-conversation" type="button">保存对话策略</button>
+      <p id="conversation-status" class="hint" role="status" aria-live="polite">默认每次新对话；保存后从下一条新任务生效。</p>
+    </section>
+    <section aria-labelledby="input-title">
+      <h2 id="input-title"><b>2</b> 描述本次修改</h2>
+      <label for="prompt">原提示词 <span>必填</span></label><textarea id="prompt" rows="7" placeholder="粘贴这个视频实际使用的完整提示词"></textarea>
+      <label for="issue">视频有哪些问题 <span>必填</span></label><textarea id="issue" rows="3" placeholder="例如：第 6 秒人物位置互换；说话时口型没有变化。"></textarea>
+      <label for="expected">希望改成什么样 <span>选填</span></label><textarea id="expected" rows="2" placeholder="描述希望保留或改善的效果"></textarea>
+      <details><summary>补充上下文与参考关系</summary><label for="context">时长、人物编号、素材对应关系</label><textarea id="context" rows="3" placeholder="例如：15 秒；Subject 1 对应参考图 1。"></textarea></details>
+      <details><summary>查看将发送的完整请求</summary><textarea id="request" rows="9" readonly aria-label="完整请求预览"></textarea><button id="copy-request" type="button">复制请求</button></details>
+      <div class="actions"><button id="fill" type="button">仅填入网页</button><button id="send" class="primary" type="button">提交并等待修正</button></div>
+      <p class="hint">仅提交文字，不会上传视频或参考图。草稿保存在本机。</p>
+    </section>
+    <div id="status" role="status" aria-live="polite">准备就绪</div>
+    <section aria-labelledby="result-title">
+      <div class="section-head"><h2 id="result-title"><b>3</b> 查看修正</h2><button id="read" class="small" type="button">读取本次回复</button></div>
+      <div class="extension-task-card" aria-live="polite">
+        <div class="extension-task-heading"><span class="extension-task-icon">✦</span><div><strong id="extension-task-state">等待提交</strong><small id="task-info">提交后，结果会显示在这里。</small></div><b id="extension-task-percent">—</b></div>
+        <progress id="extension-task-progress" max="100" value="0" aria-label="扩展任务进度"></progress>
+      </div>
+      <button id="cancel" type="button" hidden>结束本次等待</button>
+      <div id="empty" class="empty">保留原提示词，修正结果单独展示。<br>确认后再复制回项目使用。</div>
+      <div id="result" hidden><h3>修改说明</h3><ul id="changes"></ul><label for="revised">修正后的完整提示词</label><textarea id="revised" rows="10" readonly></textarea><div class="actions"><button id="copy-result" class="primary" type="button">复制修正版</button><button id="export" type="button">导出记录</button></div><details><summary>查看本次提交的原提示词</summary><pre id="original"></pre></details></div>
+      <details id="raw-box" hidden><summary>查看原始回复</summary><textarea id="raw" rows="8" readonly aria-label="原始回复"></textarea></details>
+    </section>
+    <details class="advanced"><summary>网页适配设置</summary><p class="hint">网页改版导致识别失败时，可为当前网站填写 CSS 选择器。留空使用默认值。</p><label for="editor-selector">输入框选择器</label><input id="editor-selector" placeholder="默认自动识别"><label for="send-selector">发送按钮选择器</label><input id="send-selector" placeholder="默认按按钮标签识别"><label for="reply-selector">回答正文选择器（不能包含用户消息）</label><input id="reply-selector" placeholder="默认按网站识别"><button id="save-selectors" type="button">保存当前网站设置</button></details>
+    <footer id="extension-version">项目后台桥接版 · 不使用 Codex 或 API 密钥</footer>
+  </main>
+  <script src="protocol.js"></script><script src="panel.js"></script>
+</body>
+</html>

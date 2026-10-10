@@ -32,6 +32,7 @@ from services.context import (
     OUTPUT_DIR,
     PROJECTS_DIR,
     assert_current_runtime_writable,
+    is_archive_episode_active,
     get_current_episode_name,
     get_current_project_name,
     get_episodes_dir,
@@ -105,7 +106,7 @@ def novel_source_ui_update():
     """Return project/episode-owned novel text with archived episodes read-only."""
     return gr.update(
         value=load_novel_source_text(),
-        interactive=not bool(get_current_episode_name()),
+        interactive=not (get_current_episode_name() and not (get_project_dir() / '.draft').is_file()),
     )
 
 
@@ -171,7 +172,29 @@ def list_project_episodes(project_name=None):
     root = EPISODES_DIR / name
     episodes = [p.name for p in root.iterdir() if p.is_dir()] if root.exists() else []
     episodes.sort(key=_episode_sort_key)
-    return [("当前生成", "")] + [(episode, episode) for episode in episodes]
+    return [("当前生成", "")] + [
+        (episode + (" · 草稿" if (root / episode / '.draft').is_file() else ""), episode)
+        for episode in episodes
+    ]
+
+
+def create_episode_draft(name=""):
+    project = get_current_project_name() or "current"
+    episode = str(name or "").strip() or _next_episode_name(project)
+    if episode in {".", ".."} or any(ch in INVALID_PROJECT_NAME_CHARS for ch in episode):
+        raise gr.Error("草稿名称非法")
+    path = EPISODES_DIR / project / episode
+    if path.exists():
+        raise gr.Error("该集数已存在，请选择其他名称")
+    path.mkdir(parents=True, exist_ok=False)
+    metadata = path / 'project_meta'
+    metadata.mkdir()
+    source = get_project_dir() / 'project_meta' if get_current_episode_name() else _sidecar_project_dir(project)
+    bible = source / 'project_bible.json'
+    if bible.is_file():
+        shutil.copy2(bible, metadata / bible.name)
+    (path / '.draft').write_text('draft\n', encoding='utf-8')
+    return gr.update(choices=_episode_choices(project), value=episode)
 
 
 def _episode_sort_key(episode_name: str) -> tuple[int, int, str]:
@@ -421,7 +444,12 @@ def _patch_workflow_duration(segment, duration_sec):
         wf = _json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(wf, dict):
             return
-        _update_duration_primitive(wf, float(duration_sec))
+        frame_node = wf.get("50", {})
+        if "totalframe" in (frame_node.get("inputs") or {}):
+            fps = int((segment.get("job") or {}).get("fps") or CONFIG.get("fps") or 50)
+            frame_node["inputs"]["totalframe"] = int(float(duration_sec) * fps)
+        else:
+            _update_duration_primitive(wf, float(duration_sec))
         path.write_text(_json.dumps(wf, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -763,6 +791,12 @@ def _json_semantically_equal(left: dict, right: dict) -> bool:
 
 
 def save_story_and_beats_edits(story_text, beats_text, topic_text=None):
+    from workflow.video_merge import video_jobs_lock
+    with video_jobs_lock():
+        return _save_story_and_beats_edits_locked(story_text,beats_text,topic_text)
+
+
+def _save_story_and_beats_edits_locked(story_text, beats_text, topic_text=None):
     try:
         assert_current_runtime_writable("保存剧情或 Beats")
         ensure_project_dirs()
@@ -1135,12 +1169,17 @@ def save_service_keys(
         log("[settings] 未输入新的 key 或 URL，保持现有配置不变", "STEP")
     return (*secret_key_placeholders(), CONFIG.get("comfyui_url", ""), get_logs())
 
-def generate_story_with_duration(topic_text, story_input_text, duration_select, custom_duration):
+def generate_story_with_duration(topic_text, duration_select, custom_duration):
     assert_current_runtime_writable("生成完整剧情")
+    source_topic = str(topic_text or "").strip()
+    if not source_topic:
+        raise ValueError("请先填写主题，再生成完整剧情")
+    # Persist the submitted topic before any generation can fail or time out.
+    update_ui_run_config(topic=source_topic)
     final_duration_seconds = _save_duration_state(duration_select, custom_duration)
-    manual_story = strip_quality_annotations(story_input_text).strip()
-    source_topic = manual_story or str(topic_text or "").strip()
     model_id = current_default_video_model()
+    (get_project_dir() / "story.json").unlink(missing_ok=True)
+    clear_quality_issues()
     story_text, logs = generate_story(source_topic, duration_sec=final_duration_seconds, model_id=model_id)
     display = story_json_to_display(story_text)
     marked, issues = validate_story_display(display, model_id=model_id)
@@ -1235,6 +1274,12 @@ def split_beats_with_duration(story_text, duration_select, custom_duration, topi
 
 
 def save_beats_edits(beats_text):
+    from workflow.video_merge import video_jobs_lock
+    with video_jobs_lock():
+        return _save_beats_edits_locked(beats_text)
+
+
+def _save_beats_edits_locked(beats_text):
     try:
         assert_current_runtime_writable("保存 Beats")
         ensure_project_dirs()
@@ -1289,13 +1334,8 @@ def _runtime_topic_value(story_raw: str = "") -> str:
             topic_value = ""
     else:
         topic_value = str(load_ui_run_config().get("topic") or "").strip()
-    if topic_value:
-        return topic_value
-    try:
-        story_data = json.loads(story_raw or _project_file_text("story.json") or "{}")
-        return str(story_data.get("title") or story_data.get("summary") or "").strip()
-    except Exception:
-        return ""
+    # Empty is an intentional value, not a request to infer a new topic.
+    return topic_value
 
 
 def _runtime_ui_config_value(key: str, default=None):
@@ -1562,6 +1602,15 @@ def archive_current_generation(episode_name=None):
     try:
         assert_current_runtime_writable("归档当前生成")
         project_name = get_current_project_name() or "current"
+        if get_current_episode_name():
+            source_dir = get_project_dir()
+            jobs_path = source_dir / 'video_jobs.json'
+            jobs = json.loads(jobs_path.read_text(encoding='utf-8-sig')) if jobs_path.exists() else {}
+            if any(s.get('status') in {'running', 'queued', 'pending'} for s in jobs.get('segments', [])):
+                raise ValueError('本集还有未完成的生成任务，请完成后归档')
+            (source_dir / '.draft').unlink()
+            log(f"草稿已归档：{source_dir}", "STEP")
+            return "", get_logs(), str(source_dir), gr.update(choices=_episode_choices(project_name), value=get_current_episode_name())
         source_dir = OUTPUT_DIR / project_name
         if not source_dir.exists():
             raise FileNotFoundError(f"当前生成目录不存在：{source_dir}")
@@ -1605,7 +1654,8 @@ def clean_project():
     try:
         assert_current_runtime_writable("清空项目")
         project = get_project_dir().resolve()
-        expected = (OUTPUT_DIR / get_current_project_name()).resolve()
+        expected = ((EPISODES_DIR / get_current_project_name() / get_current_episode_name())
+                    if get_current_episode_name() else (OUTPUT_DIR / get_current_project_name())).resolve()
         if project != expected or project == OUTPUT_DIR.resolve():
             raise ValueError("清理目录不属于当前项目的生成目录")
         # Clear authoritative data before media: Windows may lock a video
@@ -1618,6 +1668,8 @@ def clean_project():
         leftovers = []
         if project.exists():
             for item in project.iterdir():
+                if item.name == '.draft':
+                    continue
                 try:
                     if item.is_dir() and not item.is_symlink():
                         shutil.rmtree(item)

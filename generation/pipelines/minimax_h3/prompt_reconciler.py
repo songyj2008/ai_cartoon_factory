@@ -38,7 +38,8 @@ class H3PromptReconciler:
         # so remove them before deciding whether a deleted asset is still used
         # by the editable screenplay.  Never inject diagnostic text into the
         # user's prompt: an unresolved reference is a configuration error.
-        without_managed = self._without_sections(text, {"主体定义", "参考保留关系"})
+        without_managed = re.sub(r"\n*【人物音色绑定】.*?【人物音色绑定结束】", "", text, flags=re.S)
+        without_managed = self._without_sections(without_managed, {"主体定义", "参考保留关系"})
         without_managed = self._unwrap_legacy_removed_markers(without_managed)
         without_managed = self._remap_reference_tags(without_managed, old_bindings, new_bindings)
 
@@ -46,7 +47,7 @@ class H3PromptReconciler:
         entries = self.compiler._subject_reference_entries(new_bindings)
         without_managed = self.compiler._replace_subject_mentions(without_managed, entries)
         retention_lines = self.compiler._retention_lines_from_prompt(without_managed, new_bindings)
-        return self._compose(without_managed, subject_lines, retention_lines)
+        return self.compiler._with_character_voices(self._compose(without_managed, subject_lines, retention_lines), new_bindings)
 
     def _remap_reference_tags(self, text: str, old_bindings: Any, new_bindings: Any) -> str:
         old_picture = {binding.asset.asset_id: binding.prompt_tag for binding in old_bindings.images}

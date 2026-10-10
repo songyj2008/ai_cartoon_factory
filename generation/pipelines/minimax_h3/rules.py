@@ -127,22 +127,22 @@ H3_STORY_CONSTRAINTS = """
 H3_BEAT_WRITER_PROMPT = """
 你是短视频叙事规划师，为 MiniMax H3 Ref2VA 生成可直接编译的语义 Beats。
 
-目标：把 story/topic 拆成多个独立、连续、可生成的 4–15 秒视频事件。每个 Beat 对应一条 H3 成片，
+目标：把 story/topic 拆成多个独立、连续、可生成的视频事件。每个 Beat 对应一条 H3 成片，
 可以包含一个或多个 Shot，而不是 LTX 的单一稳定镜头状态。
 
 严格要求：
 - 顶层 JSON 必须有非空 title、locked_outcome、target_duration_sec、beats。
 - 每个 Beat 必须有 id、title、plot、estimated_duration_sec。
-- 不因切镜、景别、背景图、问答、短反应或连续因果动作本身拆 Beat；优先把同一事件链写成一个多 Shot Beat。
+- 不因切镜、景别、背景或参考素材变化、问答、短反应或连续因果动作本身拆 Beat；优先把同一事件链写成一个多 Shot Beat。
 - 只有合并后超过 15 秒、发生独立时间跳跃，或地点与事件目标同时彻底改变时才拆 Beat。
 - 4–15 秒是硬限制，默认应规划为 8–12 秒；4–7 秒只用于无法与相邻事件合并的独立短笑点或悬念揭示。
 - 先规划宏观剧情事件，再在每个 Beat 内安排 2–5 个 Shot；不要把每段文字、每句对白或每次反应映射成独立 Beat。
-- 站起、坐下、行走、进入、离开、转场可以作为事件内部动作；只有无剧情价值的移动不得单独成 Beat。
+- 站起、坐下、行走、进入、离开、转场可以作为事件内部动作；不得为凑数量或时长而将无剧情价值的移动、转场或事后反应单独成 Beat。
 - plot 用自然中文描述主体、地点、事件、题材/风格、动作推进、镜头、台词和声音，不写工作流节点或素材标签。
 - 台词长度与 Shot 时长匹配；跨 Shot 台词要明确连续说话，切镜要明确景别和承接主体。
 - 每个 Shot 的 subject 必须列出实际出镜角色名，action、dialogue、continuity 中也要明确动作或说话归属；不要只写“三人、两人、他们、几个小家伙”等可能有多个解释的泛称。
 - 群体动作首次出现以及每次切镜后，都重新列出准确成员；dialogue 优先使用 speaker、scope、line、continues_previous 字段，不用无法确定说话人的裸字符串。
-- Beat 阶段只写 Project Bible 中的角色名/角色 id，不自行生成 <Subject N>、<Picture N>；这些编号由后续 H3 AssetBinder 和提示词编译器统一绑定。
+- Beat 阶段只写 Project Bible 中的角色名/角色 id，不自行生成 Subject、Picture、Video、Audio 素材标签；这些编号由后续 H3 AssetBinder 和提示词编译器统一绑定。
 - 默认可以切镜；用户要求一镜到底时只规划一个连续 Shot。
 - 如果有角色语义，保持 important_roles、visible_roles、reference_roles、offscreen_speakers、mentioned_roles、scene_id 一致。
 
@@ -155,22 +155,14 @@ H3_BEAT_WRITER_PROMPT = """
 - non_diegetic_music：可选背景音乐；
 - exact_text：必须准确出现的文字、Logo 或标题原文。
 
-这些字段只描述创作意图。图片、视频、音频编号由后续 H3 AssetBinder 决定。
+这些字段只描述创作意图。
 输出必须是 JSON object，不要 Markdown。
 """.strip()
 
 
 H3_STRUCTURE_PROMPT = """
-Runtime structure for MiniMax H3 Ref2VA:
-- A Beat is one complete 4-15 second H3 clip and may contain multiple chronological shots.
-- Do not split for camera cuts, framing, background/reference changes, question-answer pairs, short reactions, or consecutive cause-and-effect actions.
-- Split only when the combined event exceeds 15 seconds, an independent time jump occurs, or both location and event goal fundamentally change.
-- Treat 4-15 seconds as the hard envelope and normally plan 8-12 seconds with 2-5 chronological Shots per Beat.
-- Movement and transitions are valid inside a Beat when they advance the event; do not create empty movement-only Beats.
-- Keep shared role and scene fields internally consistent when present.
-- Name every participating role explicitly in each Shot's subject/action/dialogue/continuity fields. After a cut, restate the exact members instead of relying on ambiguous collective pronouns such as "they", "the three", or "the two".
-- References are semantic identity hints; final Picture/Video/Audio tags are bound later by the H3 compiler.
-- Do not require a background image, Licon Event Flow, a stable first frame, or 50fps.
+MiniMax H3 Ref2VA 补充规则：
+- 不强制要求背景图片、Licon Event Flow、稳定首帧或 50 帧/秒。
 """.strip()
 
 

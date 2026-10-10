@@ -699,6 +699,11 @@ def update_render(
     output = _as_dict(render.get("output"))
     incoming_output = _output_data(data, segment)
     _merge_nonempty(output, incoming_output)
+    # A provider's explicit artifact is authoritative for this render. Legacy
+    # normalization may have populated it with the previous segment video.
+    explicit_video = _text(data.get("video_path") or _as_dict(data.get("output")).get("video_path"))
+    if explicit_video:
+        output["video_path"] = explicit_video
     if isinstance(actual_media_spec, dict) and actual_media_spec:
         actual = _as_dict(output.get("actual_media_spec"))
         _merge_nonempty(actual, actual_media_spec, overwrite=True)
@@ -717,7 +722,13 @@ def update_render(
         prompt_id=_text(submission.get("prompt_id")),
         error=reported_error or _text(render.get("error")),
     )
+    # Editing the segment after a remote task ended must not rewrite that
+    # task's terminal history into a new, unsubmitted generation request.
+    if desired_status in {"needs_regenerate", "workflow_ready"} and render.get("status") in {"failed", "cancelled"}:
+        desired_status = render["status"]
     render["status"] = desired_status
+    if desired_status in {"failed", "cancelled"}:
+        submission["submitted"] = False
     if (submission.get("submitted") or _text(submission.get("task_id")) or _text(submission.get("prompt_id"))) and not _text(render.get("submitted_at")):
         render["submitted_at"] = _now()
     if desired_status in _TERMINAL_RENDER_STATUSES:

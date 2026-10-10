@@ -1,4 +1,4 @@
-"""Gradio event bindings for the model-factory video pipeline."""
+﻿"""Gradio event bindings for the model-factory video pipeline."""
 from __future__ import annotations
 
 import json
@@ -25,7 +25,15 @@ from ui.beat_split_migration import migrate_after_beat_delete, migrate_after_bea
 from ui.beat_copy import persist_beat_copy
 from ui.group_panel import group_total_pages, render_groups_panel
 from ui.progress_panel import render_workflow_progress, workflow_status_from_run_state
-from ui.project_bible_panel import manual_plan_project_bible, selected_project_asset_gallery
+from ui.project_bible_panel import (
+    open_project_asset_manager,
+    project_asset_management_state,
+    save_project_asset_memberships,
+    selected_project_asset_gallery,
+    toggle_owned_project_asset,
+    toggle_unassigned_project_asset,
+    unbind_selected_project_assets,
+)
 from ui.project_handlers import (
     _episode_choices,
     _beats_display_to_json,
@@ -57,17 +65,25 @@ from ui.project_handlers import (
 )
 from ui.video_feedback import analyze_video_feedback, apply_video_feedback_rules, refresh_video_feedback_parts
 from ui.asset_library_panel import (
-    load_existing_asset_selection,
-    fill_asset_metadata_from_text,
+    NEW_ASSET,
+    asset_library_choices,
+    project_bible_ui_state,
+    select_asset_for_editing,
+    complete_asset_metadata,
+    apply_completed_asset_metadata,
     preview_selected_asset_for_upload,
     preview_selected_asset_path_only,
     refresh_asset_library_controls,
     refresh_asset_target_dir_options,
     save_selected_asset_metadata,
+    load_character_voice,
+    remove_character_voice,
 )
 from workflow.master import generate_final_video, generate_segment_prompts, one_click_full_generation, placeholder_compose_video, regenerate_part_from_slot, regenerate_segment_prompt_from_slot
 from workflow.runninghub_sync import sync_runninghub_video_jobs
 from workflow.segment_runner import save_segment_director_prompt, save_segment_director_prompts_batch, set_segment_video_ok
+from ui.text_jobs_ui import submit_operation
+from services.project_assets import list_asset_project_names
 
 
 def _selected_submit_backend(submit_comfyui=False, submit_runninghub=False) -> str:
@@ -156,7 +172,8 @@ def _archive_readonly_message(action: str = "修改") -> str:
 
 
 def _is_archive_readonly() -> bool:
-    return bool(get_current_episode_name())
+    from services.context import is_archive_episode_active
+    return is_archive_episode_active()
 
 
 def _brand_blocked(action: str) -> bool:
@@ -484,10 +501,18 @@ def _save_story_beats_and_refresh(story_text, beats_text, topic_text=None):
 
 def _generate_story_readonly_guarded(topic_text, story_input_text, duration_select, custom_duration):
     if _brand_blocked("generate story"):
-        return story_input_text or "", get_logs()
+        yield story_input_text or "", get_logs()
+        return
     if _is_archive_readonly():
-        return story_input_text or "", _archive_readonly_message("生成完整剧情")
-    return generate_story_with_duration(topic_text, story_input_text, duration_select, custom_duration)
+        yield story_input_text or "", _archive_readonly_message("生成完整剧情")
+        return
+    if not str(topic_text or "").strip():
+        log("请先填写主题，再生成完整剧情", "ERROR")
+        yield story_input_text or "", get_logs()
+        return
+    log("已清空剧情输入，正在根据主题重新生成完整剧情", "STEP")
+    yield "", get_logs()
+    yield generate_story_with_duration(topic_text, duration_select, custom_duration)
 
 
 def _generate_segment_prompts(story_text, beats_text, workflow_mode, page, ignore_beat_risk=False):
@@ -1372,12 +1397,6 @@ def _archive_current_generation_guarded(archive_episode_name):
     return archive_current_generation(archive_episode_name)
 
 
-def _manual_plan_project_bible_guarded(topic, bible_characters, bible_backgrounds):
-    if _brand_blocked("save selected assets"):
-        return get_logs(), gr.update(), gr.update(), gr.update()
-    return manual_plan_project_bible(topic, bible_characters, bible_backgrounds)
-
-
 def _analyze_video_feedback_guarded(feedback_part_select, feedback_issue_types, feedback_note):
     if _brand_blocked("analyze video feedback"):
         return gr.update(), get_logs()
@@ -1463,7 +1482,22 @@ def bind_events(demo, components):
     groups_panel = components["groups_panel"]
     ignore_beat_risk_box = components["ignore_beat_risk_box"]
     main_page = components["main_page"]
-    manual_bible_btn = components["manual_bible_btn"]
+    project_assets_open_btn = components["project_assets_open_btn"]
+    project_assets_page = components["project_assets_page"]
+    close_project_assets_btn = components["close_project_assets_btn"]
+    project_assets_project = components["project_assets_project"]
+    project_assets_heading = components["project_assets_heading"]
+    project_assets_topic = components["project_assets_topic"]
+    project_assets_owned_gallery = components["project_assets_owned_gallery"]
+    project_assets_unassigned_gallery = components["project_assets_unassigned_gallery"]
+    project_assets_owned_records = components["project_assets_owned_records"]
+    project_assets_unassigned_records = components["project_assets_unassigned_records"]
+    project_assets_selected_key = components["project_assets_selected_key"]
+    project_assets_selected_name = components["project_assets_selected_name"]
+    project_assets_owner_select = components["project_assets_owner_select"]
+    project_assets_save_owners_btn = components["project_assets_save_owners_btn"]
+    project_assets_unbind_btn = components["project_assets_unbind_btn"]
+    project_assets_status = components["project_assets_status"]
     merge_video_btn = components["merge_video_btn"]
     minimal_mode_box = components["minimal_mode_box"]
     no_concat_box = components["no_concat_box"]
@@ -1495,6 +1529,7 @@ def bind_events(demo, components):
     segment_prompt_batch_payload = components["segment_prompt_batch_payload"]
     episode_select_btn = components["episode_select_btn"]
     episode_select_payload = components["episode_select_payload"]
+    operation_refresh_btn = components["operation_refresh_btn"]
     open_videos_dir_btn = components["open_videos_dir_btn"]
     save_beats_btn = components["save_beats_btn"]
     split_beats_btn = components["split_beats_btn"]
@@ -1555,9 +1590,71 @@ def bind_events(demo, components):
         outputs=[workbench_page, asset_library_page, settings_page],
         queue=False,
     )
+
+    project_assets_state_outputs = [
+        project_assets_heading,
+        project_assets_topic,
+        project_assets_owned_gallery,
+        project_assets_unassigned_gallery,
+        project_assets_owned_records,
+        project_assets_unassigned_records,
+        project_assets_selected_key,
+        project_assets_selected_name,
+        project_assets_owner_select,
+    ]
+    project_assets_open_btn.click(
+        fn=open_project_asset_manager,
+        outputs=[project_assets_page, project_assets_project, *project_assets_state_outputs],
+        queue=False,
+    )
+    close_project_assets_btn.click(
+        fn=lambda: (gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)),
+        outputs=[workbench_page, asset_library_page, settings_page],
+        queue=False,
+    )
+    project_assets_open_btn.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True), gr.update(visible=False), gr.update(selected="project")),
+        outputs=[workbench_page, asset_library_page, settings_page, components["asset_management_tabs"]], queue=False,
+    )
+    project_assets_project.change(
+        fn=lambda name: gr.update(value=name), inputs=project_assets_project,
+        outputs=components["asset_filter_project"], queue=False,
+    )
+    project_assets_project.change(
+        fn=project_asset_management_state,
+        inputs=project_assets_project,
+        outputs=project_assets_state_outputs,
+        queue=False,
+    )
+    project_assets_owned_gallery.select(
+        fn=toggle_owned_project_asset,
+        inputs=[project_assets_owned_records, project_assets_owned_records, project_assets_unassigned_records, project_assets_selected_key],
+        outputs=[project_assets_selected_key, project_assets_selected_name],
+        show_progress="hidden",
+        queue=False,
+    )
+    project_assets_unassigned_gallery.select(
+        fn=toggle_unassigned_project_asset,
+        inputs=[project_assets_unassigned_records, project_assets_owned_records, project_assets_unassigned_records, project_assets_selected_key],
+        outputs=[project_assets_selected_key, project_assets_selected_name],
+        show_progress="hidden",
+        queue=False,
+    )
+    project_assets_save_owners_btn.click(
+        fn=save_project_asset_memberships,
+        inputs=[project_assets_selected_key, project_assets_owner_select, project_assets_project, project_assets_owned_records, project_assets_unassigned_records, project_assets_topic],
+        outputs=[project_assets_status, *project_assets_state_outputs],
+        queue=False,
+    )
+    project_assets_unbind_btn.click(
+        fn=unbind_selected_project_assets,
+        inputs=[project_assets_selected_key, project_assets_project, project_assets_owned_records, project_assets_unassigned_records, project_assets_topic],
+        outputs=[project_assets_status, *project_assets_state_outputs],
+        queue=False,
+    )
     main_page.change(
         fn=refresh_asset_library_controls,
-        inputs=[asset_current_path, asset_existing_select, asset_target_dir],
+        inputs=[asset_current_path, asset_existing_select, asset_target_dir, components["asset_filter_project"], asset_type],
         outputs=[asset_existing_select, asset_target_dir],
         show_progress="hidden",
         queue=False,
@@ -1569,17 +1666,61 @@ def bind_events(demo, components):
         queue=False,
     )
 
-    components["asset_metadata_parse_btn"].click(
-        fn=fill_asset_metadata_from_text,
-        inputs=[components["asset_metadata_paste"]],
-        outputs=[asset_display_name, asset_aliases, asset_tags_cn,
-                 asset_description_cn, asset_use_for, asset_pose,
-                 components["asset_metadata_parse_status"]],
+    metadata_fields = [asset_display_name, asset_aliases, asset_tags_cn,
+                       asset_description_cn, asset_use_for, asset_pose]
+    metadata_inputs = [components["asset_metadata_paste"], asset_current_path,
+                       asset_type, *metadata_fields]
+    metadata_button = components["asset_metadata_parse_btn"]
+    metadata_status = components["asset_metadata_parse_status"]
+    metadata_result = components["asset_metadata_result"]
+    metadata_job_id = gr.Textbox(elem_id='text_job_metadata_id', elem_classes=['aicf-hidden-trigger'])
+    metadata_job_apply = gr.Button('应用素材任务', elem_id='text_job_metadata_apply', elem_classes=['aicf-hidden-trigger'])
+    def apply_metadata_job(identifier, *values):
+        from services.text_jobs import get, update, record_apply_error
+        try:
+            item = get(identifier)
+            if item['kind'] != 'metadata' or item['state'] != 'ready':
+                raise ValueError('素材任务尚无可应用结果')
+            candidate = item['result']
+            if candidate['snapshot'] != list(values):
+                raise ValueError('素材或描述已变化，本次结果未填入；可在任务列表查看并手动合并')
+            result = apply_completed_asset_metadata(candidate,*values)
+            update(identifier,'applied',apply_error=None,message='素材字段已填入，点击保存当前素材描述后生效')
+            return result
+        except Exception as exc:
+            record_apply_error(identifier, str(exc))
+            return (*[gr.update() for _ in metadata_fields], str(exc), gr.update())
+    metadata_job_apply.click(fn=apply_metadata_job, inputs=[metadata_job_id,*metadata_inputs],
+        outputs=[*metadata_fields,metadata_status,metadata_button],queue=False,show_progress='hidden')
+    metadata_button.click(
+        fn=submit_operation('metadata',3,1),
+        inputs=metadata_inputs,
+        outputs=[metadata_result, metadata_status, metadata_button],
         queue=False,
+        trigger_mode="once",
     )
 
+    save_reset_outputs = [asset_existing_select, asset_id, asset_target_dir, *metadata_fields,
+                          asset_upload_file, components["asset_metadata_paste"], metadata_status, metadata_result,
+                          components["asset_voice_audio"], components["asset_voice_transcript"],
+                          components["asset_voice_status"], components["asset_delete_snapshot"],
+                          components["asset_delete_status"], components["asset_delete_confirm"], metadata_button]
+
+    def save_and_reset_asset(*values):
+        result = save_selected_asset_metadata(*values, return_outcome=True)
+        if not result[-1]:
+            return (*result[:-1], *[gr.update() for _ in save_reset_outputs], "保存失败，请查看提示；当前内容已保留。")
+        name = str(values[4] or "素材")
+        project, kind = values[-1], values[1]
+        message = f"已保存：{name}。编辑区已清空，可以继续添加素材。"
+        gr.Info(message)
+        reset = [gr.update(choices=asset_library_choices(project, kind), value=""), "", NEW_ASSET,
+                 *["" for _ in metadata_fields], None, "", "", None, None, "", "", None, "",
+                 gr.update(interactive=False), gr.update(value="智能补全", interactive=True)]
+        return (None, "", "", *result[3:-1], *reset, message)
+
     asset_save_event = asset_save_meta_btn.click(
-        fn=save_selected_asset_metadata,
+        fn=save_and_reset_asset,
         inputs=[
             asset_current_path,
             asset_type,
@@ -1591,12 +1732,28 @@ def bind_events(demo, components):
             asset_description_cn,
             asset_use_for,
             asset_pose,
+            components["asset_voice_audio"],
+            components["asset_voice_transcript"],
+            components["asset_filter_project"],
         ],
-        outputs=asset_outputs,
+        outputs=[*asset_outputs, *save_reset_outputs, components["asset_save_status"]],
     )
     asset_save_event.then(
+        fn=project_asset_management_state, inputs=project_assets_project,
+        outputs=project_assets_state_outputs, queue=False, show_progress="hidden",
+    )
+    voice_outputs = [components["asset_voice_audio"], components["asset_voice_transcript"], components["asset_voice_status"]]
+    asset_type.change(
+        fn=lambda kind: gr.update(visible=kind == "character"),
+        inputs=[asset_type], outputs=[components["asset_voice_panel"]],
+        queue=False, show_progress="hidden",
+    )
+    asset_current_path.change(load_character_voice, inputs=[asset_current_path, asset_type], outputs=voice_outputs, queue=False)
+    asset_type.input(load_character_voice, inputs=[asset_current_path, asset_type], outputs=voice_outputs, queue=False)
+    components["asset_voice_remove"].click(remove_character_voice, inputs=[asset_current_path], outputs=voice_outputs)
+    asset_save_event.then(
         fn=refresh_asset_library_controls,
-        inputs=[asset_current_path, asset_existing_select, asset_target_dir],
+        inputs=[asset_current_path, asset_existing_select, asset_target_dir, components["asset_filter_project"], asset_type],
         outputs=[asset_existing_select, asset_target_dir],
         show_progress="hidden",
         queue=False,
@@ -1608,8 +1765,8 @@ def bind_events(demo, components):
         show_progress="hidden",
         queue=False,
     )
-    asset_existing_select.change(
-        fn=load_existing_asset_selection,
+    asset_selection_event = asset_existing_select.input(
+        fn=select_asset_for_editing,
         inputs=asset_existing_select,
         outputs=[
             asset_type,
@@ -1625,9 +1782,91 @@ def bind_events(demo, components):
             asset_current_path,
             asset_target_path,
             asset_library_log,
+            asset_upload_file,
+            components["asset_metadata_paste"],
+            components["asset_metadata_parse_status"],
+            components["asset_metadata_result"],
         ],
         show_progress="hidden",
     )
+    filter_selection_outputs = [
+            asset_type,
+            asset_id,
+            asset_target_dir,
+            asset_display_name,
+            asset_aliases,
+            asset_tags_cn,
+            asset_description_cn,
+            asset_use_for,
+            asset_pose,
+            asset_gallery,
+            asset_current_path,
+            asset_target_path,
+            asset_library_log,
+            asset_upload_file,
+            components["asset_metadata_paste"],
+            components["asset_metadata_parse_status"],
+            components["asset_metadata_result"],
+        ]
+
+    def preview_character_deletion(path):
+        from services.asset_deletion import character_snapshot
+        try:
+            snapshot = character_snapshot(path)
+            return snapshot, f"将删除：{snapshot['name']}，共 {snapshot['images']} 张图片。文件将移入 assets/_trash，可恢复。", gr.update(interactive=True)
+        except Exception as exc:
+            return None, str(exc), gr.update(interactive=False)
+
+    def confirm_character_deletion(path, snapshot, project, kind):
+        from services.asset_deletion import delete_character
+        try:
+            deleted, archive = delete_character(path, snapshot)
+            cleared = list(select_asset_for_editing(""))
+            cleared[0] = kind
+            return (None, f"已删除 {deleted['name']}；恢复备份：{archive}", gr.update(interactive=False),
+                    gr.update(choices=asset_library_choices(project, kind), value=""), *cleared)
+        except Exception as exc:
+            return (None, str(exc), gr.update(interactive=False), gr.update(),
+                    *[gr.update() for _ in filter_selection_outputs])
+
+    components["asset_delete_preview"].click(
+        fn=preview_character_deletion, inputs=asset_current_path,
+        outputs=[components["asset_delete_snapshot"], components["asset_delete_status"], components["asset_delete_confirm"]], queue=False,
+    )
+    delete_event = components["asset_delete_confirm"].click(
+        fn=confirm_character_deletion,
+        inputs=[asset_current_path, components["asset_delete_snapshot"], components["asset_filter_project"], asset_type],
+        outputs=[components["asset_delete_snapshot"], components["asset_delete_status"], components["asset_delete_confirm"], asset_existing_select, *filter_selection_outputs], queue=False,
+    )
+    delete_event.then(fn=refresh_asset_target_dir_options, inputs=asset_target_dir, outputs=asset_target_dir, queue=False)
+    delete_event.then(fn=project_asset_management_state, inputs=project_assets_project, outputs=project_assets_state_outputs, queue=False)
+    delete_event.then(fn=project_bible_ui_state, outputs=[bible_character_select, bible_background_select, selected_asset_gallery], queue=False)
+
+    def filter_asset_selection(project, kind, selected, upload, image_id, target, path):
+        choices = asset_library_choices(project, kind)
+        valid = selected in {value for _, value in choices}
+        update = gr.update(choices=choices, value=selected if valid else "")
+        if selected and not valid:
+            cleared = list(select_asset_for_editing(""))
+            cleared[0] = kind
+            return (update, *cleared)
+        if not selected and upload:
+            preview = preview_selected_asset_path_only(kind, upload, image_id, target, path)
+            return (update, *preview, *[gr.update() for _ in range(4)])
+        return (update, *[gr.update() for _ in filter_selection_outputs])
+
+    filter_project = components["asset_filter_project"]
+    filter_project.focus(
+        fn=lambda: gr.update(choices=[("全部项目", "__all__"), ("未分配项目", "__unassigned__")] + [(name, name) for name in list_asset_project_names()]),
+        outputs=filter_project, queue=False, show_progress="hidden",
+    )
+    for filter_control in (filter_project, asset_type):
+        filter_control.change(
+            fn=filter_asset_selection, inputs=[filter_project, asset_type, asset_existing_select, asset_upload_file, asset_id, asset_target_dir, asset_current_path],
+            outputs=[asset_existing_select, *filter_selection_outputs], queue=False,
+            show_progress="hidden",
+        )
+
     asset_upload_file.change(
         fn=preview_selected_asset_for_upload,
         inputs=[asset_type, asset_upload_file, asset_id, asset_target_dir],
@@ -1648,8 +1887,8 @@ def bind_events(demo, components):
         ],
         show_progress="hidden",
     )
-    for target_preview_input in (asset_type, asset_target_dir):
-        target_preview_input.change(
+    for target_preview_input in (asset_target_dir,):
+        target_preview_input.input(
             fn=preview_selected_asset_path_only,
             inputs=[asset_type, asset_upload_file, asset_id, asset_target_dir, asset_current_path],
             outputs=[
@@ -1722,6 +1961,10 @@ def bind_events(demo, components):
         inputs=None,
         outputs=None,
         js=refresh_episode_picker_js,
+    )
+    from ui.project_handlers import create_episode_draft
+    components['create_draft_btn'].click(
+        fn=create_episode_draft, inputs=components['draft_name'], outputs=project_episode,
     )
     project_episode_change_event = project_episode.change(
         fn=_set_current_project_episode_guarded,
@@ -1815,12 +2058,6 @@ def bind_events(demo, components):
         inputs=[bible_character_select, bible_background_select],
         outputs=selected_asset_gallery,
     )
-    manual_bible_btn.click(
-        fn=_manual_plan_project_bible_guarded,
-        inputs=[topic, bible_character_select, bible_background_select],
-        outputs=[status, selected_asset_gallery, bible_character_select, bible_background_select],
-    )
-
     clean_event = clean_btn.click(
         fn=_clean_project_direct,
         outputs=[
@@ -1914,20 +2151,23 @@ def bind_events(demo, components):
     )
 
     gen_story_btn.click(
-        fn=_generate_story_readonly_guarded,
-        inputs=[topic, story_json, duration_select, custom_duration_box],
+        fn=submit_operation('story',2,1,editor_tail=True),
+        inputs=[topic, story_json, duration_select, custom_duration_box, story_json, beats_json],
         outputs=[story_json, status],
+        queue=False,
         show_progress="hidden",
     )
     generate_novel_segments_btn.click(
-        fn=_generate_novel_segments_with_ui,
-        inputs=[novel_text, duration_select, custom_duration_box, novel_segment_count],
+        fn=submit_operation('novel',6,1,editor_tail=True),
+        inputs=[novel_text, duration_select, custom_duration_box, novel_segment_count, story_json, beats_json],
         outputs=[video_jobs_json, status, groups_panel, workflow_progress_panel, beats_json, novel_text],
-        show_progress="full",
+        queue=False,
+        show_progress="hidden",
     )
     split_beats_btn.click(
-        fn=_split_beats_with_cleared_segments,
-        inputs=[story_json, duration_select, custom_duration_box, target_beat_count_box, topic],
+        fn=submit_operation('beats',10,3,editor_tail=True),
+        inputs=[story_json, duration_select, custom_duration_box, target_beat_count_box, topic, story_json, beats_json],
+        queue=False,
         outputs=[
             story_json,
             beats_json,
@@ -1960,8 +2200,9 @@ def bind_events(demo, components):
         show_progress="full",
     )
     split_complex_beat_btn.click(
-        fn=_split_complex_beat_from_ui,
-        inputs=[story_json, beats_json, complex_beat_index],
+        fn=submit_operation('split',10,3,editor_tail=True),
+        inputs=[story_json, beats_json, complex_beat_index, story_json, beats_json],
+        queue=False,
         outputs=[
             story_json,
             beats_json,
@@ -2045,8 +2286,9 @@ def bind_events(demo, components):
         show_progress="hidden",
     )
     generate_segment_prompts_btn.click(
-        fn=_generate_segment_prompts,
-        inputs=[story_json, beats_json, workflow_mode_box, group_page_state, ignore_beat_risk_box],
+        fn=submit_operation('prompts',7,3,editor_tail=True),
+        inputs=[story_json, beats_json, workflow_mode_box, group_page_state, ignore_beat_risk_box, story_json, beats_json],
+        queue=False,
         outputs=[story_json, beats_json, video_jobs_json, status, groups_panel, workflow_progress_panel, beat_risk_notice],
         show_progress="hidden",
     )
@@ -2075,8 +2317,9 @@ def bind_events(demo, components):
     )
     merge_video_btn.click(fn=_merge_video, outputs=[status, video_jobs_json, workflow_progress_panel], show_progress="hidden")
     segment_regen_btn.click(
-        fn=_regen_segment,
-        inputs=[segment_regen_payload, group_page_state, story_json, beats_json],
+        fn=submit_operation('segment',5,2,editor_tail=True),
+        inputs=[segment_regen_payload, group_page_state, story_json, beats_json, story_json, beats_json],
+        queue=False,
         outputs=[story_json, video_jobs_json, status, groups_panel, workflow_progress_panel],
         show_progress="full",
     )
@@ -2112,14 +2355,15 @@ def bind_events(demo, components):
     )
     feedback_refresh_btn.click(fn=refresh_video_feedback_parts, outputs=feedback_part_select)
     feedback_analyze_btn.click(
-        fn=_analyze_video_feedback_guarded,
+        fn=submit_operation('feedback',2,1),
         inputs=[feedback_part_select, feedback_issue_types, feedback_note],
         outputs=[feedback_analysis, status],
+        queue=False,
     )
     feedback_apply_rules_btn.click(fn=_apply_video_feedback_rules_guarded, inputs=feedback_analysis, outputs=status)
 
     one_click_full_btn.click(
-        fn=_one_click_direct,
+        fn=submit_operation('pipeline',7,3,editor_tail=True),
         inputs=[
             topic,
             submit_comfyui_box,
@@ -2133,6 +2377,7 @@ def bind_events(demo, components):
             one_click_resume_mode,
             workflow_only_box,
             no_concat_box,
+            story_json, beats_json,
         ],
         outputs=[story_json, beats_json, video_jobs_json, status, groups_panel, workflow_progress_panel, one_click_full_btn],
         js="""(...values) => {
@@ -2140,13 +2385,21 @@ def bind_events(demo, components):
             values[7] = field ? field.value : values[7];
             return values;
         }""",
-        show_progress="hidden",
+        queue=False, show_progress="hidden",
     )
 
     runtime_refresh_timer.tick(
         fn=_runtime_status_refresh,
         inputs=[group_page_state],
         outputs=[video_jobs_json, groups_panel, workflow_progress_panel, project_episode],
+        queue=False,
+        show_progress="hidden",
+    )
+
+    operation_refresh_btn.click(
+        fn=_runtime_refresh_with_beats,
+        inputs=[group_page_state],
+        outputs=[story_json,beats_json,video_jobs_json,status,groups_panel,workflow_progress_panel],
         queue=False,
         show_progress="hidden",
     )

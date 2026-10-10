@@ -80,7 +80,8 @@ class LtxLiconPipeline:
         *,
         merge_after: bool = False,
         wait: bool = True,
+        backend: str | None = None,
     ) -> dict[str, Any]:
         from workflow.segment_runner import submit_saved_licon_msr_segments
 
-        return submit_saved_licon_msr_segments(segment_indices=segment_indices, merge_after=merge_after, wait=wait)
+        return submit_saved_licon_msr_segments(segment_indices=segment_indices, merge_after=merge_after, wait=wait, backend=backend)

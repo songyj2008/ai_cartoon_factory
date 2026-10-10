@@ -37,5 +37,6 @@ class GenerationPipeline(Protocol):
         *,
         merge_after: bool = False,
         wait: bool = True,
+        backend: str | None = None,
     ) -> dict[str, Any]:
         """Submit persisted jobs belonging to this model."""
