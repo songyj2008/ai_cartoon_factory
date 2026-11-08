@@ -27,7 +27,6 @@ class BeatPlanningStrategy:
     recommended_min_duration_sec: int | None = None
     recommended_max_duration_sec: int | None = None
     default_count_resolver: Callable[[int], int | None] | None = None
-    max_raw_duration_drift_ratio: float | None = None
     timeline_normalizer: Callable[[dict[str, Any], int, int], dict[str, Any]] | None = None
 
     def default_target_count(self, target_duration_sec: int) -> int | None:
@@ -60,6 +59,7 @@ class ModelRuleSet:
     beat_planning: BeatPlanningStrategy = field(default_factory=BeatPlanningStrategy)
     beat_risk_detector: Callable[[dict[str, Any], int | None], dict[str, Any]] | None = None
     quality_rules: tuple[QualityRule, ...] = field(default_factory=tuple)
+    compatible_revisions: tuple[str, ...] = ()
 
 
 class RuleOwnedPipeline(Protocol):
@@ -113,7 +113,7 @@ def assert_beats_compatible(beats_data: dict, model_id: str | None = None) -> No
     source_revision = str(policy.get("rules_revision") or "").strip()
     if not source_model_id and rules.accept_unversioned_beats:
         return
-    if source_model_id != rules.model_id or source_revision != rules.revision:
+    if source_model_id != rules.model_id or source_revision not in (rules.revision, *rules.compatible_revisions):
         source = source_model_id or "未记录模型"
         raise ValueError(
             f"当前 Beats 由 {source} / {source_revision or '旧规则'} 生成，"

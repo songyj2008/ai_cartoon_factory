@@ -116,6 +116,26 @@ def split_complex_beat(
     if not replacements:
         raise ValueError("replacement_beats contains no beat objects")
 
+    if resolved_model_id == 'minimax_h3_local_ref2va':
+        from generation.pipelines.minimax_h3.prompt_planner import _validated_plan, _assert_current_dialogue_preserved
+        model = 'minimax_h3_local_ref2va'
+        merged_shots = []
+        for replacement in replacements:
+            duration = float(replacement.get('estimated_duration_sec') or 0)
+            if not 4 <= duration <= 15 or not duration.is_integer():
+                raise ValueError('H3 replacement duration must be a 4-15 second integer')
+            plan = _validated_plan((replacement.get('model_hints') or {}).get(model), duration)
+            merged_shots.extend(plan['shots'])
+        expected = beat.get('dialogue_units')
+        if expected is None:
+            old_shots = ((beat.get('model_hints') or {}).get(model) or {}).get('shots', [])
+            expected = []
+            for shot in old_shots:
+                values = shot.get('dialogues', shot.get('dialogue', []))
+                expected.extend([values] if isinstance(values, dict) else values or [])
+        _assert_current_dialogue_preserved({'dialogue_units': expected, 'dialogue_authoritative': True},
+                                          {'shots': merged_shots})
+        beats_data = {**beats_data, 'generation_policy': {**policy, 'model_id': model}}
     new_beats = replace_beat(beats_data, beat_index, replacements)
     return {
         "beat_index": beat_index,

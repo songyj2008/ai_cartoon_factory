@@ -1,7 +1,9 @@
 """Model-neutral entry points used by UI and orchestration code."""
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
+from contextlib import nullcontext
 from typing import Any
 from functools import wraps
 
@@ -19,7 +21,24 @@ def _serialized_submission(fn):
     return wrapped
 
 
+def _pinned_runtime(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        from services.context import pin_runtime
+        with pin_runtime():
+            return fn(*args, **kwargs)
+    return wrapped
+
+
 class GenerationService:
+    def preview_shot_edits(self, payload):
+        from generation.pipelines.minimax_h3.shot_edit_service import preview
+        return preview(payload)
+
+    def commit_shot_edits(self, payload):
+        from generation.pipelines.minimax_h3.shot_edit_service import commit
+        return commit(payload)
+
     def __init__(self) -> None:
         self.registry = get_model_registry()
 
@@ -68,7 +87,7 @@ class GenerationService:
             groups.setdefault(model_id, set()).add(index)
         return groups
 
-    @_serialized_submission
+    @_pinned_runtime
     def _run_preparation_by_model(
         self,
         beats_data: dict[str, Any],
@@ -79,8 +98,13 @@ class GenerationService:
         merge_after: bool,
     ) -> dict[str, Any]:
         """Run each model's independent compiler/assembler for its segments."""
-        from workflow.video_merge import load_video_jobs, merge_segment_videos, save_video_jobs
+        from workflow.video_merge import load_video_jobs, merge_segment_videos, save_video_jobs, video_jobs_lock
 
+        from pipeline.planning_budget import budget_report
+        report = budget_report(beats_data)
+        if report['outside_budget']:
+            from services.logger import log
+            log('参考预算提示：' + report['message'] + '；继续按完整内容生成。', 'WARN')
         groups = self._model_groups_for_beats(beats_data, segment_indices)
         for model_id, indices in groups.items():
             from generation.model_rules import assert_beats_compatible
@@ -89,20 +113,22 @@ class GenerationService:
             pipeline = self._pipeline_for(model_id)
             # A pipeline validates its own planning rules.  H3's 4-15 second
             # rules therefore do not leak into the LTX path.
-            pipeline.generate(
-                beats_data,
-                submit=submit,
-                workflow_only=workflow_only,
-                segment_indices=indices,
-                merge_after=False,
-            )
+            with (nullcontext() if model_id == 'minimax_h3_local_ref2va' else video_jobs_lock()):
+                pipeline.generate(
+                    beats_data,
+                    submit=submit,
+                    workflow_only=workflow_only,
+                    segment_indices=indices,
+                    merge_after=False,
+                )
 
-        result = normalize_video_jobs_payload(load_video_jobs())
-        result["default_model_id"] = self.project_default_model_id()
-        if merge_after:
-            from workflow.video_merge import request_video_merge
-            request_video_merge(result)
-        save_video_jobs(result)
+        with video_jobs_lock():
+            result = normalize_video_jobs_payload(load_video_jobs())
+            result["default_model_id"] = self.project_default_model_id()
+            if merge_after:
+                from workflow.video_merge import request_video_merge
+                request_video_merge(result)
+            save_video_jobs(result)
         return result
 
     def prepare_segments(self, beats_data: dict[str, Any], segment_indices: set[int] | None = None) -> dict[str, Any]:
@@ -114,63 +140,87 @@ class GenerationService:
             merge_after=False,
         )
 
-    @_serialized_submission
+    @_pinned_runtime
     def regenerate_segment_prompt(self, beats_data: dict[str, Any], segment_index: int) -> dict[str, Any]:
         """Recompile one prompt with the model configured for that segment.
 
         The service owns model selection only. Each registered pipeline owns
         the prompt state that must be reset before its compiler runs.
         """
-        from workflow.video_merge import load_video_jobs, save_video_jobs
+        from workflow.video_merge import load_video_jobs, save_video_jobs, video_jobs_lock
 
         index = int(segment_index)
         if index <= 0:
             raise ValueError("segment index must be positive")
-        payload = normalize_video_jobs_payload(load_video_jobs())
-        segment = next(
-            (
-                item
-                for item in payload.get("segments") or []
-                if isinstance(item, dict) and int(item.get("segment_index") or 0) == index
-            ),
-            None,
-        )
-        if segment is None:
-            raise ValueError(f"segment not found: {index}")
-        model_id = resolved_model_id(segment, payload)
-        pipeline = self._pipeline_for(model_id)
-        reset_prompt = getattr(pipeline, "reset_prompt_for_regeneration", None)
-        if not callable(reset_prompt):
-            raise TypeError(f"video model does not implement prompt regeneration: {model_id}")
-        reset_prompt(segment)
-        save_video_jobs(payload)
-        regenerate_source = getattr(pipeline, "regenerate_prompt_source", None)
-        if callable(regenerate_source):
-            regenerate_source(beats_data, index)
-            # A fullscreen H3 autosave may have started just before the model
-            # request and completed while it was running. Reload the newest
-            # manifest (the user's picker is authoritative), but clear any
-            # stale prompt override that request wrote back before compiling.
-            latest_payload = normalize_video_jobs_payload(load_video_jobs())
-            latest_segment = next(
-                (
-                    item
-                    for item in latest_payload.get("segments") or []
-                    if isinstance(item, dict) and int(item.get("segment_index") or 0) == index
-                ),
-                None,
+        from services.context import get_project_dir
+        from generation.pipelines.minimax_h3.shot_edit_service import _recover
+        @_serialized_submission
+        def begin_regeneration():
+            import copy
+            _recover(get_project_dir())
+            payload = normalize_video_jobs_payload(load_video_jobs())
+            segment = next((item for item in payload.get('segments') or []
+                            if isinstance(item, dict) and int(item.get('segment_index') or 0) == index), None)
+            if segment is None:
+                raise ValueError(f'segment not found: {index}')
+            model_id = resolved_model_id(segment, payload)
+            pipeline = self._pipeline_for(model_id)
+            reset_prompt = getattr(pipeline, 'reset_prompt_for_regeneration', None)
+            if not callable(reset_prompt):
+                raise TypeError(f'video model does not implement prompt regeneration: {model_id}')
+            previous = ((segment.get('generation_config') or {}).get('prompt_override'),
+                        copy.deepcopy(segment.get('h3_prompt_plan')), segment.get('h3_prompt_source'))
+            reset_prompt(segment)
+            save_video_jobs(payload)
+            return pipeline, reset_prompt, previous
+
+        pipeline, reset_prompt, previous = begin_regeneration()
+        previous_override, previous_plan, previous_source = previous
+        try:
+            regenerate_source = getattr(pipeline, "regenerate_prompt_source", None)
+            if callable(regenerate_source):
+                regenerate_source(beats_data, index)
+                # A fullscreen H3 autosave may have started just before the model
+                # request and completed while it was running. Reload the newest
+                # manifest (the user's picker is authoritative), but clear any
+                # stale prompt override that request wrote back before compiling.
+                with video_jobs_lock():
+                    latest_payload = normalize_video_jobs_payload(load_video_jobs())
+                    latest_segment = next((item for item in latest_payload.get('segments') or []
+                                           if isinstance(item, dict) and int(item.get('segment_index') or 0) == index), None)
+                    if latest_segment is None:
+                        raise ValueError(f'segment disappeared during prompt regeneration: {index}')
+                    reset_prompt(latest_segment)
+                    save_video_jobs(latest_payload)
+            return self._run_preparation_by_model(
+                beats_data,
+                submit=False,
+                workflow_only=True,
+                segment_indices={index},
+                merge_after=False,
             )
-            if latest_segment is None:
-                raise ValueError(f"segment disappeared during prompt regeneration: {index}")
-            reset_prompt(latest_segment)
-            save_video_jobs(latest_payload)
-        return self._run_preparation_by_model(
-            beats_data,
-            submit=False,
-            workflow_only=True,
-            segment_indices={index},
-            merge_after=False,
-        )
+
+        except Exception:
+            # A rejected plan must not destroy the last usable hand-edited
+            # screenplay. Restore only fields this operation cleared, keeping
+            # any newer explicit prompt or picker selection authoritative.
+            with video_jobs_lock():
+                latest = normalize_video_jobs_payload(load_video_jobs())
+                current = next((item for item in latest.get("segments") or []
+                                if isinstance(item, dict) and int(item.get("segment_index") or 0) == index), None)
+                if current is not None:
+                    config = dict(current.get("generation_config") or {})
+                    if previous_override and not config.get("prompt_override"):
+                        config["prompt_override"] = previous_override
+                        current["generation_config"] = config
+                    if previous_plan is not None and "h3_prompt_plan" not in current:
+                        current["h3_prompt_plan"] = previous_plan
+                    if previous_source is None:
+                        current.pop("h3_prompt_source", None)
+                    else:
+                        current["h3_prompt_source"] = previous_source
+                    save_video_jobs(latest)
+            raise
 
     def generate_segments(
         self,
@@ -189,7 +239,7 @@ class GenerationService:
             merge_after=merge_after,
         )
 
-    @_serialized_submission
+    @_pinned_runtime
     def submit_saved_segments(
         self,
         segment_indices: set[int] | None = None,
@@ -356,12 +406,14 @@ class GenerationService:
 
     @staticmethod
     def _normalise_asset_manifest(value: Any) -> list[dict[str, Any]]:
-        items = value if isinstance(value, list) else []
+        if value is not None and not isinstance(value, list):
+            raise ValueError('参考素材清单无效，未覆盖已保存的配置')
+        items = value if value is not None else []
         normalized: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for index, item in enumerate(items, start=1):
             if not isinstance(item, dict):
-                continue
+                raise ValueError("参考素材条目无效，未覆盖已保存的配置")
             media_type = str(item.get("type") or "").strip().lower()
             path = str(item.get("path") or item.get("relative_path") or "").strip()
             if media_type not in {"image", "video", "audio"}:
@@ -426,7 +478,7 @@ class GenerationService:
         return {"model_id": selected_id, "ok": True, "errors": [], "warnings": []}
 
     @_serialized_submission
-    def update_segment_duration(self, segment_index: int, duration_sec) -> dict:
+    def update_segment_duration(self, segment_index: int, duration_sec, *, patch_workflows: bool = True) -> dict:
         """Use the same beat-duration synchronizer as the Beats editor."""
         import json
         import math
@@ -437,7 +489,8 @@ class GenerationService:
         value = float(duration_sec)
         if not math.isfinite(value) or value <= 0:
             raise ValueError("时长必须为正数")
-        duration = _beat_duration_seconds(value)
+        from generation.job_schema import resolved_model_id
+        duration = value
         root = get_project_dir()
         beats_path = root / "beats.json"
         data = json.loads(beats_path.read_text(encoding="utf-8-sig"))
@@ -449,15 +502,107 @@ class GenerationService:
         if not any(int(s.get("segment_index") or 0) == segment_index for s in jobs.get("segments", [])):
             raise ValueError("找不到当前分段")
         beat = beats[segment_index - 1]
+        current_segment = next(s for s in jobs.get('segments', []) if int(s.get('segment_index') or 0) == segment_index)
+        from workflow.runninghub_queue import has_active_submission
+        if has_active_submission(current_segment):
+            raise ValueError('视频正在生成，请完成后再修改分段时长')
+        if resolved_model_id(current_segment, jobs) != 'minimax_h3_local_ref2va':
+            duration = _beat_duration_seconds(value)
+        else:
+            # Draft timing is not a workflow constraint; preserve fractional edits.
+            from generation.pipelines.minimax_h3.planning_drafts import refresh_saved_prompt
+            current_segment['generation_config'] = {**(current_segment.get('generation_config') or {}), 'duration_sec': duration}
+            current_segment.setdefault('job', {})['duration_sec'] = duration
+            refresh_saved_prompt(current_segment, str(current_segment['generation_config'].get('prompt_override') or current_segment.get('compiled_prompt_snapshot') or current_segment['job'].get('final_prompt') or ''))
         beat["estimated_duration_sec"] = duration
         if "duration_sec" in beat:
             beat["duration_sec"] = duration
         data["total_duration_sec"] = sum(_beat_duration_seconds(b.get("estimated_duration_sec") or b.get("duration_sec") or 15) for b in beats)
+        if resolved_model_id(current_segment, jobs) == 'minimax_h3_local_ref2va':
+            data['total_duration_sec'] = sum(float(b.get('estimated_duration_sec') or b.get('duration_sec') or 0) for b in beats)
         if not data.get("target_duration_sec"):
             data["target_duration_sec"] = data["total_duration_sec"]
-        result = _sync_video_jobs_with_beat_durations(data, jobs_path)
+        if resolved_model_id(current_segment, jobs) == 'minimax_h3_local_ref2va':
+            from workflow.video_merge import save_video_jobs
+            current_segment.pop('workflow_path', None)
+            if not current_segment.get('submitted'):
+                current_segment['status'] = 'needs_regenerate'
+            jobs['total_duration_sec'] = sum(float((s.get('job') or {}).get('duration_sec') or 0) for s in jobs['segments'])
+            save_video_jobs(jobs)
+            result = json.dumps(jobs, ensure_ascii=False)
+        else:
+            result = _sync_video_jobs_with_beat_durations(data, jobs_path, patch_workflows=patch_workflows)
         beats_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return json.loads(result)
+
+    @_serialized_submission
+    def _prepare_h3_prompt(self, segment, old_config, config, submitted_prompt, *, force_save=False, preserve_revision=False):
+        from generation.pipelines.minimax_h3.auto_binder import enrich_asset_manifest_metadata
+        from services.character_voice import refresh_character_voices
+        from services.context import ASSETS_DIR
+        from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+        from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
+        from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+
+        config = dict(config)
+        saved_prompt = str((old_config or {}).get('prompt_override') or segment.get('compiled_prompt_snapshot') or '').strip()
+        if (segment.get('scene_context_id') and submitted_prompt is not None
+                and str(submitted_prompt).strip() == saved_prompt
+                and H3GenerationConfig.from_mapping(old_config).asset_manifest
+                == H3GenerationConfig.from_mapping(config).asset_manifest):
+            # Save-before-action must not enrich, rename, revoice or recompile
+            # an unchanged, already authored continuous-scene screenplay.
+            return {**config, 'prompt_override': saved_prompt}
+        manifest = enrich_asset_manifest_metadata(config.get("asset_manifest") or [])
+        config["asset_manifest"] = manifest if segment.get('h3_prompt_source') == 'shot_edit' else refresh_character_voices(manifest, ASSETS_DIR)
+        if submitted_prompt is not None:
+            text = str(submitted_prompt or "").strip()
+            if force_save or preserve_revision:
+                config["prompt_override"] = text
+                config.pop("asset_match_signature", None)
+            elif text:
+                config = self._pipeline_for("minimax_h3_local_ref2va").reconcile_generation_config(segment, old_config, config, text)
+            else:
+                config.pop("prompt_override", None)
+        if config.get("prompt_override"):
+            from generation.pipelines.minimax_h3.shot_editor import inspect_prompt, dialogue_units
+            from services.character_voice import attach_character_voices
+            from services.project_bible import load_project_bible
+            current = list(config.get('asset_manifest') or [])
+            inspected = inspect_prompt(config['prompt_override'], 'voice-save', current)
+            if inspected.get('verified'):
+                units = [unit for shot in inspected['document']['shots'] for unit in dialogue_units(shot)]
+                voiced = attach_character_voices(current, {'dialogue_units': units}, ASSETS_DIR,
+                                                 load_project_bible())
+                # Saving does not implicitly delete or renumber selected audio.
+                existing_ids = {a.get('asset_id') or a.get('id') for a in current}
+                config['asset_manifest'] = current + [a for a in voiced
+                    if (a.get('asset_id') or a.get('id')) not in existing_ids]
+            config["prompt_override"] = H3PromptCompiler.compact_reference_sections(
+                config["prompt_override"], H3AssetBinder().bind(H3GenerationConfig.from_mapping(config))
+            )
+        return config
+
+    def preview_segment_prompt(self, segment_index, prompt_override, asset_manifest=None, *, force_save=False, prompt_provenance=None):
+        from workflow.video_merge import load_video_jobs
+        from generation.job_schema import resolved_model_id
+        jobs = load_video_jobs()
+        segment = next((item for item in jobs.get("segments") or [] if int(item.get("segment_index") or 0) == int(segment_index)), None)
+        if segment is None:
+            raise ValueError("segment not found")
+        model_id = resolved_model_id(segment, jobs)
+        pipeline = self._pipeline_for(model_id)
+        old = dict(segment.get("generation_config") or {})
+        config = dict(old)
+        config["asset_manifest"] = self._normalise_asset_manifest(asset_manifest if asset_manifest is not None else old.get("asset_manifest"))
+        if model_id == "minimax_h3_local_ref2va":
+            config = self._prepare_h3_prompt(segment, old, config, prompt_override, force_save=force_save,
+                preserve_revision=(prompt_provenance or {}).get("source") == "web_revision")
+            text = str(config.get("prompt_override") or "")
+        else:
+            text = str(prompt_override or "").strip()
+        limit = pipeline.spec.capabilities.prompt_max_chars
+        return {"prompt_chars": len(text), "prompt_max_chars": limit, "over_limit": bool(limit and len(text) > limit)}
 
     @_serialized_submission
     def update_segment_generation_config(
@@ -469,6 +614,8 @@ class GenerationService:
         prompt_override: str | None = None,
         prompt_provenance: dict[str, Any] | None = None,
         force_save: bool = False,
+        base_revision: str | None = None,
+        segment_uid: str | None = None,
     ) -> dict[str, Any]:
         """Persist declarative per-segment model inputs, never workflow nodes.
 
@@ -476,6 +623,9 @@ class GenerationService:
         model adapter turns that into its own slots, tags, and graph nodes.
         """
         from workflow.video_merge import load_video_jobs, save_video_jobs
+        from services.context import get_project_dir
+        from generation.pipelines.minimax_h3.shot_edit_service import _recover
+        _recover(get_project_dir())
 
         index = int(segment_index)
         if index <= 0:
@@ -487,13 +637,20 @@ class GenerationService:
         )
         if segment is None:
             raise ValueError(f"segment not found: {index}")
+        if segment_uid is not None and segment.get('segment_uid') != segment_uid:
+            raise ValueError('目标分段已变化，当前草稿保留，请重新读取')
+        if base_revision is not None:
+            from generation.pipelines.minimax_h3.editor_draft import reference_revision
+            if reference_revision(segment) != base_revision:
+                raise ValueError('后台提示词或参考素材已变化，当前草稿保留，未覆盖新版本')
         if force_save:
             if resolved_model_id(segment, payload) != "minimax_h3_local_ref2va":
                 raise ValueError("强制保存仅支持 H3 提示词")
             if asset_manifest is None or not str(prompt_override or "").strip():
                 raise ValueError("强制保存需要当前素材列表和非空提示词")
         old_config = dict(segment.get("generation_config") or {})
-        preserve_revision = (prompt_provenance or {}).get("source") == "web_revision"
+        timing_source = copy.deepcopy(segment)
+        preserve_revision = (prompt_provenance or {}).get("source") in {"web_revision", "duration_replan"}
         config = dict(old_config)
         job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
         compiled_snapshot = str(
@@ -507,20 +664,35 @@ class GenerationService:
             config["generation_mode"] = str(generation_mode or "").strip() or "ref2va"
         config.setdefault("generation_mode", "ref2va")
         if asset_manifest is not None:
-            config["asset_manifest"] = self._normalise_asset_manifest(asset_manifest)
+            normalized_manifest = self._normalise_asset_manifest(asset_manifest)
+            if normalized_manifest != self._normalise_asset_manifest(old_config.get("asset_manifest")):
+                config["reference_selection_source"] = "manual"
+                config["asset_manifest"] = normalized_manifest
+            else:
+                # An unchanged picker round-trip must not replace the saved
+                # identity/metadata representation and invalidate scene facts.
+                config["asset_manifest"] = (copy.deepcopy(old_config.get("asset_manifest") or [])
+                    if segment.get('scene_context_id') and resolved_model_id(segment, payload) == 'minimax_h3_local_ref2va'
+                    else normalized_manifest)
         else:
-            config["asset_manifest"] = self._normalise_asset_manifest(config.get("asset_manifest"))
+            config["asset_manifest"] = (copy.deepcopy(old_config.get("asset_manifest") or [])
+                if segment.get('scene_context_id') and resolved_model_id(segment, payload) == 'minimax_h3_local_ref2va'
+                else self._normalise_asset_manifest(config.get("asset_manifest")))
         if resolved_model_id(segment, payload) == "minimax_h3_local_ref2va":
-            from services.character_voice import attach_character_voices
-            from services.context import ASSETS_DIR
-            config["asset_manifest"] = attach_character_voices(config["asset_manifest"], {}, ASSETS_DIR)
-        if prompt_override is not None:
+            if (prompt_provenance or {}).get('source') == 'duration_replan':
+                from generation.pipelines.minimax_h3.prompt_retimer import validate_timing_edit
+                validate_timing_edit(old_prompt,str(prompt_override))
+                if self._normalise_asset_manifest(config['asset_manifest']) != self._normalise_asset_manifest(old_config.get('asset_manifest')):
+                    raise ValueError('时长规划不能修改素材绑定')
+                config['prompt_override']=str(prompt_override)
+            else:
+                config = self._prepare_h3_prompt(segment, old_config, config, prompt_override,
+                    force_save=force_save, preserve_revision=preserve_revision)
+        elif prompt_override is not None:
             submitted_prompt = str(prompt_override or "").strip()
             pipeline = self._pipeline_for(resolved_model_id(segment, payload))
             reconcile = getattr(pipeline, "reconcile_generation_config", None)
             if force_save or preserve_revision:
-                # The editor's current numbering is authoritative. Persist this
-                # manifest as the baseline for subsequent ordinary saves.
                 config["prompt_override"] = submitted_prompt
                 config.pop("asset_match_signature", None)
             elif callable(reconcile) and submitted_prompt:
@@ -529,15 +701,23 @@ class GenerationService:
                 config["prompt_override"] = submitted_prompt
             else:
                 config.pop("prompt_override", None)
-        if resolved_model_id(segment, payload) == "minimax_h3_local_ref2va":
+        if resolved_model_id(segment, payload) == 'minimax_h3_local_ref2va':
+            from generation.pipelines.minimax_h3.validator import H3Ref2VAValidator
             from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
-            from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
-            from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
-            parsed = H3GenerationConfig.from_mapping(config)
-            if config.get("prompt_override") and not preserve_revision:
-                config["prompt_override"] = H3PromptCompiler._with_character_voices(config["prompt_override"], H3AssetBinder().bind(parsed))
+            parsed_config = H3GenerationConfig.from_mapping(config)
+            report = H3Ref2VAValidator().validate(parsed_config)
+            H3Ref2VAValidator().validate_binding_contract(segment, parsed_config, report=report)
+            # This is an editor save, not a video submission. Keep positive
+            # timing drafts editable; refresh_saved_prompt records these limits
+            # as blocking diagnostics and provider submission remains strict.
+            report.errors = [issue for issue in report.errors
+                             if issue.code not in {'duration_not_integer', 'duration_out_of_range'}]
+            report.raise_for_errors()
         if prompt_override is not None:
             current_prompt = str(config.get("prompt_override") or compiled_snapshot).strip()
+            # Shot identities survive text/reference edits. Content sync checks
+            # the actual Shot structure; a full-text hash is not an identity.
+            segment["prompt_saved"] = True
             current_info = old_config.get("prompt_version_info") if isinstance(old_config.get("prompt_version_info"), dict) else {}
             latest_revision = old_config.get("latest_prompt_revision") if isinstance(old_config.get("latest_prompt_revision"), dict) else {}
             previous_version = max(
@@ -564,11 +744,50 @@ class GenerationService:
                 config["prompt_version_info"] = {
                     "version": previous_version + 1,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "provider": "手动编辑",
-                    "source": "manual",
+                    "provider": "时长规划" if provenance.get("source") == "duration_replan" else "手动编辑",
+                    "source": "duration_replan" if provenance.get("source") == "duration_replan" else "manual",
                     "task_id": "",
                 }
         segment["generation_config"] = config
+        content_pair = None
+        if resolved_model_id(segment, payload) == 'minimax_h3_local_ref2va' and prompt_override is not None:
+            import json
+            import uuid
+            from services.context import get_project_dir
+            from generation.pipelines.minimax_h3.segment_content_sync import sync_segment_content
+            from generation.pipelines.minimax_h3.shot_edit_service import _recover
+            root = get_project_dir()
+            _recover(root)
+            beats_path = root / 'beats.json'
+            text = str(config.get('prompt_override') or compiled_snapshot)
+            segment['h3_editor_prompt'] = text
+            if beats_path.is_file():
+                beats = json.loads(beats_path.read_text(encoding='utf-8-sig'))
+                rows = beats.get('beats') or []
+                uid = segment.get('beat_uid')
+                matches = [b for b in rows if uid and b.get('beat_uid') == uid]
+                if not uid and len(rows) == len(payload.get('segments') or []) and 0 < index <= len(rows):
+                    matches = [rows[index - 1]]
+                    uid = matches[0].get('beat_uid') or 'beat_' + uuid.uuid4().hex
+                    matches[0]['beat_uid'] = segment['beat_uid'] = uid
+                if len(matches) == 1:
+                    updated_beat, updated_segment, diagnostics = sync_segment_content(
+                        matches[0], segment, prompt=text, generation_config=config)
+                    matches[0].clear()
+                    matches[0].update(updated_beat)
+                    segment.clear()
+                    segment.update(updated_segment)
+                    content_pair = (root, beats)
+                else:
+                    segment['h3_content_sync'] = {'verified': False, 'issues': ['无法唯一定位对应 Beat，全文已保留']}
+            else:
+                segment['h3_content_sync'] = {'verified': False, 'issues': ['缺少 Beat 文件，全文已保留']}
+            from generation.pipelines.minimax_h3.planning_drafts import refresh_saved_prompt
+            refresh_saved_prompt(segment, str(config.get('prompt_override') or compiled_snapshot))
+            for message in (segment.get('h3_content_sync') or {}).get('issues', []):
+                segment.setdefault('planning_issues', []).append(
+                    {'code': 'unverified_prompt_structure', 'message': message, 'blocking': True})
+                segment['planning_state'] = 'warning'
         from generation.deferred_regeneration import defer_regeneration_for_active_submission
 
         active_submission_preserved = defer_regeneration_for_active_submission(
@@ -580,8 +799,15 @@ class GenerationService:
             segment["submitted"] = False
             segment.pop("workflow_path", None)
             segment.pop("workflow", None)
+        if (prompt_provenance or {}).get('source') == 'duration_replan':
+            from generation.pipelines.minimax_h3.continuity.timing import advance_timing_record
+            advance_timing_record(segment, before=timing_source)
         payload.pop("final_video_path", None)
-        save_video_jobs(payload)
+        if content_pair:
+            from generation.pipelines.minimax_h3.segment_content_sync import write_content_pair
+            write_content_pair(content_pair[0], beats=content_pair[1], jobs=payload)
+        else:
+            save_video_jobs(payload)
         return payload
 
 

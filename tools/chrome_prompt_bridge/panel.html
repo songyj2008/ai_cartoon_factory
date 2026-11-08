@@ -16,6 +16,7 @@
       <label for="backend-deepseek">DeepSeek 专用对话</label><select id="backend-deepseek"><option value="">自动发现并绑定</option></select>
       <label for="backend-chatgpt">ChatGPT 专用对话</label><select id="backend-chatgpt"><option value="">自动发现并绑定</option></select>
       <label for="backend-doubao">豆包专用对话</label><select id="backend-doubao"><option value="">自动发现并绑定</option></select>
+      <label for="backend-qianwen">千问专用对话</label><select id="backend-qianwen" disabled><option value="">自动管理标签页池</option></select>
       <div class="actions"><button id="connect-backend" type="button" class="primary">保存并启用连接</button><button id="disconnect-backend" type="button">暂停接收</button></div>
       <button id="poll-backend" type="button">立即检查任务 / 刷新标签页</button>
       <p id="backend-status" class="hint" role="status">连接后按服务建立标签页池，优先复用后台页，有排队任务时按需补充。并发上限在项目的“网页 LLM”设置中调整。</p>
@@ -24,7 +25,7 @@
       <div class="section-head"><h2 id="connection-title"><b>1</b> 选择对话</h2><button id="refresh" class="small" type="button">刷新列表</button></div>
       <label for="target">发送到哪个标签页</label><select id="target"><option value="">正在查找已打开的对话…</option></select>
       <div class="links"><a href="https://chatgpt.com/" target="_blank" rel="noreferrer">打开 ChatGPT ↗</a><a href="https://chat.deepseek.com/" target="_blank" rel="noreferrer">打开 DeepSeek ↗</a><a href="https://www.doubao.com/chat/" target="_blank" rel="noreferrer">打开豆包 ↗</a></div>
-      <p class="hint">建议使用专门的对话。请求会发送到你选择的标签页。</p>
+      <p class="hint">建议使用专门的对话。请求会发送到你选择的标签页。<a href="https://www.qianwen.com/" target="_blank" rel="noreferrer">打开千问 ↗</a></p>
     </section>
     <section aria-labelledby="conversation-title">
       <h2 id="conversation-title">对话策略</h2>
@@ -67,9 +68,9 @@
       <div id="result" hidden><h3>修改说明</h3><ul id="changes"></ul><label for="revised">修正后的完整提示词</label><textarea id="revised" rows="10" readonly></textarea><div class="actions"><button id="copy-result" class="primary" type="button">复制修正版</button><button id="export" type="button">导出记录</button></div><details><summary>查看本次提交的原提示词</summary><pre id="original"></pre></details></div>
       <details id="raw-box" hidden><summary>查看原始回复</summary><textarea id="raw" rows="8" readonly aria-label="原始回复"></textarea></details>
     </section>
-    <details class="advanced"><summary>网页适配设置</summary><p class="hint">网页改版导致识别失败时，可为当前网站填写 CSS 选择器。留空使用默认值。</p><label for="editor-selector">输入框选择器</label><input id="editor-selector" placeholder="默认自动识别"><label for="send-selector">发送按钮选择器</label><input id="send-selector" placeholder="默认按按钮标签识别"><label for="reply-selector">回答正文选择器（不能包含用户消息）</label><input id="reply-selector" placeholder="默认按网站识别"><button id="save-selectors" type="button">保存当前网站设置</button></details>
+    <details class="advanced"><summary>网页适配设置</summary><p class="hint">网页改版导致识别失败时，可为当前网站填写 CSS 选择器。留空使用默认值。千问已开放文字任务试用；最终回答选择器必须排除用户消息和思考过程，用户消息选择器只匹配已发送的消息。千问视频附件尚未启用。</p><label for="editor-selector">输入框选择器</label><input id="editor-selector" placeholder="默认自动识别"><label for="send-selector">发送按钮选择器</label><input id="send-selector" placeholder="默认按按钮标签识别"><label for="reply-selector">回答正文选择器（不能包含用户消息）</label><input id="reply-selector" placeholder="默认按网站识别"><label for="user-selector">用户消息选择器（千问会话绑定，可选）</label><input id="user-selector" placeholder="默认按消息角色识别"><button id="save-selectors" type="button">保存当前网站设置</button></details>
     <footer id="extension-version">项目后台桥接版 · 不使用 Codex 或 API 密钥</footer>
   </main>
-  <script src="protocol.js"></script><script src="panel.js"></script>
+  <script src="protocol.js"></script><script src="text_provider_policy.js"></script><script src="panel.js"></script>
 </body>
 </html>

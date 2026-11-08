@@ -166,11 +166,22 @@ if (!globalThis.__AICF_DOUBAO_VIDEO_ADAPTER__) {
       return Date.now()-stableSince>=750 ? field : null;
     },empty?'已加载完成的空白对话输入框':'已加载完成的视频输入组件',30000);
   }
-  const mediaSources = () => [...document.querySelectorAll('video,a[href]')]
-    .map(element=>element.currentSrc || element.src || element.href || '')
-    .filter(url=>url && (/^blob:/i.test(url) || /\.(mp4|webm|mov)(\?|$)/i.test(url) || /\/video\//i.test(url)));
+  const mediaSources = () => [...new Set([
+    ...[...document.querySelectorAll('video')].map(element=>element.currentSrc || element.src || ''),
+    ...[...document.querySelectorAll('a[href]')].map(element=>element.href || '')
+      .filter(url=>/\.(mp4|webm|mov)(\?|$)|\/video\//i.test(url))
+  ])].filter(url=>/^(?:https?:|blob:)/i.test(url));
+  const completionPattern=/^(?:你的视频(?:已经|已)?生成好了|视频(?:已经|已)?生成(?:完毕|完成|成功)|视频制作完成)/;
+  const completedText = element => completionPattern.test(String(element.innerText || element.textContent || '').trim());
   const readyCards = () => [...document.querySelectorAll('div,span,p')]
-    .filter(element=>visible(element) && element.children.length===0 && /你的视频生成好了/.test(element.textContent || ''));
+    .filter(element=>visible(element) && completedText(element) &&
+      ![...element.querySelectorAll('div,span,p')].some(child=>visible(child) && completedText(child)));
+  const failurePattern=/^(?:视频(?:生成|制作)失败|生成视频失败|(?:近\s*\d+\s*天|今日|本周).*额度.*(?:用完|耗尽|不足))/;
+  const failureText = element => failurePattern.test(String(element.innerText || element.textContent || '').trim());
+  const failureCards = () => [...new Set([...document.querySelectorAll('div,span,p')]
+    .filter(element=>visible(element) && failureText(element) &&
+      ![...element.querySelectorAll('div,span,p')].some(child=>visible(child) && failureText(child)))
+    .map(element=>element.closest?.('p') || element))];
   const confirmationPattern=/(?:确认后.{0,48}(?:开始|生成视频)|(?:请|需要|是否).{0,16}确认.{0,32}(?:开始|生成视频|发送))/s;
   const confirmationRequests=()=>{
     const root=composerRoot();
@@ -366,6 +377,7 @@ if (!globalThis.__AICF_DOUBAO_VIDEO_ADAPTER__) {
     stage='提交视频生成';
     const baseline=mediaSources();
     const baselineReadyCount=readyCards().length;
+    const baselineFailureCount=failureCards().length;
     const baselineConfirmationCount=confirmationRequests().length;
     const send=await waitFor(()=>{
       const button=[...document.querySelectorAll('button[data-testid="chat_input_send_button"]')].find(visible)
@@ -387,10 +399,15 @@ if (!globalThis.__AICF_DOUBAO_VIDEO_ADAPTER__) {
       return value!==task.input.prompt || pending>pendingBefore ||
         mediaSources().some(source=>!baseline.includes(source));
     },'已接受的视频生成任务',10000);
-    return {ok:true,baseline,baselineReadyCount,baselineConfirmationCount};
+    return {ok:true,baseline,baselineReadyCount,baselineFailureCount,baselineConfirmationCount};
     } catch(error) {error.message='['+stage+'] '+error.message;error.beforeSend=!sendStarted;throw error;}
   }
   async function status(task) {
+    const failures=failureCards();
+    if(failures.length>Number(task.baselineFailureCount || 0)) {
+      const card=failures.at(-1);
+      return {ok:true,ready:false,failed:true,error:String(card.innerText || card.textContent || '').trim()};
+    }
     const candidates=mediaSources().filter(source=>!(task.baseline || []).includes(source));
     const cards=readyCards();
     const newCard=cards.length>Number(task.baselineReadyCount || 0);

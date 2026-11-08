@@ -3,9 +3,21 @@ from __future__ import annotations
 
 import copy
 import math
+from pathlib import Path
 from typing import Any
 
 from generation.model_rules import BeatPlanningStrategy, ModelRuleSet, QualityRule
+
+
+def h3_segment_planning_rules() -> str:
+    """Shared directing policy for H3 writing, planning, and revisions."""
+    path = Path(__file__).resolve().parents[3] / "profiles" / "h3_segment_planning_rules.md"
+    return path.read_text(encoding="utf-8-sig").strip()
+
+
+def h3_visual_prompt_rules() -> str:
+    """Read the shared expression section without timing/output contracts."""
+    return '## 镜头表达\n' + h3_segment_planning_rules().split('## 镜头表达\n', 1)[1]
 
 
 def normalize_h3_hints(raw: dict, model_id: str) -> dict:
@@ -19,17 +31,6 @@ def normalize_h3_hints(raw: dict, model_id: str) -> dict:
     if any(not isinstance(shot, dict) for shot in hints["shots"]):
         raise ValueError("H3 shots 中每个分镜必须是对象")
     return result
-
-
-H3_BLOCKING_PROMPT = """
-【按剧情规划人物调度】
-- 每个 Shot 必须有 blocking 字段，用自然语言明确实际出镜人物相对场景和彼此的位置、身体朝向、视线对象、开场正在进行的动作；无人物镜头描述主体空间关系即可。
-- 第一个 Shot 从剧情正在发生的状态开始；不要为了展示人物参考图而先摆正面合照。剧情需要并排、正面或面向镜头时可以采用。
-- camera 与 blocking 必须一致：先确定场景中的人物位置，再决定摄影机从背面、侧面、肩后或其他适合剧情的位置观察。看光幕不等于看镜头。
-- continuity 写清本 Shot 结束位置与下一 Shot 的承接；连续场景承接前段结束状态，换场重新建立空间，不凭空改变人物相对位置。
-- 人物参考图用于身份外观；图中站姿、手势、朝向和拍摄背景不是剧情表演指令，除非用户明确指定为首帧、姿态或构图锚点。
-- 站位根据人物目的、交流关系、动作和场景空间生成，不为所有场景套用固定左右站位、面对面或侧身模板。
-""".strip()
 
 
 def _h3_default_target_count(total_sec: int, min_duration: int, max_duration: int) -> int:
@@ -113,18 +114,29 @@ def detect_h3_beat_risks(beat: dict, beat_index: int | None = None) -> dict:
 H3_STORY_CONSTRAINTS = """
 【MiniMax H3 可生成性约束（最高优先级）】
 - 后续每个 Beat 对应一个 4–15 秒的完整 H3 视频事件；一个 Beat 内可以有一个或多个 Shot。
-- 默认把连续因果事件合并为 8–12 秒的多 Shot Beat；4–7 秒只保留给独立短笑点或悬念揭示。
+- 按连续事件和自然对白确定段长，不为凑时长拆分。
 - 允许切镜、站起、坐下、走动、进入、离开和转场，只要动作推动当前事件，不要把无剧情价值的移动单独拆成 Beat。
 - 按可见画面写动作和结果，允许用景别变化、运镜、环境声、音效和对白共同推进。
 - 台词长度必须能在对应 Shot 时长内自然说完；画内与画外说话人必须明确。
+- 旁白使用独立说话人和 scope=narration；电话另一端对白使用明确角色名和 scope=telephone。人物内心独白不得自动改为旁白。声音角色不因发言而进入 visible_roles 或被新增为画内人物；画内人物不代说、不对口型。仅在输入明确要求时安排这些声音，不新增台词。
 - 一句台词跨 Shot 时保持说话人连续；切镜后明确新的景别和承接的主体。
-- 每个 Shot 的 subject、action、dialogue、continuity 都要写出实际涉及的角色名；切镜后重新明确角色，不依赖上一镜头的隐含主语。
-- 多角色场景不要单独使用“三人、两人、他们、几个小家伙”等可能指向多个组合的泛称；群体动作首次出现及切镜后都列出准确成员。
+- 人物动作和说话归属保持明确。
+
 - 用户要求一镜到底时保持单一连续过程，不要同时规划多 Shot；默认可以切镜。
 """.strip()
 
 
 H3_BEAT_WRITER_PROMPT = """
+【人物和场景结构必填】
+用户只输入小说，不需要提供内部 ID。根据 project_bible 的姓名、别名或 ID 填写结构。
+每个 Shot 必须输出 visible_roles 数组，只含实际入画人物；空镜明确填 []，不要遗漏字段。
+每个 Shot 必须输出 scene_id：有明确匹配时复用项目场景名称或 ID，没有匹配时填写剧情地点名称，并在镜头正文交代环境，由视频模型自行构建；不要求先登记或生成背景参考图，不强配已有场景。明确无具体场景时填空字符串。
+从全文识别连续场景，后续段落未重复地点不表示换场。小说生成时输出顶层 scene_contexts 数组：
+每项包含 id、scene_id、source_excerpt；各 Shot 用 scene_context_id 引用，同一连续场景沿用同一上下文。
+已有 scene_contexts 时沿用对应场景，不因切镜、景别变化或说话人变化丢失场景。
+人物在场、实际入画、画外发声、台词提及必须区分；不得把站位说明里所有人强加入画。
+对白 speaker 使用项目角色姓名或 ID，保留原文和归属。镜头人物可以变化，不要求整段固定入画。
+
 你是短视频叙事规划师，为 MiniMax H3 Ref2VA 生成可直接编译的语义 Beats。
 
 目标：把 story/topic 拆成多个独立、连续、可生成的视频事件。每个 Beat 对应一条 H3 成片，
@@ -134,26 +146,26 @@ H3_BEAT_WRITER_PROMPT = """
 - 顶层 JSON 必须有非空 title、locked_outcome、target_duration_sec、beats。
 - 每个 Beat 必须有 id、title、plot、estimated_duration_sec。
 - 不因切镜、景别、背景或参考素材变化、问答、短反应或连续因果动作本身拆 Beat；优先把同一事件链写成一个多 Shot Beat。
-- 只有合并后超过 15 秒、发生独立时间跳跃，或地点与事件目标同时彻底改变时才拆 Beat。
-- 4–15 秒是硬限制，默认应规划为 8–12 秒；4–7 秒只用于无法与相邻事件合并的独立短笑点或悬念揭示。
-- 先规划宏观剧情事件，再在每个 Beat 内安排 2–5 个 Shot；不要把每段文字、每句对白或每次反应映射成独立 Beat。
+- 在自然事件边界拆 Beat；超出提交时长时必须拆分，避免无意义碎段。
+- 最终每段提交为 4–15 秒整数，按内容自然分配。
+- 先规划宏观剧情事件，再按信息、情绪、动作和空间承接需要决定 Shot 数量；不为凑固定镜头数切镜，不把每段文字、每句对白或每次反应映射成独立 Beat。
 - 站起、坐下、行走、进入、离开、转场可以作为事件内部动作；不得为凑数量或时长而将无剧情价值的移动、转场或事后反应单独成 Beat。
-- plot 用自然中文描述主体、地点、事件、题材/风格、动作推进、镜头、台词和声音，不写工作流节点或素材标签。
+- plot 只概括事件及必要事实；对白与导演细节由 Shots 保存，不重复整份导演稿。
 - 台词长度与 Shot 时长匹配；跨 Shot 台词要明确连续说话，切镜要明确景别和承接主体。
-- 每个 Shot 的 subject 必须列出实际出镜角色名，action、dialogue、continuity 中也要明确动作或说话归属；不要只写“三人、两人、他们、几个小家伙”等可能有多个解释的泛称。
-- 群体动作首次出现以及每次切镜后，都重新列出准确成员；dialogue 优先使用 speaker、scope、line、continues_previous 字段，不用无法确定说话人的裸字符串。
+- 使用 visible_roles 明确实际入画人物，文本指代无歧义即可。
+- dialogue 使用 speaker、scope、line，跨镜片段标明 continues_previous。
 - Beat 阶段只写 Project Bible 中的角色名/角色 id，不自行生成 Subject、Picture、Video、Audio 素材标签；这些编号由后续 H3 AssetBinder 和提示词编译器统一绑定。
 - 默认可以切镜；用户要求一镜到底时只规划一个连续 Shot。
 - 如果有角色语义，保持 important_roles、visible_roles、reference_roles、offscreen_speakers、mentioned_roles、scene_id 一致。
 
 每个 Beat 必须输出 model_hints.minimax_h3_local_ref2va（不要把 shots 直接放在 model_hints 下）：
-- core_idea：主体 + 地点 + 事件 + 题材/风格的一句话核心创意；
+- core_idea：主体 + 地点 + 事件目标 + 题材/风格的一句话核心创意；具体发声安排由 Shots 承载；
 - shot_mode：multi_shot 或 one_take；
-- shots：非空的时间顺序数组，每项包含 start_sec、end_sec、subject、action、blocking、camera、continuity，可含 scene_id、shot_size、dialogue、audio；
-- 同一 Beat 的不同 Shot 可以使用不同 scene_id；scene_id 必须来自 Project Bible。无法确定场景时留空，不要填默认场景；
+- shots：非空的时间顺序数组，每项包含 start_sec、end_sec、scene_id、visible_roles、subject、action、audio；字段职责按共同创作合同；shot_size、blocking、camera、continuity、dialogue 按需提供；
+- 同一 Beat 的不同 Shot 可以使用不同 scene_id；Project Bible 的场景是可复用素材，不是地点白名单。未登记地点保留文字交给视频模型构建；无法确定场景时留空，不要填默认场景；
 - exclusions：明确不希望出现的内容；
 - non_diegetic_music：可选背景音乐；
-- exact_text：必须准确出现的文字、Logo 或标题原文。
+- 对白只放入 dialogue，不要将台词复制到 exact_text 或作为画面文字显示；画面文字仅在用户明确要求时写入对应镜头描述。
 
 这些字段只描述创作意图。
 输出必须是 JSON object，不要 Markdown。
@@ -168,10 +180,10 @@ MiniMax H3 Ref2VA 补充规则：
 
 H3_SPLITTER_PROMPT = """
 你是 MiniMax H3 Beat Splitter。只拆分当前无法在 4–15 秒内清晰完成的 Beat，不重新创作故事。
-保留人物、场景、对白含义、剧情方向和结局，不新增角色或支线。
-保留并明确每个 Shot 的角色归属；切镜后重新列出准确角色名，不把明确角色改写成“三人、两人、他们、几个小家伙”等可能歧义的泛称。
+保留人物、场景、对白原文、说话人、次数、顺序、剧情方向和结局，不新增角色或支线。
+保留明确的角色归属，指代无歧义即可。
 不要因为切镜、角色站起、走动、进入或离开就拆分；H3 允许一个 Beat 内包含多 Shot 和连续动作。
-仅在合并后超过 15 秒、发生独立时间跳跃，或地点与事件目标同时彻底改变时拆分。
+按自然事件边界拆分，保持连续因果，避免无意义碎段。
 不要因为背景图、素材用途、问答双方、短反应或同一因果链中的动作结果不同而拆分。
 每个 replacement beat 都必须有完整事件价值和可落地的 4–15 秒时长。输出只能是 JSON object，字段为 replacement_beats。
 """.strip()
@@ -180,7 +192,9 @@ H3_SPLITTER_PROMPT = """
 def build_h3_rule_set(model_id: str, label: str, min_duration: int, max_duration: int) -> ModelRuleSet:
     return ModelRuleSet(
         model_id=model_id,
-        revision="h3-manual-2026-08-v3",
+        revision="h3-planning-2026-10-v7",
+        # Performance guidance changes creative output, not the Beat contract.
+        compatible_revisions=("h3-performance-2026-10-v4", "h3-manual-2026-08-v3"),
         label=label,
         beat_min_duration_sec=min_duration,
         beat_max_duration_sec=max_duration,
@@ -190,11 +204,11 @@ def build_h3_rule_set(model_id: str, label: str, min_duration: int, max_duration
         capability_summary="MiniMax H3 Ref2VA：4–15 秒、24fps；最多 9 张图片、3 个视频、3 个独立音频参考，上传素材总数不超过 12。",
         story_constraints=H3_STORY_CONSTRAINTS,
         story_writer_profile_name="h3_story_writer_profile.md",
-        beat_writer_prompt=H3_BEAT_WRITER_PROMPT + "\n\n" + H3_BLOCKING_PROMPT,
+        beat_writer_prompt="\n\n".join((H3_BEAT_WRITER_PROMPT, h3_segment_planning_rules())),
         beat_writer_profile_name="h3_beat_writer_profile.md",
         beat_structure_prompt=H3_STRUCTURE_PROMPT,
         beat_writer_note="使用 H3 多 Shot、台词跨镜与素材语义规则；最终素材标签由 H3 编译器生成。",
-        beat_splitter_prompt=H3_SPLITTER_PROMPT + "\n\n" + H3_BLOCKING_PROMPT,
+        beat_splitter_prompt=H3_SPLITTER_PROMPT + "\n每个 replacement 必须有 id、title、plot、estimated_duration_sec 和 model_hints.minimax_h3_local_ref2va；后者含 core_idea、shot_mode、shots。\n" + h3_segment_planning_rules(),
         beat_planning=BeatPlanningStrategy(
             recommended_min_duration_sec=max(min_duration, 8),
             recommended_max_duration_sec=min(max_duration, 12),

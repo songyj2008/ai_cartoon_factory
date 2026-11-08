@@ -395,6 +395,7 @@ class H3Ref2VAWorkflowAdapter:
             raise TypeError("H3 API workflow template must be an object keyed by node id")
         config = H3GenerationConfig.from_mapping(config) if isinstance(config, Mapping) else config
         report = self.validator.validate(config, duration_sec=duration_sec, check_files=check_files)
+        self.validator.validate_binding_contract(segment, config, report=report)
         report.raise_for_errors()
         if duration_sec is None:
             raise ValueError("H3 duration_sec is required")

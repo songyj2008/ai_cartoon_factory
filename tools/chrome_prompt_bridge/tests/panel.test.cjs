@@ -4,6 +4,26 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+test('panel discovers Qianwen and displays its automatic tab pool',async()=>{
+ const elements=new Map(),queries=[];
+ const node=()=>({value:'',options:[],replaceChildren(...values){this.options=values;},append(value){this.options.push(value);}});
+ const get=id=>{if(!elements.has(id))elements.set(id,node());return elements.get(id);};
+ const context={
+   PromptBridge:require('../protocol.js'),TextProviderPolicy:require('../text_provider_policy.js'),
+   crypto:require('node:crypto').webcrypto,
+   chrome:{storage:{local:{}},tabs:{query:async query=>{queries.push(query);return [{id:44,url:'https://www.qianwen.com/',title:'千问'}];}}},
+   document:{getElementById:get,createElement:node},Option:class{constructor(text,value){this.text=text;this.value=value;}}
+ };
+ const source=fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8');
+ vm.runInNewContext(source.slice(0,source.indexOf('async function sendMessage')),context);
+ await context.refresh();
+ assert.ok(queries[0].url.includes('https://www.qianwen.com/*'));
+ assert.equal(get('target').value,'44');
+ assert.equal(get('backend-qianwen').disabled,true);
+ assert.match(get('backend-qianwen').options[0].text,/自动管理标签页池/);
+ assert.equal(get('user-selector').value,'');
+});
+
 test('missing or invalid cached task IDs do not break panel rendering', () => {
   const elements = new Map();
   const context = {
@@ -39,18 +59,19 @@ test('task clear action binds when Gradio inserts the panel after the page scrip
   const nodes = new Map();
   const getNode = key => {if(!nodes.has(key))nodes.set(key,node());return nodes.get(key);};
   const resultBox = node();
-  const panel = {classList:{toggle(){}},querySelector(selector){
+  const panel = {style:{},classList:{toggle(){}},querySelector(selector){
     if(selector.startsWith('[data-count='))return {textContent:'',};
     if(selector==='.text-operations-result')return resultBox;
     return getNode(selector);
   }};
   const context = {
-    window:{confirm:()=>true},document:{hidden:false,getElementById:id=>panelReady&&id==='text-operations'?panel:null,
-      querySelector:()=>null},
+    window:{AICF:{},confirm:()=>true,addEventListener(){}},document:{hidden:false,getElementById:id=>panelReady&&id==='text-operations'?panel:null,
+      querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){}},
     fetch:async(_url,options={})=>{
       if(options.method==='POST'){clearCalls++;return {ok:true,json:async()=>({ok:true,deleted:1})};}
       return {ok:true,json:async()=>({ok:true,tasks:clearCalls?[]:[{id:'failed',state:'error',title:'任务',project:'项目',created:1,updated:1}]})};
     },
+    MutationObserver:class{observe(){}},
     setInterval:fn=>{interval=fn;},setTimeout,clearTimeout,Event:class{},HTMLTextAreaElement:class{},HTMLInputElement:class{}
   };
   vm.createContext(context);vm.runInContext(script,context);

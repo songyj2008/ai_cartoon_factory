@@ -63,6 +63,10 @@
       '#prompt-textarea',
       '[contenteditable="true"][role="textbox"],[contenteditable="true"][data-lexical-editor="true"],[contenteditable="true"].ProseMirror',
       'form [contenteditable="true"],form textarea[placeholder]'
+    ] : site === '千问' ? [
+      'div[data-slate-editor="true"][role="textbox"][contenteditable="true"]',
+      'textarea[placeholder]', '[contenteditable="true"][role="textbox"]',
+      '[contenteditable="true"][data-lexical-editor="true"],[contenteditable="true"].ProseMirror'
     ] : site === '豆包' ? [
       'textarea[placeholder]', 'textarea', '[contenteditable="true"][role="textbox"],[contenteditable="true"]'
     ] : ['textarea[placeholder]'];
@@ -76,7 +80,34 @@
     if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement) && !el.isContentEditable) throw new Error("目标不是可编辑输入框。");
     return el;
   }
-  const inputText = el => typeof el.value === "string" ? el.value : el.innerText;
+  const inputText = el => site==='千问' && globalThis.QianwenPage ?
+    globalThis.QianwenPage.readEditor(el) : typeof el.value === "string" ? el.value : el.innerText;
+  const qianwen = site==='千问' ? globalThis.QianwenPage?.create({all,inputText,evidenceText:P.evidenceText}) : null;
+  function waitForEditor(settings, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+      let observer, interval, timeout, settled = false, lastError;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        observer?.disconnect(); clearInterval(interval); clearTimeout(timeout);
+        if (error) reject(error); else resolve(value);
+      };
+      const probe = () => {
+        try { finish(null, editor(settings)); } catch (error) { lastError = error; }
+      };
+      probe();
+      if (settled) return;
+      observer = new MutationObserver(probe);
+      observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,
+        attributeFilter:['contenteditable','disabled','readonly','id','role','class','style']});
+      interval = setInterval(probe, 250);
+      timeout = setTimeout(() => finish(new Error(
+        `等待网页输入框就绪超时；${lastError?.message || '页面未就绪'}` +
+        (settings?.editor ? ' 当前使用自定义输入框选择器，请检查适配设置。' : ' 请检查登录、验证页面或输入框适配。')
+      )), timeoutMs);
+      probe();
+    });
+  }
   const equivalent = (a, b) => String(a).replace(/\s+/g, ' ').trim() === String(b).replace(/\s+/g, ' ').trim();
   function conversationIdentity(value) {
     if(pagePolicy)return pagePolicy.conversationId(value);
@@ -112,6 +143,12 @@
     const currentId=conversationIdentity(location.href);
     if (!expectedUrl || !currentId) return false;
     const expectedId=currentTask.conversation_id || conversationIdentity(expectedUrl);
+    if(site==='千问') {
+      // Only the initial route assignment may be adopted. Once bound, another
+      // conversation is never accepted merely because it echoes a task marker.
+      return !currentTask.conversation_url && Boolean(currentTask.sent_at) &&
+        Boolean(currentTask.dispatch_attempted_at) && qianwen.hasRequest(currentTask);
+    }
     if (provisionalDoubaoId(expectedId) && !provisionalDoubaoId(currentId) &&
         !conversationIdentity(currentTask.dispatch_url || '') && currentTask.sent_at) {
       // Doubao first navigates to /chat/local_... and later replaces it with
@@ -120,12 +157,11 @@
       // the stable evidence that this is the same conversation.
       return pageHasRequest(currentTask.id);
     }
-    // DeepSeek can assign a second conversation route after submission. Only
-    // follow it when both the task marker and its submitted request are still
-    // rendered in this conversation. A marker alone may have been copied into
-    // another chat, so it cannot justify changing the binding.
+    // DeepSeek can assign a second route while its reply is still streaming.
+    // Require the submitted request plus a distinct task-correlated reply,
+    // but do not wait for the END marker before following the new route.
     if (site === 'DeepSeek' && currentTask.force_new_conversation && currentTask.sent_at &&
-        pageHasSubmittedRequest(currentTask) && pageHasDistinctReplyEnvelope(currentTask)) return true;
+        pageHasSubmittedRequest(currentTask) && pageHasDistinctReplyEnvelope(currentTask,true)) return true;
     if (site === 'ChatGPT' && currentTask.sent_at && pageHasRequest(currentTask.id) &&
         pageHasSubmittedRequest(currentTask)) return true;
     // Doubao may still expose a previous route when its new-chat composer is
@@ -229,6 +265,7 @@
     }
   }
   function pageHasRequest(id) {
+    if(site==='千问')return Boolean(task?.id===id && qianwen.hasRequest(task));
     // Rich-text editors are part of body.innerText. Their draft must never be
     // evidence that a message was submitted, even when its line breaks differ.
     const body = document.body?.cloneNode(true);
@@ -238,35 +275,51 @@
     const {start, end} = P.markers(id);
     return text.includes(start) || text.includes(end);
   }
-  function pageHasDistinctReplyEnvelope(currentTask) {
+  function pageHasDistinctReplyEnvelope(currentTask, allowPartial = false) {
+    if(site==='千问') {
+      const {start,end}=P.markers(currentTask.json_repair?.envelopeId || currentTask.id);
+      const request=P.evidenceText(currentTask.request+'\n'+(currentTask.json_repair?.request || ''));
+      return qianwen.replies(currentTask.settings).some(el=>{
+        const value=el.innerText || '';
+        const from=value.indexOf(start),to=value.indexOf(end,from+start.length);
+        if(from<0 || (!allowPartial && to<0))return false;
+        const envelope=P.evidenceText(value.slice(from,to<0 ? undefined : to+end.length));
+        return Boolean(envelope) && !request.includes(envelope);
+      });
+    }
     const body = document.body?.cloneNode(true);
     if (!body) return false;
     body.querySelectorAll('textarea,input,[contenteditable],script,style').forEach(el => el.remove());
     const page = body.textContent || '';
-    const request = String(currentTask.request || '').replace(/\s+/g, ' ').trim();
+    const request = P.evidenceText(currentTask.request);
     const {start,end} = P.markers(currentTask.id);
     let offset = 0;
     while (true) {
       const from = page.indexOf(start, offset);
       if (from < 0) return false;
       const to = page.indexOf(end, from + start.length);
+      if (to < 0 && !allowPartial) return false;
+      const envelope = P.evidenceText(page.slice(from, to < 0 ? undefined : to + end.length));
+      const correlated=to>=0 || envelope.includes('"request_id":"'+currentTask.id+'"');
+      if (correlated && !request.includes(envelope)) return true;
       if (to < 0) return false;
-      const envelope = page.slice(from, to + end.length).replace(/\s+/g, ' ').trim();
-      if (!request.includes(envelope)) return true;
       offset = to + end.length;
     }
   }
   function pageHasSubmittedRequest(currentTask) {
+    if(site==='千问')return qianwen.hasRequest(currentTask);
     const body = document.body?.cloneNode(true);
     if (!body) return false;
     body.querySelectorAll('textarea,input,[contenteditable],script,style').forEach(el => el.remove());
-    const normalize=value=>String(value||'').replace(/\s+/g,' ').trim();
+    const normalize=P.evidenceText;
     const page=normalize(body.textContent), request=normalize(currentTask.request);
+    const prefix=normalize(String(currentTask.request || '').replace(/\s+/g,' ').trim().slice(0,120));
     // Doubao collapses long submitted prompts in the visible transcript. Its
     // opening text remains rendered while the rest may be omitted.
-    return page.includes(request) || (request.length>=100 && page.includes(request.slice(0,120)));
+    return Boolean(request) && (page.includes(request) || (request.length>=100 && page.includes(prefix)));
   }
   function isGenerating() {
+    if(site==='千问')return qianwen.isGenerating();
     const explicit = all('button[data-testid="stop-button"],button[aria-label*="Stop"],button[aria-label*="停止"],[role="button"][aria-label*="停止"]');
     return explicit.length > 0 || (site === '豆包' && all('button,[role="button"]').some(el => /^(停止生成|停止)$/i.test((el.getAttribute('aria-label') || el.innerText || '').trim())));
   }
@@ -282,6 +335,11 @@
       const matches = all(settings.send);
       if (matches.length !== 1) throw new Error("发送按钮选择器必须匹配唯一可见元素。");
       return matches[0];
+    }
+    if(site==='千问') {
+      const buttons=all('button[data-session-switch-target="send-query"]');
+      if(buttons.length>1)throw new Error('千问页面找到多个发送按钮，未发送；请检查发送按钮选择器。');
+      if(buttons.length===1)return buttons[0];
     }
     const matches = all('button,[role="button"]').filter(el => {
       const labels = [el.getAttribute("aria-label"), el.getAttribute("title"), el.innerText].filter(Boolean);
@@ -324,6 +382,12 @@
     return matches[0];
   }
   async function clickSendButton(button) {
+    if (['ChatGPT','千问'].includes(site)) {
+      const labels=[button.getAttribute('aria-label'),button.getAttribute('title'),button.innerText].filter(Boolean);
+      if (button.closest?.('nav,aside,[role="navigation"]') ||
+          labels.some(label=>/^(开启新对话|新对话|新建对话|新聊天|new chat)(?:\s|$)/i.test(label.trim())))
+        throw new Error('发送按钮误匹配到导航或新聊天入口，已阻止点击；请检查发送按钮选择器。');
+    }
     if (site !== '豆包' || button.getAttribute('data-testid') !== 'chat_input_send_button') {
       button.click(); return true;
     }
@@ -388,19 +452,41 @@
     return task;
   }
   async function prepareConversation(next) {
+    // Conversation preparation is strictly pre-dispatch. Do not rely on the
+    // per-tab conversation cache: it may be missing or belong to another job.
+    const owner = await readStoredTask(next);
+    if (next.sent_at || next.dispatch_attempted_at ||
+        (owner?.id === next.id && (owner.sent_at || owner.dispatch_attempted_at))) {
+      // Manual draft retries may refill on the same page, but never navigate.
+      if (!next.bridge) return;
+      throw new Error('本任务已尝试发送，禁止再次准备或开启新对话；请读取原对话回复。');
+    }
     const key = `conversation:${next.tab_id}`;
-    const saved = await chrome.storage.local.get(['conversationPolicy', key]);
+    const navigationKey = `conversationNavigation:${next.tab_id}`;
+    const saved = await chrome.storage.local.get(['conversationPolicy', key, navigationKey]);
     const previous = saved[key];
     const plan = P.conversationPlan(saved.conversationPolicy, next, previous, location.href);
     if (previous?.taskId === next.id) return;
+    // SPA navigation can temporarily remove the editor. Wait before reading drafts.
+    try { editor(next.settings); } catch (error) {
+      if (!/找到 0 个/.test(error.message)) throw error;
+      await waitForEditor(next.settings);
+    }
     if (plan.fresh && (next.force_new_conversation || !equivalent(inputText(editor(next.settings)), next.request))) {
       if (inputText(editor(next.settings)).trim()) throw new Error('开启新对话前发现输入框已有草稿，请先处理草稿；未切换或发送。');
       const replies = () => all(site === 'ChatGPT' ? '[data-message-author-role]' :
         site === '豆包' ? '[data-testid*="message"],[class*="message-content"]' : '.ds-markdown');
       const emptyHome = () => site === '豆包'
         ? !replies().length && !inputText(editor(next.settings)).trim()
+        : site === '千问' ? qianwen.isEmptyHome(location.href,editor(next.settings),next.settings)
         : new URL(location.href).pathname === '/' && !replies().length;
-      if (!emptyHome() || site === '豆包') {
+      const attempted = saved[navigationKey]?.taskId === next.id;
+      if (attempted && (!emptyHome() || inputText(editor(next.settings)).trim())) {
+        throw new Error('本任务已尝试开启新对话，等待空白对话就绪；不会再次点击新对话。请检查页面或手动回到空白新对话。');
+      }
+      if (!attempted && (!emptyHome() || site === '豆包')) {
+        if (['ChatGPT','千问'].includes(site) && next.bridge)
+          throw new Error(site+' 项目任务必须使用独立的空白标签页；保留当前会话，未点击新聊天。');
         // DeepSeek renders this control as nested div/span elements in some
         // versions, without a button role. Click the exact visible text leaf;
         // its click bubbles to the owning control. Collapse ancestor duplicates.
@@ -473,11 +559,14 @@
           matches = labelled.filter(el => !labelled.some(child => child !== el && el.contains(child)));
         }
         if (matches.length !== 1) throw new Error(`[扩展 v0.3.49 豆包新对话识别] 可点击入口为 ${matches.length} 个，未切换或发送。请手动点击左上角“新聊天”后重试。`);
+        // Save before navigation so retries and script reloads cannot click again.
+        await chrome.storage.local.set({[navigationKey]: {taskId:next.id, url:location.href, attempted_at:Date.now()}});
         matches[0].click();
         for (let i = 0; i < 40; i++) {
           await new Promise(resolve => setTimeout(resolve, 200));
           try { if (emptyHome() && !inputText(editor(next.settings)).trim()) break; } catch {}
         }
+        await waitForEditor(next.settings);
         if (!emptyHome() || inputText(editor(next.settings)).trim()) throw new Error('未确认新对话已打开，已停止提交。请手动打开新对话后重试。');
       }
     }
@@ -486,6 +575,15 @@
       chars: (plan.fresh ? 0 : previous?.chars || 0) + next.request.length}});
   }
   async function fill(next) {
+    pagePolicy?.assertInputLength(next.request);
+    // The page can outlive a worker-side cancellation/completion. Reconcile
+    // its cached owner before deciding whether a new task may use the tab.
+    if (task && ["waiting", "sending"].includes(task.status)) {
+      const owner = await readStoredTask(task);
+      if (owner?.id === task.id && ['complete','cancelled','error','timeout'].includes(owner.status)) {
+        stopReplyObserver(); task = null;
+      }
+    }
     const saved = await readStoredTask(next);
     const records=await chrome.storage.local.get(null);
     if(Object.entries(records).some(([key,value])=>key.startsWith('bridgeTask:') &&
@@ -502,20 +600,33 @@
         throw new Error('此标签页有后台任务，请等待完成后再提交手工任务。');
     }
     if (saved && saved.id !== next.id && ["prepared", "sending", "waiting"].includes(saved.status)) throw new Error("扩展已有未结束的任务，请先结束等待。");
-    if (task && ["waiting", "sending"].includes(task.status)) throw new Error("此页面已有任务在等待，请先结束等待。");
+    if (task && ["waiting", "sending"].includes(task.status)) throw new Error(`此页面已有任务 ${task.id} 在等待，请先结束该任务的等待。`);
     if (isGenerating()) throw new Error("网页正在生成回复，请等待结束后再提交。");
     if (saved?.bridge && !saved.bridge.reported && saved.id !== next.id) throw new Error('上次结果尚未回传，请等待回传完成后再开启任务。');
     await prepareConversation(next);
-    const el = editor(next.settings);
+    const el = await waitForEditor(next.settings);
+    const current = await readStoredTask(next);
+    if (current && (current.id !== next.id || ['cancelled','error','timeout','complete'].includes(current.status)))
+      throw new Error('任务已结束或切换，未填入网页。');
     const previous = inputText(el).trim();
     if (previous && !equivalent(previous, next.request)) throw new Error("网页输入框已有草稿，未覆盖。请先手动处理网页里的草稿。");
-    if (!equivalent(previous, next.request)) writeEditor(el, next.request);
+    if(next.attachments?.length) {
+      if(site==='千问')throw new Error('MEDIA_ATTACHMENT_UNSUPPORTED: 千问视频附件尚未核验，未上传或发送');
+      if(!globalThis.TextAttachments)throw new Error('MEDIA_ATTACHMENT_ERROR: 请重新加载新版扩展以发送视频附件');
+      next={...next,attachment_receipt:await globalThis.TextAttachments.upload(next)};
+      const latest=await readStoredTask(next);
+      if(latest && ['cancelled','error','timeout','complete'].includes(latest.status))throw new Error('任务已结束，未发送');
+    }
+    if (!equivalent(previous, next.request) || (site==='千问' && globalThis.QianwenPage.isSlate(el)))
+      await writeRequestEditor(el,next.request,next);
     if (!equivalent(inputText(el), next.request)) throw new Error("填入内容校验失败，未发送。请复制请求后手动粘贴。");
     clearTimeout(timer); timer = null;
     task = next; lastText = ""; stableSince = 0; lastEnvelope = ""; envelopeSince = 0;
-    return persist({ status: "prepared", message: "请求已填入。可在网页检查后手动发送，或点击提交。" });
+    return persist({ status: "prepared", ...(next.attachment_receipt?{attachment_receipt:next.attachment_receipt}:{}), message: "请求已填入。可在网页检查后手动发送，或点击提交。" });
   }
   function writeEditor(el, text) {
+      if(site==='千问' && globalThis.QianwenPage.isSlate(el))
+        throw new Error('千问 Slate 必须使用浏览器输入通道，未修改页面 DOM。');
       el.focus();
       if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
         const prototype = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -529,6 +640,14 @@
         selection.removeAllRanges(); selection.addRange(range);
         if (!document.execCommand("insertText", false, text)) throw new Error("网页拒绝自动输入，请使用“复制请求”手动粘贴。");
       }
+  }
+  async function writeRequestEditor(el,text,currentTask) {
+    pagePolicy?.assertInputLength(text);
+    if(site!=='千问' || !globalThis.QianwenPage.isSlate(el))return writeEditor(el,text);
+    el.focus();
+    const response=await chrome.runtime.sendMessage({type:'AICF_QIANWEN_INPUT',taskId:currentTask.id,
+      bindingEpoch:currentTask.binding_epoch,purpose:currentTask.json_repair ? 'repair' : 'request'});
+    if(!response?.ok)throw new Error(response?.error || '千问浏览器输入失败，未尝试发送。');
   }
   async function repairJson(raw, error) {
     if (task.json_repair) return persist({status:'error', raw,
@@ -549,7 +668,7 @@
     const beforeInput = await readStoredTask(task);
     if (beforeInput?.id !== activeId || beforeInput.status !== 'waiting') return beforeInput;
     if (!task || task.id !== activeId || task.status !== 'waiting') return task;
-    writeEditor(el, request);
+    await writeRequestEditor(el, request,task);
     if (!equivalent(inputText(el), request)) throw new Error('JSON 修复请求填入校验失败，未发送。');
     await new Promise(resolve => setTimeout(resolve, 200));
     const saved = await readStoredTask(task);
@@ -582,9 +701,12 @@
     }
   }
   async function sendRequest(next) {
+    pagePolicy?.assertInputLength(next.request);
     // Same ID is never clicked a second time, even after an uncertain response.
     const saved = await readStoredTask(next);
-    if (saved?.id === next.id && saved.sent_at) throw new Error("这个任务已尝试发送，不会重复点击。请查看网页并读取回复。");
+    if (next.sent_at || (next.bridge && next.dispatch_attempted_at) ||
+        (saved?.id === next.id && (saved.sent_at || (saved.bridge && saved.dispatch_attempted_at))))
+      throw new Error("这个任务已尝试发送，不会重复点击。请查看网页并读取回复。");
     if (!task || task.id !== next.id || task.status !== "prepared" || !equivalent(inputText(editor(next.settings)), next.request)) await fill(next);
     const el = editor(task.settings);
     if (!equivalent(inputText(el), task.request)) throw new Error("网页输入内容已变化，未发送。请结束当前任务后重新填入。");
@@ -609,6 +731,17 @@
       el.focus();
       el.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true}));
       el.dispatchEvent(new KeyboardEvent("keyup", {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}));
+    }
+    if (site === '千问') {
+      // Do not poll a detached editor or equate an empty editor/route change
+      // with submission. Only this task's rendered user message binds a route.
+      const accepted=qianwen.hasRequest(task) && Boolean(conversationIdentity(location.href));
+      await persist({status:'waiting',
+        ...(accepted ? {conversation_url:location.href,conversation_id:conversationIdentity(location.href)} : {}),
+        message:accepted ? '千问已显示本任务请求，正在读取最终回答；不会重复发送。' :
+          '千问提交尚未确认，继续只读检查用户消息和最终回答；不会重复发送。'});
+      observeReply();
+      return task;
     }
     if (site === 'DeepSeek') {
       // In a background tab Chrome can throttle ten 200 ms timers for several
@@ -802,13 +935,16 @@
       }
       // Naming is cosmetic. A changed Doubao menu must never fail a generation task.
       await renameDoubaoConversation().catch(() => {});
+      if(site==='千问' && !task.conversation_url && !qianwen.hasRequest(task))
+        return persist({message:'千问尚未显示本任务已发送的用户消息，继续只读等待；请核对用户消息选择器，不会重复提交。'});
       const selector = task.settings.reply || (site === "ChatGPT" ? '[data-message-author-role="assistant"]' :
         site === '豆包' ? '[data-testid*="message"],[class*="message-content"]' : '.ds-markdown');
       const { start, end } = P.markers(task.json_repair?.envelopeId || task.id);
       const selectors = [selector];
       if (site === 'ChatGPT') selectors.push('.markdown,.prose,[data-message-author-role="assistant"],[data-testid="conversation-turn"]');
-      const candidates = [...new Set(selectors.flatMap(all))].filter(el => !el.closest('[data-message-author-role="user"],textarea,[contenteditable="true"]'));
-      const normalize = value => value.replace(/\s+/g, " ").trim();
+      const candidates = site==='千问' ? qianwen.replies(task.settings) :
+        [...new Set(selectors.flatMap(all))].filter(el => !el.closest('[data-message-author-role="user"],textarea,[contenteditable="true"]'));
+      const normalize = P.evidenceText;
       // Some sites render user messages with the same markdown class. Never
       // mistake our own JSON output example for the model's completed answer.
       const requestText = normalize(task.request + '\n' + (task.json_repair?.request || ''));
@@ -833,7 +969,7 @@
       // Read protocol envelopes independently of site-specific reply classes.
       // Remove editable/user regions; also reject the exact example from the
       // submitted request on pages without semantic message roles.
-      if (!text.includes(end)) {
+      if (site!=='千问' && !text.includes(end)) {
         const body = document.body?.cloneNode(true);
         if (body) {
           body.querySelectorAll('script,style,textarea,input,[contenteditable],[data-message-author-role="user"]').forEach(el => el.remove());
@@ -854,7 +990,20 @@
         lastText = text; stableSince = Date.now();
       }
       // Compare only the task envelope; surrounding UI text is not output.
-      const envelope = P.resultEnvelope(text, task.json_repair?.envelopeId || task.id);
+      const envelopeId=task.json_repair?.envelopeId || task.id;
+      let envelope = P.resultEnvelope(text, envelopeId);
+      if (!envelope && !isGenerating()) {
+        // Some models return valid, task-correlated JSON without the requested
+        // wrapper. Read only reply candidates in this bound conversation;
+        // never search arbitrary page JSON or accept a request/example echo.
+        for (const candidate of [...candidates].reverse()) {
+          const value=candidate.innerText || candidate.textContent || '';
+          const compact=normalize(value);
+          if (!compact || requestText.includes(compact) || compact.includes(requestText)) continue;
+          const recovered=P.correlatedJsonEnvelope(value,task.id,task.kind || 'revision',envelopeId);
+          if (recovered) {envelope=recovered;text=value;break;}
+        }
+      }
       if (envelope !== lastEnvelope) {
         lastEnvelope = envelope; envelopeSince = Date.now();
         if (envelope) {
@@ -862,7 +1011,8 @@
           replySettled = setTimeout(() => {replySettled=null;return check().catch(fail);}, RESULT_RECHECK_MS + 20);
         }
       }
-      if (envelope && Date.now() - envelopeSince >= RESULT_RECHECK_MS) {
+      if (envelope && Date.now() - envelopeSince >= RESULT_RECHECK_MS &&
+          (site!=='千问' || !isGenerating())) {
         let result;
         try { result = P.parseResult(envelope, task.id, task.kind || "revision", task.json_repair?.envelopeId || task.id); }
         catch (error) {
@@ -870,7 +1020,10 @@
           clearTimeout(timer); timer = null; return persist({ status: "error", message: error.message, raw: text });
         }
         clearTimeout(timer); timer = null;
-        return persist({ status: "complete", message: "已取回本次修正。请检查修改说明后再应用。", result, raw: text });
+        return persist({ status: "complete", message: "已取回本次修正。请检查修改说明后再应用。", result, raw: text,
+          ...(site==='千问' && !task.conversation_url ? {
+            conversation_url:location.href,conversation_id:conversationIdentity(location.href)
+          } : {}) });
       }
       if (task.continue_pending && text.length > task.continue_pending.chars) {
         await continuationLog('reply_grew', {before:task.continue_pending.chars, after:text.length});
@@ -924,8 +1077,13 @@
           return task;
         }
       }
-      const progress = `[读取 v0.4.24] 回复区域 ${candidates.length} 个；` +
-        (text.includes(end) ? '已找到完整任务标记，等待内容稳定。' : text.includes(start) ? '已找到开始标记，等待结束标记。' : '未找到本次回复标记，请确认绑定的对话。');
+      const progress = (site==='千问' && !candidates.length ?
+        '千问未找到助手最终回答区域，请核对回答正文选择器并排除思考过程。' : '') +
+        `[读取 v0.4.40] 回复区域 ${candidates.length} 个；` +
+        (text.includes(end) ? '已找到完整任务标记，等待内容稳定。' : envelope ? '已核对本次任务编号与结果结构，等待内容稳定。' : text.includes(start) ? '已找到开始标记，等待结束标记。' :
+          candidates.some(el=>(el.innerText || el.textContent || '').trim()) ?
+            '已检测到网页内容，但尚未找到带本次任务编号的有效结果；继续读取，不会重新发送。' :
+            '尚未检测到本次回复；请检查网页是否已发送、登录或验证状态。');
       if (task.message !== progress) await persist({message: progress});
       return task;
     } finally { writing = false; }
@@ -933,6 +1091,8 @@
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id || !message?.type?.startsWith("AICF_")) return;
     (async () => {
+      if(site==='千问' && (!pagePolicy?.available || !qianwen))
+        throw new Error('千问适配待网页核验，尚未启用自动提交。');
       if(message.type==='AICF_SLOT_STATUS') {
         if (operating || isGenerating()) return {idle:false};
         try { return {idle:!inputText(editor(message.task?.settings)).trim()}; }
@@ -969,7 +1129,15 @@
           // A finished answer does not depend on the composer being mounted.
           observeReply(); return check();
         }
-        const currentInput = inputText(editor(task.settings)).trim().replace(/\r/g, "");
+        let currentInput;
+        try { currentInput = inputText(editor(task.settings)).trim().replace(/\r/g, ""); }
+        catch (error) {
+          // A sent task is read-only. ChatGPT can unmount the composer during
+          // navigation/generation; reply collection must not depend on it.
+          if (!/找到 0 个/.test(error.message) || !(task.sent_at || task.dispatch_attempted_at)) throw error;
+          observeReply();
+          return check();
+        }
         if (equivalent(currentInput, task.request) && !pageHasRequest(task.id)) {
           clearTimeout(timer); timer = null;
           if(task.bridge && task.page_operation?.kind==='send')

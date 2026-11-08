@@ -58,3 +58,15 @@ def test_clear_finished_removes_candidates_but_preserves_live_and_recovery_tasks
     with text_jobs.database() as db:
         states = {row['state'] for row in db.execute('SELECT state FROM operations')}
     assert states == {'queued', 'running', 'needs_attention'}
+
+
+def test_history_retention_keeps_unapplied_results_and_recovery_work(operation_store):
+    applied, applied_dir = operation_store('applied')
+    failed, failed_dir = operation_store('error')
+    cancelled, cancelled_dir = operation_store('cancelled')
+    retained = [operation_store(state) for state in ('ready', 'needs_attention', 'running', 'queued')]
+    assert text_jobs._delete_expired_applied(now=2 + text_jobs.APPLIED_RETENTION_SECONDS) == 1
+    assert not applied_dir.exists()
+    assert failed_dir.exists() and cancelled_dir.exists()
+    assert text_jobs._delete_expired_applied(now=2 + text_jobs.FAILED_RETENTION_SECONDS) == 2
+    assert all(directory.exists() for _, directory in retained)

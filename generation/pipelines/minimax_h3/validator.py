@@ -69,6 +69,35 @@ class H3Ref2VAValidator:
     video_size_limit_bytes = 50 * 1024 * 1024
     audio_size_limit_bytes = 15 * 1024 * 1024
 
+    def validate_binding_contract(self, segment, config, *, bible=None, report=None):
+        """Check current structured/editor facts, including persisted automatic drafts."""
+        from .semantic_bindings import MODEL, normalize_beat_bindings, binding_coverage_errors
+        report = report or H3ValidationReport(config=config)
+        if not (config.extra.get('binding_schema_version') or segment.get('binding_schema_version')):
+            return report
+        if bible is None:
+            from services.project_bible import load_project_bible
+            bible = load_project_bible()
+        source = dict(segment)
+        if config.prompt_override:
+            from .shot_editor import parse_prompt, dialogue_units
+            try:
+                parsed = parse_prompt(config.prompt_override, 'validation', config.to_dict()['asset_manifest'])
+                source['model_hints'] = {MODEL: {'shots': [
+                    dict(s, dialogues=dialogue_units(s)) for s in parsed['shots']]}}
+            except (ValueError, KeyError, TypeError) as exc:
+                report.add_error('invalid_binding', str(exc))
+                return report
+        elif segment.get('h3_prompt_plan'):
+            source['model_hints'] = {MODEL: segment['h3_prompt_plan']}
+        try:
+            resolved = normalize_beat_bindings(source, bible=bible)
+            for message in binding_coverage_errors(resolved, config.to_dict()['asset_manifest'], bible=bible):
+                report.add_error('missing_reference', message)
+        except ValueError as exc:
+            report.add_error('invalid_binding', str(exc))
+        return report
+
     def validate(
         self,
         config: H3GenerationConfig,
@@ -107,6 +136,12 @@ class H3Ref2VAValidator:
 
         seen_asset_ids: set[str] = set()
         for asset in config.asset_manifest:
+            usage = asset.metadata.get('voice_usage')
+            if usage is not None:
+                if asset.type is not H3AssetType.AUDIO or usage not in {'narration', 'telephone'}:
+                    report.add_error('invalid_voice_usage', '独立声音用途仅支持音频的 narration 或 telephone', asset.asset_id)
+                elif not str(asset.metadata.get('voice_speaker') or asset.role or '').strip():
+                    report.add_error('missing_voice_speaker', '旁白或电话音频必须填写声音角色名称', asset.asset_id)
             if asset.asset_id in seen_asset_ids:
                 report.add_error("duplicate_asset_id", f"duplicate asset_id: {asset.asset_id}", asset.asset_id)
             seen_asset_ids.add(asset.asset_id)
@@ -129,7 +164,7 @@ class H3Ref2VAValidator:
         if not text:
             report.add_error("empty_prompt", "H3 prompt must not be empty")
         elif len(text) > 7000:
-            report.add_error("prompt_too_long", "H3 prompt must be at most 7000 characters")
+            report.add_error("prompt_too_long", f"H3 提示词最多 7000 字符；当前 {len(text)} 字符，超出 {len(text) - 7000} 字符。请精简后重新提交。")
         if "[已移除主体：" in text or "[已移除图片：" in text:
             report.add_error(
                 "removed_reference_still_used",
@@ -155,10 +190,28 @@ class H3Ref2VAValidator:
         if shot_mode == "one_take" and len(shots) > 1:
             report.add_error("one_take_multishot_conflict", "H3 one_take mode cannot contain more than one Shot")
         previous_start = -1.0
+        previous_end = 0.0
+        timed_count = 0
         for index, shot in enumerate(shots, start=1):
             if not isinstance(shot, Mapping):
                 report.add_error("invalid_shot", f"Shot {index} must be an object")
                 continue
+            from .contracts import normalize_h3_scope
+            from .speech_contract import validate_delivery
+            dialogues = shot.get('dialogues', shot.get('dialogue', []))
+            dialogues = [dialogues] if isinstance(dialogues, Mapping) else dialogues or []
+            for dialogue in dialogues:
+                if isinstance(dialogue, Mapping):
+                    scope = normalize_h3_scope(dialogue.get('scope') or dialogue.get('speech_type'))
+                    if scope not in {'onscreen', 'offscreen', 'telephone', 'narration', 'diegetic',
+                                     'offscreen_intercom', 'offscreen_broadcast', 'offscreen_outside_door'}:
+                        report.add_error('invalid_speech_scope', f'Shot {index} invalid scope: {scope}')
+                    try:
+                        validate_delivery(dialogue)
+                    except ValueError as exc:
+                        report.add_error('invalid_speech_delivery', f'Shot {index}: {exc}')
+            if 'visible_roles' in shot and (not isinstance(shot['visible_roles'], list) or any(not isinstance(role, str) for role in shot['visible_roles'])):
+                report.add_error('invalid_visible_roles', f'Shot {index} visible_roles must be a list of role ids')
             start_raw, end_raw = shot.get("start_sec"), shot.get("end_sec")
             if start_raw in (None, "") and end_raw in (None, ""):
                 continue
@@ -167,6 +220,14 @@ class H3Ref2VAValidator:
             except (TypeError, ValueError):
                 report.add_error("invalid_shot_time", f"Shot {index} start_sec/end_sec must be numbers")
                 continue
+            import math
+            if not math.isfinite(start) or not math.isfinite(end):
+                report.add_error("invalid_shot_time", f"Shot {index} time must be finite")
+                continue
+            timed_count += 1
+            if abs(start - previous_end) > 1e-6:
+                report.add_error("shot_coverage_invalid", f"Shot {index} must start at {previous_end:g}s")
+            previous_end = end
             if start < 0 or end <= start:
                 report.add_error("invalid_shot_range", f"Shot {index} must satisfy 0 <= start_sec < end_sec")
             if end > float(duration_sec) + 1e-6:
@@ -177,6 +238,8 @@ class H3Ref2VAValidator:
             if start < previous_start:
                 report.add_error("shot_order_invalid", f"Shot {index} starts before the preceding Shot")
             previous_start = start
+        if timed_count and (timed_count != len(shots) or abs(previous_end - duration_sec) > 1e-6):
+            report.add_error("shot_coverage_invalid", "Shots must continuously cover the full duration")
         return report
 
     def _validate_output_duration(self, report: H3ValidationReport, value: float) -> None:
@@ -184,6 +247,10 @@ class H3Ref2VAValidator:
             duration = float(value)
         except (TypeError, ValueError):
             report.add_error("invalid_duration", "H3 duration must be a number")
+            return
+        import math
+        if not math.isfinite(duration) or duration <= 0:
+            report.add_error("invalid_duration", "H3 duration must be a finite positive number")
             return
         if duration != int(duration):
             report.add_error("duration_not_integer", "H3 duration must be an integer number of seconds")

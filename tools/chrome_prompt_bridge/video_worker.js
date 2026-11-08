@@ -21,7 +21,11 @@ async function videoApi(config, path, body) {
   if (!response.ok || !result.ok) throw new Error(result.message || '网页视频后台请求失败');
   return result;
 }
-async function videoTaskSave(task) { await chrome.storage.local.set({[videoKey(task.id)]:task}); }
+async function videoTaskSave(task) {
+  const saved=await chrome.storage.local.get('clearedTaskIds');
+  if(saved.clearedTaskIds?.[task.id])throw new Error('任务已被一键清空');
+  await chrome.storage.local.set({[videoKey(task.id)]:task});
+}
 async function videoAsset(config, task, image) {
   const url = baseUrl(config.url) + '/api/web-video/bridge/tasks/' + encodeURIComponent(task.id) +
     '/assets/' + encodeURIComponent(image.id) + '?lease=' + encodeURIComponent(task.lease);
@@ -227,8 +231,6 @@ async function videoDownload(task,ready) {
   task.downloadId=downloadId;await videoTaskSave(task);return task;
 }
 async function videoResume(config,task) {
-  if(task.submittedAt && Date.now()-task.submittedAt>45*60*1000)
-    throw new Error('45 分钟内未确认视频完成；请检查豆包网页，任务不会自动重发');
   if(task.downloadId) {
     task.phase='downloading';
     const found=await chrome.downloads.search({id:task.downloadId});
@@ -242,17 +244,27 @@ async function videoResume(config,task) {
     return;
   }
   const result=await videoPage(task,'AICF_VIDEO_STATUS');
+  if(result.failed) {
+    task.phase='generation_failed';
+    // Submission already happened: settle the render without releasing quota or retrying.
+    await videoReport(config,task,'uncertain',{error:result.error || '网页明确返回视频生成失败'});
+    return;
+  }
   task.phase=result.ready?'result_ready':result.confirmationRequired?'awaiting_confirmation':'generating';
   task.readFailures=0;
   task.nextReadAt=0;
   await videoTaskSave(task);
   if(result.confirmationRequired && !task.confirmationAttempted) {
+    if(task.submittedAt && Date.now()-task.submittedAt>45*60*1000)
+      throw new Error('45 分钟内未确认视频完成；请检查豆包网页，任务不会自动重发');
     task.confirmationAttempted=true;
     await videoTaskSave(task);
     await videoPage(task,'AICF_VIDEO_CONFIRM');
     return;
   }
   if(result.ready) await videoDownload(task,result);
+  else if(task.submittedAt && Date.now()-task.submittedAt>45*60*1000)
+    throw new Error('45 分钟内未确认视频完成；请检查豆包网页，任务不会自动重发');
 }
 async function videoPumpFromStorage() {
   if(videoPumping)return;
@@ -312,6 +324,7 @@ async function videoPumpFromStorage() {
       const result=await videoPage(task,'AICF_VIDEO_SUBMIT');
       task.images=[];task.filePaths=[];task.baseline=result.baseline || [];
       task.baselineReadyCount=result.baselineReadyCount || 0;
+      task.baselineFailureCount=result.baselineFailureCount || 0;
       task.baselineConfirmationCount=result.baselineConfirmationCount || 0;
       task.phase='generating';
       await videoReport(config,task,'submitted');

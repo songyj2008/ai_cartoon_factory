@@ -54,13 +54,14 @@ def build_split_payload(
     scene_info: dict[str, Any],
     locked_outcome: str,
 ) -> dict[str, Any]:
+    from services.llm_payloads import select_fields, BEAT_FIELDS
     return {
         "task": "Split only the current complex beat into replacement_beats.",
         "locked_outcome": str(locked_outcome or "").strip(),
-        "current_beat": beat,
+        "current_beat": select_fields(beat, BEAT_FIELDS),
         "risk_report": risk_report,
-        "current_beat_role_info": role_info,
-        "current_scene": scene_info,
+        "current_beat_role_info": [select_fields(row, ('id', 'display_name', 'role', 'aliases')) for row in role_info],
+        "current_scene": select_fields(scene_info, ('scene_id', 'display_name', 'aliases')),
         "local_constraints": [
             "Only return replacement_beats.",
             "Do not return the full story.",
@@ -76,7 +77,15 @@ def build_split_payload(
 def build_messages(payload: dict[str, Any], model_id: str | None = None) -> list[dict[str, str]]:
     from generation.model_rules import rules_for_model
 
-    model_prompt = rules_for_model(model_id).beat_splitter_prompt or SYSTEM_PROMPT.strip()
+    rules = rules_for_model(model_id)
+    if rules.model_id == "minimax_h3_local_ref2va":
+        payload = {**payload, "local_constraints": [
+            "Only return replacement_beats; do not modify other beats.",
+            "Preserve every dialogue verbatim, including speaker, order and occurrence count.",
+            "Use existing registered roles and the original per-Shot scenes; do not invent events.",
+            "Each replacement uses the complete H3 Beat/Shot schema and a 4-15 second duration.",
+        ]}
+    model_prompt = rules.beat_splitter_prompt or SYSTEM_PROMPT.strip()
     return [
         {"role": "system", "content": model_prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},

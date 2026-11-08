@@ -23,6 +23,16 @@ assert.equal(replacement.metadata.subject_description, 'new');
 assert.equal(replacement.path, 'new.png');
 assert.equal(old.path, 'old.png');
 assert.equal(fresh.id, 'upload_b');
+const badSlot = {id:'old_mail',type:'image',path:'mail.png',role:'邮件',order:4,
+ metadata:{asset_kind:'character',identity_id:'mail_identity',role_id:'mail_role'}};
+const office = {id:'office',type:'image',path:'office.png',role:'办公室',label:'办公室',
+ metadata:{asset_kind:'background',background_id:'office',scene_id:'scene_office'}};
+const fixed = window.AICF.h3ReplacementAsset(badSlot,office);
+assert.equal(fixed.id,'old_mail');assert.equal(fixed.order,4);
+assert.equal(fixed.role,'办公室');assert.equal(fixed.metadata.asset_kind,'background');
+assert.equal(fixed.metadata.scene_id,'scene_office');
+assert.equal(fixed.metadata.identity_id,undefined);assert.equal(fixed.metadata.role_id,undefined);
+assert.equal(badSlot.metadata.asset_kind,'character');
 ''', encoding="utf-8")
     subprocess.run(["node", str(script)], check=True, capture_output=True)
     script.write_text(APP_JS, encoding="utf-8")

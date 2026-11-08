@@ -11,6 +11,18 @@ from enum import Enum
 from typing import Any, Iterable, Mapping
 
 
+def normalize_h3_scope(value: Any) -> str:
+    scope = str(value or "onscreen").strip().lower()
+    return {
+        "on_screen": "onscreen", "off_screen": "offscreen",
+        "画内": "onscreen", "画外": "offscreen",
+        "offscreen_phone": "telephone", "phone": "telephone", "电话": "telephone",
+        "voice_over": "narration", "旁白": "narration",
+        "intercom": "offscreen_intercom", "broadcast": "offscreen_broadcast",
+        "outside_door": "offscreen_outside_door",
+    }.get(scope, scope)
+
+
 H3_REF2VA_GENERATION_MODE = "ref2va"
 H3_REF2VA_MODEL_ID = "minimax_h3_local_ref2va"
 

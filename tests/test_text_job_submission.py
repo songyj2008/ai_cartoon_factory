@@ -2,6 +2,8 @@ import json
 import time
 import uuid
 
+import pytest
+
 from services import text_jobs
 
 
@@ -60,6 +62,50 @@ def test_web_timeout_is_not_reported_as_generic_business_failure(tmp_path, monke
     finished = text_jobs.get(identifier)
     assert finished['state'] == 'needs_attention'
     assert finished['attention_reason'] == 'web_timeout'
+
+
+def test_business_failure_cancels_linked_browser_work(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from services import context, text_job_operations, web_llm_bridge
+    monkeypatch.setattr(text_jobs, 'root', lambda: tmp_path / 'operations')
+    monkeypatch.setattr(context, 'pin_runtime', lambda *_: nullcontext())
+    def fail(*_):
+        raise RuntimeError('规划失败')
+    monkeypatch.setattr(text_job_operations, 'execute', fail)
+    cancelled = []
+    monkeypatch.setattr(web_llm_bridge, 'cancel_task', lambda child, **_: cancelled.append(child))
+    identifier = str(uuid.uuid4())
+    item = {'id': identifier, 'kind': 'segment', 'args': [], 'children': ['web-child'],
+            'work': str(tmp_path), 'project': 'test', 'episode': '', 'phase': '生成', 'history': []}
+    with text_jobs.database() as db:
+        db.execute('INSERT INTO operations VALUES (?,?,?,?,?)',
+                   (identifier, 'running', time.time(), time.time(), json.dumps(item)))
+    text_jobs._execute(text_jobs.get(identifier))
+    assert text_jobs.get(identifier)['state'] == 'error'
+    assert cancelled == ['web-child']
+    assert text_jobs.current() is None
+
+
+def test_dispatch_loop_retries_transient_failure(monkeypatch):
+    calls = []
+    class StopLoop(BaseException):
+        pass
+    def dispatch():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('temporary database lock')
+        return False
+    class Wake:
+        def wait(self, _):
+            if len(calls) == 2:
+                raise StopLoop()
+        def clear(self):
+            pass
+    monkeypatch.setattr(text_jobs, '_dispatch_available', dispatch)
+    monkeypatch.setattr(text_jobs, '_WAKE', Wake())
+    with pytest.raises(StopLoop):
+        text_jobs._loop()
+    assert len(calls) == 2
 
 
 def test_manual_beats_save_holds_project_lock_through_entire_write(monkeypatch):

@@ -1,13 +1,14 @@
 """H3-native prompt construction for local Ref2VA workflows."""
 from __future__ import annotations
 
+from .speech_contract import preserve_delivery, render_delivery
 from dataclasses import dataclass
 import json
 import re
 from typing import Any, Iterable, Mapping
 
 from generation.pipelines.minimax_h3.asset_binder import H3AssetBindings
-from generation.pipelines.minimax_h3.contracts import H3GenerationConfig, H3ReferenceAsset
+from generation.pipelines.minimax_h3.contracts import H3GenerationConfig, H3ReferenceAsset, normalize_h3_scope
 from generation.pipelines.minimax_h3.validator import H3Ref2VAValidator
 from services.project_bible import load_project_bible
 
@@ -34,22 +35,30 @@ class H3PromptCompiler:
         bindings: H3AssetBindings,
         *,
         duration_sec: float,
+        draft: bool = False,
     ) -> H3CompiledPrompt:
-        override = str(config.prompt_override or "").strip()
-        if override:
-            override = self._with_character_voices(override, bindings)
-            H3Ref2VAValidator().validate_prompt(override).raise_for_errors()
+        if draft:
+            segment = {**segment, 'h3_draft': True}
+        override = self.strip_occupancy_section(str(config.prompt_override or ""))
+        if override.strip():
+            if not segment.get('h3_timing_only'):
+                override = self.compact_reference_sections(override.strip(), bindings)
+            if not draft:
+                H3Ref2VAValidator().validate_prompt(override).raise_for_errors()
             return H3CompiledPrompt(text=override, references=bindings.prompt_references, source="prompt_override")
 
         if not self._raw_shots(segment):
             raise ValueError("H3 缺少分镜计划，无法确定开场调度；请先重新生成该段 H3 分镜提示词")
 
         references = self._retention_lines(segment, bindings)
-        subjects = self._subject_lines(bindings)
-        H3Ref2VAValidator().validate_segment_structure(segment, duration_sec=duration_sec).raise_for_errors()
+        raw_shots = self._raw_shots(segment)
+        visible = {r for shot in raw_shots for r in shot.get("visible_roles", [])} if raw_shots and all("visible_roles" in shot for shot in raw_shots) else None
+        if not draft:
+            H3Ref2VAValidator().validate_segment_structure(segment, duration_sec=duration_sec).raise_for_errors()
         core_idea = self._core_idea(segment, duration_sec=duration_sec, aspect_ratio=config.aspect_ratio)
         summary = self._summary_text(core_idea, segment, bindings)
         shots = self._shot_lines(segment, duration_sec=duration_sec, fallback=core_idea, bindings=bindings)
+        subjects = self._reference_subject_lines('\n'.join(shots), bindings, visible_roles=visible)
         sections: list[str] = []
         if subjects:
             sections.append("【主体定义】\n" + "\n".join(subjects))
@@ -67,9 +76,6 @@ class H3PromptCompiler:
         else:
             shot_mode_text = "按事件需要组织镜头，并保持人物、场景和动作连续。"
         detail_lines = [shot_mode_text, *shots]
-        exact_text = self._text_items(hints.get("exact_text") or segment.get("exact_text"))
-        if exact_text:
-            detail_lines.append("必须准确显示的文字：" + "；".join(exact_text))
         exclusions = self._text_items(
             hints.get("exclusions") or segment.get("h3_exclusions") or segment.get("negative_constraints")
         )
@@ -81,53 +87,193 @@ class H3PromptCompiler:
         music = str(hints.get("non_diegetic_music") or segment.get("non_diegetic_music") or "").strip()
         sections.append("【非叙事性音乐】\n" + (music or "未指定额外配乐。"))
         text = "\n\n".join(section for section in sections if section.strip()).strip()
-        text = self._with_character_voices(text, bindings)
-        H3Ref2VAValidator().validate_prompt(text).raise_for_errors()
+        if not draft:
+            H3Ref2VAValidator().validate_prompt(text).raise_for_errors()
+        if 'h3_scene_constraints' in segment:
+            from .continuity.constraints import prompt_with_constraints
+            text = prompt_with_constraints(text, segment['h3_scene_constraints'])
+        text = self.compact_reference_sections(text, bindings)
         return H3CompiledPrompt(text=text, references=bindings.prompt_references, source="compiled")
 
+    @classmethod
+    def validate_reference_tags(cls, text, bindings):
+        """Validate the submitted graph before rebuilding managed definitions."""
+        from .dialogue_text import transform_outside_dialogue
+        allowed = {tag.casefold() for tag, _, _ in bindings.prompt_references}
+        allowed.update(e['subject_tag'].casefold() for e in cls()._subject_reference_entries(bindings))
+        missing = set()
+        def inspect(value):
+            missing.update(tag for tag in re.findall(r'<(?:Subject|Picture|Audio|Video)\s+\d+>', value, re.I)
+                           if tag.casefold() not in allowed)
+            return value
+        transform_outside_dialogue(str(text), inspect)
+        if missing:
+            raise ValueError('参考绑定不存在：' + '、'.join(sorted(missing)) + '；未覆盖已保存的配置')
+
+    @classmethod
+    def compact_reference_sections(cls, text, bindings):
+        """Use one renderer for generated, edited, saved and submitted references.
+
+        Only compiler-owned sections are rebuilt. Shot text and dialogue are
+        left intact, and raw overrides without managed references remain raw.
+        """
+        text = cls.strip_occupancy_section(str(text or '').strip())
+        text = cls.normalize_visible_role_lines(text)
+        cls.validate_reference_tags(text, bindings)
+        managed = bool(re.search(r'(?m)^【(?:主体定义|参考保留关系|人物音色绑定)】', text))
+        has_voice = any(a.asset.metadata.get('voice_only') for a in bindings.audios)
+        if not managed and not has_voice:
+            return text
+        text = cls.strip_voice_sections(text)
+        compiler = cls()
+        visible = None
+        if '【详细镜头描述】' in text:
+            from .shot_editor import inspect_prompt
+            inspected = inspect_prompt(text, 'compact', H3GenerationConfig(
+                asset_manifest=tuple(b.asset for b in bindings.all)).to_dict()['asset_manifest'])
+            shots = (inspected.get('document') or {}).get('shots', [])
+            if shots and all('visible_roles' in shot for shot in shots):
+                visible = {role for shot in shots for role in shot['visible_roles']}
+        subjects = compiler._reference_subject_lines(text, bindings, visible_roles=visible)
+        if not re.search(r'(?m)^【[^】]+】[ \t]*$', text):
+            text = '【详细镜头描述】\n' + text
+        text = cls._set_reference_section(text, '主体定义', subjects)
+        text = cls._set_reference_section(text, '参考保留关系',
+            compiler._retention_lines_from_prompt(text, bindings), before='详细镜头描述')
+        text = cls._set_reference_section(text, '人物音色绑定', compiler.voice_section_lines(text, bindings), before='详细镜头描述')
+        return text.strip()
+
     @staticmethod
-    def _with_character_voices(text, bindings):
-        # Replace only our generated block when recompiling an edited prompt.
-        text = re.sub(r"\n*【人物音色绑定】.*?【人物音色绑定结束】", "", text, flags=re.S).strip()
+    def strip_occupancy_section(text):
+        """Scene state is planning input; only Shot blocking goes to video."""
+        from .dialogue_text import transform_outside_dialogue
+        return transform_outside_dialogue(text, lambda value: re.sub(
+            r'(?ms)^【场景人物占位】[^\n]*\n?.*?(?=^【[^】\n]+】|\Z)', '', value)).strip()
+
+    @staticmethod
+    def strip_voice_sections(text):
+        from .dialogue_text import transform_outside_dialogue
+        return transform_outside_dialogue(text, lambda value: re.sub(r'(?ms)^【人物音色绑定】[^\n]*\n?.*?(?=^【[^】\n]+】|\Z)', '', value).replace('【人物音色绑定结束】', '')).strip()
+
+    def voice_section_lines(self, text, bindings):
+        lines = self._voice_definition_lines(text, bindings)
+        if lines:
+            lines.append('参考音频仅用于对应人物音色，不播放参考录音、不复述其内容，不作为背景声或配乐播放；对白严格使用当前镜头指定台词，不新增台词。各镜头中，画内说话人口型与本人台词同步；当前未发言人物不代说、不对口型。')
+        return lines
+
+    @staticmethod
+    def normalize_visible_role_lines(text):
+        """Render standalone cast fields as prose without touching dialogue."""
+        def render(match):
+            value = match['roles']
+            tags = re.findall(r'<Subject\s+\d+>', value)
+            remainder = re.sub(r'<Subject\s+\d+>', '', value)
+            if remainder.strip(' \t,，、\'"'):
+                return match[0]
+            return match['indent'] + '画面人物：' + ('、'.join(tags) if tags else '无') + '。'
+        parts = re.split(r'(<d\b[^>]*>.*?</d>)', str(text or ''), flags=re.S | re.I)
+        for index in range(0, len(parts), 2):
+            parts[index] = re.sub(
+                r'^(?P<indent>[ \t]*)visible_roles[ \t]*[:：][ \t]*\[(?P<roles>[^\]\r\n]*)\][ \t]*[。；;]?[ \t]*$',
+                render, parts[index], flags=re.M)
+        return ''.join(parts)
+
+    def _reference_subject_lines(self, text, bindings, *, visible_roles=None):
+        lines = self._subject_lines(bindings, visible_roles=visible_roles)
+        return lines
+
+    @staticmethod
+    def _set_reference_section(text, title, lines, *, before=None):
+        pattern = re.compile(r'(?ms)^【' + re.escape(title) + r'】[ \t]*\n?.*?(?=^【[^】\n]+】[ \t]*$|\Z)')
+        replacement = '【' + title + '】\n' + '\n'.join(lines) + '\n\n' if lines else ''
+        if pattern.search(text):
+            used = False
+            def replace(match):
+                nonlocal used
+                value = '' if used else replacement
+                used = True
+                return value
+            return pattern.sub(replace, text)
+        if not replacement:
+            return text
+        if before and '【' + before + '】' in text:
+            return text.replace('【' + before + '】', replacement + '【' + before + '】', 1)
+        return (text.rstrip() + '\n\n' + replacement) if before else replacement + text
+
+    def _voice_definition_lines(self, text, bindings):
+        entries = {e['asset_id']: e for e in self._subject_reference_entries(bindings)}
+        speaker_ids = {m[1]: m[2] for m in re.finditer(
+            r'(<(?:Subject|Audio)\s+\d+>|[\w\u4e00-\u9fff]+)\s*[（(](S\d+)[）)]'
+            r'[^<>；\n]*?(?:说|报告)[：:]\s*<d>', text)}
+        def speaker(value):
+            return value + (f'（{speaker_ids[value]}）' if value in speaker_ids else '')
         lines = []
         for audio in bindings.audios:
             meta = audio.asset.metadata
             if not meta.get("voice_only"):
                 continue
-            pictures = [image.prompt_tag for image in bindings.images
-                        if image.asset.metadata.get("identity_id") == meta.get("identity_id")]
-            if not pictures:
-                raise ValueError("人物音色参考缺少对应人物图片，请重新选择音频绑定人物")
-            lines.append(f"{audio.prompt_tag} → {'、'.join(pictures)}：音色参考（锁定音色）。{audio.asset.role}。"
-                         "仅在对应人物说话时使用该音色；台词使用当前镜头对白，不复用参考录音原文，"
-                         "不作为背景音或配乐播放，不为无对白人物新增台词。")
-        if lines:
-            text += "\n\n【人物音色绑定】\n" + "\n".join(lines) + "\n【人物音色绑定结束】"
-        return text
+            usage = str(meta.get('voice_usage') or '')
+            if usage in {'narration', 'telephone'}:
+                voice_name = str(meta.get('voice_speaker') or audio.asset.role or '').strip()
+                if not voice_name:
+                    raise ValueError('旁白或电话音色必须填写声音角色名称')
+                delivery = ('画外旁白' if usage == 'narration' else '电话另一端画外声音，保留电话质感；声源按镜头执行')
+                lines.append(f'{audio.prompt_tag}：{speaker(voice_name)}的音色参考；{delivery}。')
+                continue
+            owners = [entries[image.asset.asset_id]['subject_tag'] if image.asset.asset_id in entries else image.prompt_tag
+                      for image in bindings.images if meta.get('identity_id') and
+                      image.asset.metadata.get('identity_id') == meta['identity_id']]
+            if not owners:
+                name = str(meta.get('voice_speaker') or meta.get('role_id') or audio.asset.label or '').strip()
+                if not name: raise ValueError('音色缺少人物身份')
+                owners = [name]
+            lines.append(f"{audio.prompt_tag} → {'、'.join(speaker(owner) for owner in owners)}：音色参考。")
+        return lines
 
-    def _subject_lines(self, bindings: H3AssetBindings) -> list[str]:
-        """Define reusable visible content; Picture identifies only its source asset."""
+    def _subject_lines(self, bindings: H3AssetBindings, *, visible_roles=None) -> list[str]:
+        """Map character identities to images without reproducing their dossiers."""
         lines: list[str] = []
+        has_character = False
         for entry in self._subject_reference_entries(bindings):
-            description = str(entry["description"]).rstrip("。；; ")
-            asset_kind = str(entry["asset_kind"])
-            if asset_kind == "character":
-                rule = "全片保持人物身份、脸部、发型、服装、体型和主要配色一致。"
-                description = "参考图外观描述（其中姿势、朝向和拍摄背景只描述素材）：" + description
-                rule += "人物在视频中的位置、姿势、身体朝向与视线按当前 Shot 的调度和动作执行；显式首帧或构图锚点另按其用途执行。"
-            elif asset_kind == "background":
-                rule = "使用时保持场景空间、建筑、陈设、光线与主要环境特征一致。"
-            else:
-                rule = "使用时保持该可见内容的核心外观、结构、材质与主要配色一致。"
-            lines.append(
-                f"{entry['subject_tag']}：{entry['name']}；可见内容来自 {entry['picture_tag']}。"
-                f"{description}。{rule}"
-            )
+            asset_kind = entry['asset_kind']
+            has_character |= asset_kind == 'character'
+            meta = entry['metadata']
+            if asset_kind == 'character':
+                note = ('本段未安排入画；在场状态与站位以镜头描述为准。'
+                        if visible_roles is not None and not any(
+                            str(role) in entry.get('aliases', []) or str(role) == entry['subject_tag']
+                            for role in visible_roles) else '')
+                lines.append(f"{entry['subject_tag']}：{entry['name']}；可见内容来自 {entry['picture_tag']}。" + note)
+                continue
+            description = str(meta.get('identity_summary') or meta.get('subject_description') or
+                              meta.get('identity_description') or meta.get('description_cn') or
+                              meta.get('image_description') or '').strip()
+            if asset_kind == 'background' and not meta.get('identity_summary'):
+                description = ''
+            # Prefer an author-supplied summary; never infer traits from a name.
+            prefixes = [name + punctuation for name in entry.get('description_names', [entry['name']])
+                        for punctuation in ('，', '；')]
+            for prefix in prefixes:
+                if description.startswith(prefix):
+                    description = description[len(prefix):]
+                    break
+            description = description.rstrip('。；; ')
+            if description == entry['name']:
+                description = ''
+            hint = str(meta.get('appearance_summary') or meta.get('reference_summary') or '').strip().rstrip('。；; ')
+            notes = [description] if description else []
+            if hint and hint not in description:
+                notes.append(hint)
+            if asset_kind == 'background':
+                notes.append('保持空间、陈设与光线')
+            lines.append(f"{entry['subject_tag']}：{entry['name']}；可见内容来自 {entry['picture_tag']}。" + ''.join(note + '。' for note in notes))
+        if has_character:
+            lines.append('人物保持参考外观；站位、姿势与视线按镜头执行，明确的首帧或构图锚点按其要求执行。')
         return lines
 
     def _subject_reference_entries(self, bindings: H3AssetBindings) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
-        bible_characters = self._bible_characters_by_identity_id()
+        bible_roles, bible_characters = self._bible_character_indices()
         for binding in bindings.images:
             asset = binding.asset
             metadata = asset.metadata if isinstance(asset.metadata, Mapping) else {}
@@ -141,17 +287,21 @@ class H3PromptCompiler:
                 or metadata.get("image_description")
                 or ""
             ).strip()
-            # ``role`` is the editor-controlled semantic name; ``label`` is
-            # the source asset's display label and may include a view/file
-            # suffix.  Prefer role so renaming the left-hand row updates the
-            # Subject definition without changing asset identity.
-            name = str(asset.role or asset.label or "").strip()
+            # A bound project role owns its story name. Library labels and
+            # imported drafts may still carry the source character's name.
+            # Unbound references retain their editor-controlled role/label.
+            source_name = str(asset.role or asset.label or "").strip()
+            role_id = str(metadata.get("role_id") or "").strip()
+            identity_id = str(metadata.get("identity_id") or "").strip()
+            bible_char = bible_roles.get(role_id) or bible_characters.get(identity_id)
+            name = str((bible_char or {}).get("display_name") or source_name).strip()
             if not name and not description:
                 continue
             subject_index = len(entries) + 1
             name = name or f"主体 {subject_index}"
             description = description or f"以 {binding.prompt_tag} 中可见的{name}为准"
-            aliases = self._role_aliases(name, metadata)
+            aliases = list(dict.fromkeys([*self._role_aliases(name, metadata),
+                                         *self._role_aliases(source_name, metadata)]))
             # Beats may address a character by its Project Bible role id
             # (e.g. ``character_004``) rather than its display name.  Resolve
             # that id back to this Subject so dialogue speakers render as
@@ -159,11 +309,8 @@ class H3PromptCompiler:
             # are honored: the Bible's ``asset_identity_id`` (via the asset
             # ``metadata.identity_id``) and the role id the auto-binder stored
             # directly on ``metadata.role_id``.
-            identity_id = str(metadata.get("identity_id") or "").strip()
-            bible_char = bible_characters.get(identity_id)
             if bible_char:
                 aliases = list(dict.fromkeys([*aliases, *self._character_aliases(bible_char)]))
-            role_id = str(metadata.get("role_id") or "").strip()
             if role_id and role_id not in aliases:
                 aliases.append(role_id)
             entries.append(
@@ -172,6 +319,7 @@ class H3PromptCompiler:
                     "subject_tag": f"<Subject {subject_index}>",
                     "picture_tag": binding.prompt_tag,
                     "name": name,
+                    "description_names": list(dict.fromkeys([name, source_name])) if source_name else [name],
                     "description": description,
                     "aliases": aliases,
                     "asset_kind": asset_kind or "visible_content",
@@ -181,20 +329,22 @@ class H3PromptCompiler:
         return entries
 
     @staticmethod
-    def _bible_characters_by_identity_id() -> dict[str, Mapping[str, Any]]:
-        """Map each Project Bible character's ``asset_identity_id`` to its entry.
-
-        The H3 asset manifest carries ``metadata.identity_id`` (== the Bible
-        ``asset_identity_id``), which is the stable link back to the Bible
-        ``id``/``display_name``/``aliases`` the Beat writer may have used.
-        """
+    def _bible_character_indices() -> tuple[dict[str, Mapping[str, Any]], dict[str, Mapping[str, Any]]]:
+        """Resolve explicit roles first; shared identities cannot imply a role."""
         bible = load_project_bible() or {}
         characters = list(bible.get("core_characters") or []) + list(bible.get("supporting_characters") or [])
-        return {
-            str(item.get("asset_identity_id") or "").strip(): item
-            for item in characters
-            if isinstance(item, Mapping) and str(item.get("asset_identity_id") or "").strip()
-        }
+        roles: dict[str, Mapping[str, Any]] = {}
+        identities: dict[str, list[Mapping[str, Any]]] = {}
+        for item in characters:
+            if not isinstance(item, Mapping):
+                continue
+            role_id = str(item.get("id") or "").strip()
+            identity_id = str(item.get("asset_identity_id") or "").strip()
+            if role_id:
+                roles[role_id] = item
+            if identity_id:
+                identities.setdefault(identity_id, []).append(item)
+        return roles, {key: values[0] for key, values in identities.items() if len(values) == 1}
 
     @staticmethod
     def _character_aliases(character: Mapping[str, Any]) -> list[str]:
@@ -210,16 +360,18 @@ class H3PromptCompiler:
             marker = self._retention_marker(metadata, default="fully_preserved")
             shot_indices = self._subject_shot_indices(segment, entry, bindings)
             appearance = f"（出现于 {'、'.join(f'Shot {value}' for value in shot_indices)}）" if shot_indices else ""
-            note = str(metadata.get("retention_note") or metadata.get("retention_description") or "").strip()
-            if not note:
-                if entry["asset_kind"] == "character":
-                    note = "保持已定义的人物身份、脸部、发型、服装、体型与主要配色"
-                elif entry["asset_kind"] == "background":
-                    note = "保持已定义的场景空间、建筑、陈设、光线与主要环境特征"
-                else:
-                    note = "保持已定义可见内容的核心外观、结构、材质与主要配色"
+            note = self._subject_retention_note(entry)
             lines.append(f"{entry['subject_tag']}{appearance}：{marker} - {note}。")
+        return lines + self._media_retention_lines(bindings)
 
+    @staticmethod
+    def _subject_retention_note(entry):
+        meta = entry['metadata']
+        return str(meta.get('retention_note') or meta.get('retention_description') or
+                   {'character':'人物外观','background':'场景布局与光线'}.get(entry['asset_kind'],'外观、结构与材质')).strip().rstrip('。；; ')
+
+    def _media_retention_lines(self, bindings):
+        lines = []
         for tag, kind, asset in bindings.prompt_references:
             metadata = asset.metadata if isinstance(asset.metadata, Mapping) else {}
             if kind == "image" and not self._picture_anchor_role(metadata):
@@ -245,7 +397,11 @@ class H3PromptCompiler:
                 retention = "参考动作、镜头运动、剪辑节奏或时间结构"
             elif kind in {"audio", "video_audio"}:
                 marker = self._retention_marker(metadata, default="reference", audio=True)
-                retention = "仅参考音色，台词使用当前剧情" if metadata.get("voice_only") else "参考音色、台词、声音质感或节奏"
+                if metadata.get('voice_only'):
+                    note = str(metadata.get('retention_note') or metadata.get('reference_summary') or '仅取音色').strip().rstrip('。；; ')
+                    lines.append(f'{tag}：{marker} - {note}。')
+                    continue
+                retention = "参考音色、台词、声音质感或节奏"
             else:
                 marker = self._retention_marker(metadata, default="weak_reference")
                 retention = "作为画面参考"
@@ -255,34 +411,49 @@ class H3PromptCompiler:
     def _retention_lines_from_prompt(self, prompt: str, bindings: H3AssetBindings) -> list[str]:
         """Build retention declarations from the currently edited Shot text."""
         entries = self._subject_reference_entries(bindings)
-        shot_matches = list(re.finditer(r"(?m)^\[Shot\s+(\d+)\]", str(prompt or "")))
+        detail = re.search(r'(?ms)^【详细镜头描述】[ \t]*\n(.*?)(?=^【[^】\n]+】[ \t]*$|\Z)', str(prompt or ''))
+        shot_text = detail[1] if detail else str(prompt or '')
+        shot_matches = list(re.finditer(r"(?m)^\[Shot\s+(\d+)\]", shot_text))
         shot_bodies: list[tuple[int, str]] = []
         for index, match in enumerate(shot_matches):
-            end = shot_matches[index + 1].start() if index + 1 < len(shot_matches) else len(prompt)
-            shot_bodies.append((int(match.group(1)), prompt[match.start():end]))
+            end = shot_matches[index + 1].start() if index + 1 < len(shot_matches) else len(shot_text)
+            shot_bodies.append((int(match.group(1)), shot_text[match.start():end]))
+
+        # Share authored visibility/scene resolution with editor and validation.
+        # A direct camera subject must not disappear from reference declarations
+        # merely because the author omitted the optional cast field.
+        from .shot_editor import inspect_prompt
+        manifest=H3GenerationConfig(asset_manifest=tuple(b.asset for b in bindings.all)).to_dict()['asset_manifest']
+        inspected=inspect_prompt(prompt,'retention',manifest)
+        parsed={number:shot for (number,_),shot in zip(shot_bodies,
+                (inspected.get('document') or {}).get('shots',[]))} if inspected.get('verified') else {}
 
         lines: list[str] = []
         for entry in entries:
             metadata = entry["metadata"] if isinstance(entry["metadata"], Mapping) else {}
             marker = self._retention_marker(metadata, default="fully_preserved")
-            indices = [number for number, body in shot_bodies if str(entry["subject_tag"]) in body]
+            indices = []
+            for number, body in shot_bodies:
+                cast = re.search(r'画面人物：([^；\n]+)', body)
+                shot=parsed.get(number,{})
+                if entry['asset_kind']=='background':
+                    present=(bool(metadata.get('scene_id')) and shot.get('scene_id')==metadata['scene_id']) or entry['subject_tag'] in body
+                elif 'visible_roles' in shot:
+                    aliases={str(v) for v in entry.get('aliases',[])}|{entry['subject_tag']}
+                    present=any(str(role) in aliases for role in shot['visible_roles'])
+                else:
+                    present=bool(cast and entry['subject_tag'] in cast[1])
+                if present:
+                    indices.append(number)
+            if (entry['asset_kind'] == 'character' and parsed and not indices
+                    and marker == 'fully_preserved' and not self._picture_anchor_role(metadata)):
+                lines.append(f"{entry['subject_tag']}：weak_reference - 仅作身份与声音归属映射，本段不安排入画，不向其他人物转移外观。")
+                continue
             appearance = f"（出现于 {'、'.join(f'Shot {value}' for value in indices)}）" if indices else ""
-            if entry["asset_kind"] == "character":
-                note = str(metadata.get("retention_note") or "保持已定义的人物身份、脸部、发型、服装、体型与主要配色").strip()
-            elif entry["asset_kind"] == "background":
-                note = str(metadata.get("retention_note") or "保持已定义的场景空间、建筑、陈设、光线与主要环境特征").strip()
-            else:
-                note = str(metadata.get("retention_note") or "保持已定义可见内容的核心外观、结构、材质与主要配色").strip()
+            note = self._subject_retention_note(entry)
             lines.append(f"{entry['subject_tag']}{appearance}：{marker} - {note}。")
 
-        subject_ids = {str(entry["asset_id"]) for entry in entries}
-        for tag, kind, asset in bindings.prompt_references:
-            if kind == "image" and asset.asset_id in subject_ids:
-                continue
-            role = asset.role or asset.label or {"image": "画面参考", "video": "动作、镜头或剪辑参考", "audio": "音色、台词或节奏参考", "video_audio": "视频配套音轨参考"}[kind]
-            marker = "reference" if kind in {"audio", "video_audio"} else "weak_reference"
-            lines.append(f"{tag}：{marker} - {role}。")
-        return lines
+        return lines + self._media_retention_lines(bindings)
 
     def _summary_text(
         self,
@@ -394,8 +565,17 @@ class H3PromptCompiler:
 
     def _raw_shots(self, segment: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         hints = self._model_hints(segment)
-        shots = hints.get("shots") or segment.get("h3_shots") or segment.get("shots") or []
+        shots = (hints.get('shots') or []) if hints.get('planning_fingerprint') else (
+            hints.get("shots") or segment.get("h3_shots") or segment.get("shots") or [])
         raw_shots = [dict(shot) for shot in shots if isinstance(shot, Mapping)] if isinstance(shots, list) else []
+        if hints.get("planning_fingerprint"):
+            # Fresh plans may split one line across Shots or keep multiple
+            # speakers in one Shot. A positional overlay would undo that timing.
+            from generation.pipelines.minimax_h3.prompt_planner import _assert_current_dialogue_preserved
+
+            if not segment.get('h3_draft') and not hints.get('planning_issues'):
+                _assert_current_dialogue_preserved(segment, {"shots": raw_shots})
+            return raw_shots
         return self._shots_with_current_dialogue(segment, raw_shots)
 
     def _shots_with_current_dialogue(
@@ -410,8 +590,7 @@ class H3PromptCompiler:
         model hint.  Shot composition remains useful, but its dialogue is then
         stale and must not override the current Beat.
 
-        Empty ``dialogue_units`` intentionally keep legacy Shot dialogue: old
-        Beat payloads often stored dialogue only inside H3 model hints.
+        An explicitly saved dialogue contract includes the empty (silent) case.
         """
 
         units = [
@@ -419,7 +598,23 @@ class H3PromptCompiler:
             for item in segment.get("dialogue_units") or []
             if isinstance(item, Mapping) and str(item.get("line") or item.get("text") or "").strip()
         ]
-        if not units or not shots:
+        if not shots:
+            return shots
+        if segment.get('dialogue_authoritative'):
+            by_shot = {}
+            for unit in units:
+                by_shot.setdefault(unit.get('shot_uid'), []).append(unit)
+            shot_ids = {s.get('shot_uid') or s.get('uid') for s in shots}
+            if any(not key or key not in shot_ids for key in by_shot):
+                raise ValueError('已确认对白的 Shot 归属失效，请重新生成分镜')
+            for shot in shots:
+                shot.pop('dialogue', None)
+                shot.pop('dialogues', None)
+                assigned = by_shot.get(shot.get('shot_uid') or shot.get('uid'), [])
+                if assigned:
+                    shot['dialogues'] = [self._current_dialogue(u, None) for u in assigned]
+            return shots
+        if not units:
             return shots
 
         dialogue_slots = [index for index, shot in enumerate(shots) if self._shot_dialogue_values(shot)]
@@ -448,17 +643,18 @@ class H3PromptCompiler:
 
     def _current_dialogue(self, unit: Mapping[str, Any], previous: Any) -> dict[str, Any]:
         previous_speaker, previous_scope, _line, _continuation = self._dialogue_parts(previous)
-        speaker = str(unit.get("speaker_name") or unit.get("speaker") or "").strip()
+        explicit_owner = bool(unit.get('dialogue_uid'))
+        speaker = str((unit.get('speaker') if explicit_owner else unit.get('speaker_name')) or unit.get("speaker") or "").strip()
         # Normalized legacy Beats sometimes put a role id in speaker_name.
         # Preserve the Shot's human-readable speaker in that case.
-        if (not speaker or re.fullmatch(r"character[_-]\d+", speaker, flags=re.IGNORECASE)) and previous_speaker:
+        if not explicit_owner and (not speaker or re.fullmatch(r"character[_-]\d+", speaker, flags=re.IGNORECASE)) and previous_speaker:
             speaker = previous_speaker
-        return {
+        return preserve_delivery(unit, {
             "speaker": speaker,
             "scope": str(unit.get("scope") or unit.get("speech_type") or previous_scope or "onscreen").strip().lower(),
             "line": str(unit.get("line") or unit.get("text") or "").strip(),
             "continues_previous": bool(unit.get("continues_previous") or unit.get("continuation")),
-        }
+        })
 
     @staticmethod
     def _shot_dialogue_values(shot: Mapping[str, Any]) -> list[Any]:
@@ -491,7 +687,21 @@ class H3PromptCompiler:
         *,
         primary_entries: list[dict[str, Any]] | None = None,
     ) -> str:
-        result = str(text or "").strip()
+        from generation.pipelines.minimax_h3.dialogue_text import transform_outside_dialogue
+
+        return transform_outside_dialogue(
+            str(text or "").strip(),
+            lambda value: self._replace_visual_subject_mentions(value, entries, primary_entries=primary_entries),
+        )
+
+    def _replace_visual_subject_mentions(
+        self,
+        text: str,
+        entries: list[dict[str, Any]],
+        *,
+        primary_entries: list[dict[str, Any]] | None = None,
+    ) -> str:
+        result = str(text or "")
         if not result:
             return ""
         replacements: list[tuple[str, str]] = []
@@ -502,6 +712,13 @@ class H3PromptCompiler:
                     replacements.append((alias_text, str(entry["subject_tag"])))
         for alias, tag in sorted(replacements, key=lambda value: len(value[0]), reverse=True):
             result = re.sub(re.escape(alias), tag, result, flags=re.IGNORECASE)
+
+        # Editors may keep a tag beside its human-readable name. Replacing
+        # that name must not leave two adjacent references to the same asset.
+        result = re.sub(r"(<Subject\s+\d+>)(?:\s*\1)+", r"\1", result, flags=re.IGNORECASE)
+        character_tags = {
+            str(entry["subject_tag"]) for entry in entries if entry.get("asset_kind") == "character"
+        }
 
         # Resolve a collective reference from the explicitly named Subjects in
         # the same sentence/clause before falling back to the Shot-wide group.
@@ -516,7 +733,7 @@ class H3PromptCompiler:
                     break
                 clause_start = max(result.rfind(mark, 0, position) for mark in "；。！？\n") + 1
                 subject_tags = re.findall(r"<Subject\s+\d+>", result[clause_start:position])
-                local_group = list(dict.fromkeys(subject_tags))
+                local_group = list(dict.fromkeys(tag for tag in subject_tags if tag in character_tags))
                 if len(local_group) == count:
                     explicit_group = "、".join(local_group)
                     result = result[:position] + explicit_group + result[position + len(token) :]
@@ -568,8 +785,14 @@ class H3PromptCompiler:
         if str(entry.get("asset_kind") or "") == "background":
             if indices:
                 return shot_index in indices
+            if shot.get("scene_id") and metadata.get("scene_id"):
+                return shot["scene_id"] == metadata["scene_id"]
             return any(alias in shot_text for alias in aliases) or background_count == 1
-        return any(alias in shot_text for alias in aliases)
+        if "visible_roles" in shot:
+            exact_aliases = {str(a).lower() for a in entry.get('aliases', [])}
+            return any(str(role).lower() in exact_aliases or str(role).lower() == str(entry["subject_tag"]).lower() for role in shot["visible_roles"])
+        visual = {key: shot.get(key) for key in ("subject", "blocking", "action", "camera")}
+        return any(alias in json.dumps(visual, ensure_ascii=False).lower() for alias in aliases)
 
     def _shot_lines(
         self,
@@ -591,6 +814,17 @@ class H3PromptCompiler:
                     key = self._speaker_key(speaker, subject_entries)
                     if key not in speaker_ids:
                         speaker_ids[key] = f"S{len(speaker_ids) + 1}"
+        voice_refs = {}
+        for audio in bindings.audios:
+            meta = audio.asset.metadata or {}
+            voice_refs[audio.asset.asset_id] = audio.prompt_tag
+            for key in (meta.get('role_id'), meta.get('identity_id'), audio.asset.role, audio.asset.label):
+                if key:
+                    voice_refs[str(key)] = audio.prompt_tag
+            for entry in subject_entries:
+                if meta.get('identity_id') and meta.get('identity_id') == entry['metadata'].get('identity_id'):
+                    for alias in [entry['subject_tag'], entry['name'], *entry.get('aliases', [])]:
+                        voice_refs[alias] = audio.prompt_tag
         for index, shot in enumerate(raw_shots, start=1):
             primary_entries = self._entries_mentioned_in_text(str(shot.get("subject") or ""), subject_entries)
             timing = self._shot_timing(shot, index)
@@ -599,6 +833,7 @@ class H3PromptCompiler:
                 speaker_ids=speaker_ids,
                 subject_entries=subject_entries,
                 primary_entries=primary_entries,
+                voice_refs=voice_refs,
             )
             if description:
                 reference_text = self._shot_reference_text(shot, index, bindings)
@@ -630,7 +865,14 @@ class H3PromptCompiler:
         background_count = sum(1 for entry in subject_entries if entry["asset_kind"] == "background")
         for entry in subject_entries:
             if entry["asset_kind"] == "background" and self._subject_applies_to_shot(entry, shot, shot_index, background_count):
-                references.append(f"场景使用 {entry['subject_tag']}（{entry['name']}）")
+                references.append(f"场景使用 {entry['subject_tag']}")
+        if not references and shot.get("scene_id"):
+            scene = str(shot["scene_id"])
+            bible = load_project_bible()
+            entry = next((item for item in bible.get("allowed_backgrounds") or []
+                          if str(item.get("id")) == scene), {})
+            name = str(entry.get("display_name") or scene)
+            references.append(f"场景：{name}")
         for binding in bindings.images:
             metadata = binding.asset.metadata if isinstance(binding.asset.metadata, Mapping) else {}
             anchor_role = self._picture_anchor_role(metadata)
@@ -690,6 +932,7 @@ class H3PromptCompiler:
         speaker_ids: Mapping[str, str] | None = None,
         subject_entries: list[dict[str, Any]],
         primary_entries: list[dict[str, Any]],
+        voice_refs=None,
     ) -> str:
         parts: list[str] = []
         shot_size = str(shot.get("shot_size") or shot.get("framing") or "").strip()
@@ -704,15 +947,32 @@ class H3PromptCompiler:
                 "extreme_close_up": "特写",
             }
             parts.append(f"{shot_sizes.get(shot_size.lower(), shot_size)}镜头")
-        for key in ("subject", "blocking", "description", "prompt", "action", "camera"):
+        cast_tags: set[str] = set()
+        if 'visible_roles' in shot:
+            cast = '、'.join(str(entry['subject_tag']) if (entry := self._subject_entry_for_name(str(role), subject_entries)) else str(role) for role in shot['visible_roles'])
+            parts.append('画面人物：' + (cast or '无人物'))
+            cast_tags = set(re.findall(r'<Subject\s+\d+>', cast))
+        seen = set()
+        for key in ("camera", "subject", "blocking", "description", "prompt", "action"):
             raw = shot.get(key)
             if isinstance(raw, (list, tuple)):
                 value = "、".join(str(item or "").strip() for item in raw if str(item or "").strip()).strip()
             else:
                 value = str(raw or "").strip()
             rendered = self._replace_subject_mentions(value, subject_entries, primary_entries=primary_entries)
+            # The structured cast already names these people. A bare subject
+            # or subject list adds no shot information; descriptive text does.
+            if key == 'subject' and re.fullmatch(
+                r'\s*<Subject\s+\d+>(?:\s*[、,，;；]\s*<Subject\s+\d+>)*\s*[。；;]?\s*', rendered
+            ) and set(re.findall(r'<Subject\s+\d+>', rendered)) <= cast_tags:
+                continue
+            if not rendered or rendered in seen:
+                continue
+            seen.add(rendered)
             if rendered and key == "blocking":
                 rendered = "人物调度：" + rendered
+            if rendered and key == "camera":
+                rendered = "镜头构图：" + rendered
             if rendered and rendered not in parts:
                 parts.append(rendered)
         for dialogue in self._shot_dialogue_values(shot):
@@ -724,8 +984,18 @@ class H3PromptCompiler:
                 speaker_key = self._speaker_key(speaker, subject_entries)
                 speaker_id = str((speaker_ids or {}).get(speaker_key) or "").strip()
                 speaker_tag = f" ({speaker_id})" if speaker_id else ""
-                scope_text = "，画外" if scope.startswith("offscreen") else ""
-                parts.append(f"{prefix}{speaker_ref}{speaker_tag}{scope_text}说：<d>[Chinese]{line}</d>")
+                scope_text = {"narration":"以画外旁白", "telephone":"在画外通过电话"}.get(
+                    scope, "在画外" if scope.startswith("offscreen") else "")
+                voice_id = dialogue.get('voice_asset_id') if isinstance(dialogue, Mapping) else None
+                if voice_id and voice_refs is not None and voice_id not in voice_refs:
+                    raise ValueError('对白音色参考绑定不存在：' + str(voice_id))
+                audio_tag = (voice_refs or {}).get(voice_id) or (voice_refs or {}).get(speaker) or (voice_refs or {}).get(speaker_ref)
+                if audio_tag:
+                    parts.append(f'本句音色参考：{audio_tag}，仅用于{speaker_ref}的声音')
+                if isinstance(dialogue, Mapping) and dialogue.get("delivery_spans"):
+                    parts.append(self._replace_subject_mentions(render_delivery(dialogue, speaker_ref + speaker_tag), subject_entries, primary_entries=primary_entries))
+                else:
+                    parts.append(f"{prefix}{speaker_ref}{speaker_tag}{scope_text}说：<d>[Chinese]{line}</d>")
         audio = str(shot.get("audio") or shot.get("sound") or "").strip()
         if audio:
             parts.append(f"声音：{self._replace_subject_mentions(audio, subject_entries, primary_entries=primary_entries)}")
@@ -741,7 +1011,7 @@ class H3PromptCompiler:
         if isinstance(value, Mapping):
             return (
                 str(value.get("speaker") or value.get("speaker_name") or "").strip(),
-                str(value.get("scope") or value.get("speech_type") or "onscreen").strip().lower(),
+                normalize_h3_scope(value.get("scope") or value.get("speech_type")),
                 str(value.get("line") or value.get("text") or "").strip(),
                 bool(value.get("continues_previous") or value.get("continuation")),
             )
@@ -756,6 +1026,9 @@ class H3PromptCompiler:
         lowered = str(name or "").strip().lower()
         if not lowered:
             return None
+        exact = [entry for entry in entries if lowered in {str(a).lower() for a in entry.get('aliases', [])}]
+        if len(exact) == 1:
+            return exact[0]
         return next(
             (
                 entry
@@ -798,14 +1071,6 @@ class H3PromptCompiler:
     @classmethod
     def _overall_soundscape(cls, segment: Mapping[str, Any]) -> str:
         hints = cls._model_hints(segment)
-        explicit = str(hints.get("overall_soundscape") or segment.get("overall_soundscape") or "").strip()
-        sounds: list[str] = [explicit] if explicit else []
-        shots = hints.get("shots") or segment.get("h3_shots") or segment.get("shots") or []
-        if isinstance(shots, list):
-            for shot in shots:
-                if not isinstance(shot, Mapping):
-                    continue
-                sound = str(shot.get("audio") or shot.get("sound") or "").strip()
-                if sound and sound not in sounds:
-                    sounds.append(sound)
-        return "；".join(sounds)
+        # Shot sounds retain their timing in _render_shot; promoting them here
+        # would turn a local cue into a whole-segment instruction.
+        return str(hints.get("overall_soundscape") or segment.get("overall_soundscape") or "").strip()

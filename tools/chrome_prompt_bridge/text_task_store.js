@@ -6,7 +6,7 @@
     'dispatch_attempted_at','dispatch_url','dispatch_count','conversation_url','conversation_id',
     'conversation_renamed_id','json_repair','continuation_diagnostics','continue_pending',
     'continue_scan_state','continued_reply','continued_at','continue_attempts','continue_events',
-    'updated_at','page_operation']);
+    'updated_at','page_operation','attachment_receipt']);
   function createStore(chromeApi, providers) {
     const taskLocks=new Map();
     const ownedLocks=new Map();

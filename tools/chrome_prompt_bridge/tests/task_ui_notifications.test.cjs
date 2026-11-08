@@ -7,7 +7,7 @@ const source=fs.readFileSync(path.join(__dirname,'../../../ui/text_jobs_ui.py'),
 function fixture(api){
  let applied=0;
  const node={childElementCount:1,disabled:false};
- const context={busy:false,signature:'[]',root:()=>({querySelector:()=>node}),api,
+ const context={busy:false,historyOffset:0,taskFilter:'all',tasksCache:[],signature:'[0,"all",[]]',root:()=>({querySelector:()=>node}),api,
  fetch:()=>new Promise(()=>{}),AbortSignal,queueMicrotask,videoView:x=>x,
  bindClearButton:()=>{},autoApplyMetadata:()=>applied++,observeTaskChanges:()=>{},updateEntryStatuses:()=>{},updateSummary:()=>{},updateFilters:()=>{},message:()=>{}};
  vm.runInNewContext(source.slice(source.indexOf('  let refreshPending='),source.indexOf('  const filters=')),context);

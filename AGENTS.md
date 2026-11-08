@@ -74,6 +74,49 @@ Do not optimize runtime rules around one story, one scene, one set of characters
 
 ### Architecture Principles
 
+Segment drafting (including Beats → Segments and prompt regeneration) must not
+infer continuous-scene membership from Beat hints, initialize scene state, or
+consume predecessor state. Continuous scenes are assigned explicitly in video
+generation grouping or the fullscreen editor. State extraction and continuity
+optimization belong to those later explicit operations. Background/reference
+asset selection during drafting is separate from continuous-scene grouping.
+
+Beat counts and total planning duration are advisory targets: report deviations
+without blocking Segment generation. Beat prompts should group continuous events,
+short exchanges and necessary reactions together when model duration limits allow;
+speaker changes and cuts belong in Shots, not automatically separate Beats. For
+oversized novel plans, request one model-owned grouping review before Segment
+generation; validate dialogue ownership/order and excerpt coverage, never merge
+creative content mechanically. Publishing new Beats must preserve existing
+prompts and render history. Generate replacement Segments in isolated candidates;
+replace a prior result only when the new prompt succeeds, and retain failed
+attempt diagnostics separately. Archive superseded results rather than deleting
+them before generation.
+
+Scene video batches submit each selected segment as soon as its own prompt,
+duration and ending state are saved. Do not wait for all scene members to finish
+text preparation. A following member depends on the predecessor's saved ending
+state, not its video submission or rendering; pending or failed video dispatch
+must not block subsequent text preparation.
+
+Scene batch selection is the execution and editing boundary. Unchecked segments
+must not be regrouped, have their continuity source changed, or receive prompt,
+timing, state-extraction, or video tasks. Read their saved continuity state only;
+report missing or stale prerequisites instead of automatically preparing them.
+
+Scene batch progress records each segment's first actual task start, final
+completion/failure time, and cumulative child execution seconds. Exclude queued
+and paused time from cumulative execution; preserve clocks across refresh and
+retry. Display timestamps in Asia/Shanghai and label the scope as preparation
+through video submission, separate from cloud rendering. Recover historical
+times only from persisted task clocks; never invent missing timestamps.
+
+After the backend acknowledges a completed browser LLM result, clean up only
+that task's extension-owned tab. Keep backend results and task receipts. Do not
+invoke the global task-center clear/reset for a segment's completion, because
+other segments may still be running. Retry failed tab cleanup and preserve
+unreported replies and user-owned or repurposed tabs.
+
 1. The model is responsible for creation, but must create inside explicit structural boundaries.
 2. Local code is responsible for validating structure, not rewriting plots or repairing creativity.
 3. Only deterministic constraints belong in runtime code:

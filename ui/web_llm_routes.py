@@ -31,6 +31,8 @@ def _extension_auth(request):
 
 
 def _error(exc):
+    if isinstance(exc, bridge.TaskGoneError):
+        return JSONResponse({"ok": False, "code": "TASK_GONE", "message": str(exc)}, status_code=410)
     return JSONResponse({"ok": False, "message": str(exc)}, status_code=403 if isinstance(exc, PermissionError) else 400)
 
 
@@ -45,7 +47,25 @@ def register_web_llm_routes(app):
     def operations(request: Request):
         try:
             _ui_origin(request)
+            if 'limit' in request.query_params:
+                return {'ok': True, **text_jobs.list_jobs_page(request.query_params.get('limit', 50),
+                                                              request.query_params.get('offset', 0))}
             return {'ok':True,'tasks':text_jobs.list_jobs()}
+        except Exception as exc:
+            return _error(exc)
+
+    @app.post('/api/web-llm/beat-segment/retry')
+    async def retry_beat_segment(request: Request):
+        try:
+            _ui_origin(request)
+            payload = await request.json()
+            with pin_runtime():
+                from services.context import get_project_dir
+                if str(get_project_dir().resolve()) != payload.get('runtime'):
+                    raise ValueError('项目已切换，请刷新分段页面')
+                from services.novel_batches import retry_segment
+                item = retry_segment(str(payload['batch_id']), int(payload['segment_index']))
+            return {'ok': True, 'id': item['id'], 'state': item['state']}
         except Exception as exc:
             return _error(exc)
 
@@ -74,6 +94,10 @@ def register_web_llm_routes(app):
         try:
             _ui_origin(request)
             return {'ok':True,'result':text_jobs.result(identifier)}
+        except ValueError as exc:
+            if str(exc) == '任务不存在':
+                return JSONResponse({'ok':False,'code':'OPERATION_NOT_FOUND','message':str(exc)}, status_code=404)
+            return _error(exc)
         except Exception as exc:
             return _error(exc)
 
@@ -100,6 +124,16 @@ def register_web_llm_routes(app):
         except Exception as exc:
             return _error(exc)
 
+    @app.post('/api/web-llm/operations/clear-all')
+    async def clear_all_operations(request: Request):
+        try:
+            _ui_origin(request)
+            if (await request.json()).get('confirm') is not True:
+                raise ValueError('请确认清空所有任务')
+            return {'ok':True, **text_jobs.clear_all_tasks()}
+        except Exception as exc:
+            return _error(exc)
+
     @app.post('/api/web-llm/operations/{identifier}/{action}')
     async def operation_action(identifier: str, action: str, request: Request):
         try:
@@ -116,10 +150,16 @@ def register_web_llm_routes(app):
                         raise
                 elif action == 'retry':
                     old = text_jobs.get(identifier)
+                    if old.get('kind') == 'novel_segment' and old.get('batch_id'):
+                        from services.novel_batches import retry_segment
+                        item = retry_segment(old['batch_id'], int(old['args'][0]))
+                        return {'ok': True, 'id': item['id'], 'state': item['state']}
                     if old['state'] not in ('error','cancelled'):
                         raise ValueError('仅已失败或已取消的任务可以重新提交')
                     if old['kind'] == 'revision_wait':
                         raise ValueError('修正任务不可重发原网页请求；请从分段修正入口重新提交')
+                    if old.get('batch_id'):
+                        old = text_jobs.get(old['batch_id'])
                     from pathlib import Path
                     with pin_runtime((Path(old['source']),old['project'],old['episode'])):
                         item = text_jobs.submit(old['kind'],old['args'],old['editors'])
@@ -179,8 +219,12 @@ def register_web_llm_routes(app):
                     raise ValueError("分段已变化，请刷新预览后重试")
                 from generation.service import get_generation_service
                 from starlette.concurrency import run_in_threadpool
-                await run_in_threadpool(get_generation_service().update_segment_duration, index, payload.get("duration_sec"))
-                return {"ok": True, "snapshot": bridge.segment_snapshot(index)}
+                updated = await run_in_threadpool(get_generation_service().update_segment_duration, index, payload.get("duration_sec"))
+                from generation.pipelines.minimax_h3.editor_draft import reference_revision
+                segment = next(s for s in updated['segments'] if int(s.get('segment_index', 0)) == index)
+                result = bridge.segment_snapshot(index)
+                result['reference_revision'] = reference_revision(segment)
+                return {"ok": True, "snapshot": result}
         except Exception as exc:
             return _error(exc)
 
@@ -194,10 +238,11 @@ def register_web_llm_routes(app):
                 snapshot = bridge.segment_snapshot(index)
                 if payload.get('runtime') != snapshot['runtime'] or payload.get('fingerprint') != snapshot['fingerprint']:
                     raise ValueError('项目、视频或保存的提示词已变化，请刷新预览后重新提交')
-                selected_providers = bridge.routes_for('revision',payload.get('providers') or payload.get('provider') or 'inherit')
+                requested_providers = payload['providers'] if 'providers' in payload else payload.get('provider') or 'inherit'
+                selected_providers = bridge.resolve_page_providers(requested_providers)
                 if selected_providers == ['api']:
                     raise ValueError('视频反馈修正当前使用网页扩展，请选择 DeepSeek、ChatGPT 或豆包')
-                operation = text_jobs.submit('revision_wait',[None,index,payload,snapshot],start=False,hold=True)
+                operation = text_jobs.submit('revision_wait',[None,index,payload,snapshot],start=False,hold=True,page_providers=selected_providers)
                 is_duplicate = bool(operation.get('duplicate'))
                 if is_duplicate:
                     if not operation.get('children'):
@@ -280,7 +325,8 @@ def register_web_llm_routes(app):
         try:
             _extension_auth(request)
             payload = await request.json()
-            bridge.heartbeat(str(payload.get("client_id") or ""), payload.get("providers") or [])
+            bridge.heartbeat(str(payload.get("client_id") or ""), payload.get("providers") or [],
+                             payload.get('capabilities') or [], payload.get('provider_capabilities'))
             return {"ok": True, **bridge.pool_status()}
         except Exception as exc:
             return _error(exc)
@@ -291,7 +337,8 @@ def register_web_llm_routes(app):
             _extension_auth(request)
             payload = await request.json()
             return {"ok": True, "task": bridge.claim(str(payload.get("client_id") or ""),
-                                                      payload.get("providers") or [],tab_id=payload.get('tab_id'))}
+                                                      payload.get("providers") or [],tab_id=payload.get('tab_id'),
+                                                      capabilities=payload.get('capabilities') or [])}
         except Exception as exc:
             return _error(exc)
 

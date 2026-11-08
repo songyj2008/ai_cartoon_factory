@@ -21,6 +21,7 @@ def load_project_asset_assignments(project_name: str | None = None) -> dict[str,
     for kind in ("characters", "backgrounds"):
         values = data.get(kind, []) if isinstance(data, dict) else []
         result[kind] = list(dict.fromkeys(str(x) for x in values if str(x))) if isinstance(values, list) else []
+    result['character_names'] = data.get('character_names', {}) if isinstance(data, dict) and isinstance(data.get('character_names'), dict) else {}
     return result
 
 
@@ -37,6 +38,8 @@ def save_project_asset_assignments(
     except (OSError, ValueError):
         existing = {}
     migrated = legacy_bible_migrated if legacy_bible_migrated is not None else (existing.get("legacy_project_bible_migrated") if isinstance(existing, dict) else None)
+    names = assignments.get('character_names', existing.get('character_names', {}))
+    payload['character_names'] = {key: value for key, value in names.items() if key in payload['characters']} if isinstance(names, dict) else {}
     if migrated is not None:
         payload["legacy_project_bible_migrated"] = bool(migrated)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -115,3 +118,46 @@ def sync_generation_assets(project_name=None):
     """Refresh the generation registry from the project's actual memberships."""
     from ui.project_bible_panel import _sync_project_bible_to_assignments
     _sync_project_bible_to_assignments(project_name or get_current_project_name())
+
+
+def apply_project_character_names(manifest, project_name=None):
+    """Project shared identities into local names without editing source assets."""
+    assignments = load_project_asset_assignments(project_name)
+    names = assignments.get("character_names", {})
+    bound = set(assignments.get("characters") or [])
+    old_names = {}
+    for item in manifest:
+        identity_id = str((item.get("metadata") or {}).get("identity_id") or "")
+        if item.get("type") == "image" and item.get("role"):
+            old_names.setdefault(identity_id, set()).add(str(item["role"]))
+        shared_name = str((item.get("metadata") or {}).get("identity_display_name") or "").strip()
+        if item.get("type") == "image" and shared_name:
+            old_names.setdefault(identity_id, set()).add(shared_name)
+    result = []
+    for raw in manifest:
+        item = dict(raw)
+        meta = dict(raw.get("metadata") or {})
+        identity_id = str(meta.get("identity_id") or "")
+        local = names.get(identity_id) or {}
+        name = str(local.get("display_name") or "").strip()
+        if identity_id not in bound or not name:
+            result.append(item)
+            continue
+        item["metadata"] = meta
+        if item.get("type") == "image":
+            aliases = [*(meta.get("aliases") or []), *(local.get("aliases") or []), name,
+                       *sorted(old_names.get(identity_id, set()))]
+            meta["aliases"] = list(dict.fromkeys(aliases))
+            for key in ("subject_description", "identity_description", "description_cn", "image_description"):
+                if meta.get(key):
+                    text = str(meta[key])
+                    for old in sorted(old_names.get(identity_id, set()), key=len, reverse=True):
+                        if old != name:
+                            text = text.replace(old, name)
+                    meta[key] = text
+            item["label"] = item["role"] = name
+        elif item.get("type") == "audio" and (meta.get("binding_source") == "character_voice" or item.get("source") == "character_library"):
+            item["label"] = name + "参考音色"
+            item["role"] = f"仅用于{name}的音色参考；台词严格使用当前剧情，不复述参考录音内容，其他人物不得使用此音色"
+        result.append(item)
+    return result

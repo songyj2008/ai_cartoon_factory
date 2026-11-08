@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -266,16 +267,45 @@ def load_video_jobs() -> dict[str, Any]:
 
 
 def save_video_jobs(payload: dict[str, Any]) -> None:
+    if payload.get('h3_scene_continuity'):
+        from generation.pipelines.minimax_h3.continuity.revisions import reconcile_ledger_revisions
+        reconcile_ledger_revisions(payload)
     path = get_project_dir() / "video_jobs.json"
-    temp_path = path.with_suffix(".json.tmp")
     with video_jobs_lock():
         from generation.job_schema import normalize_video_jobs_payload
         from workflow.runninghub_history import normalize_runninghub_history
 
         normalize_runninghub_history(payload)
         normalize_video_jobs_payload(payload)
-        temp_path.write_text(json_text(payload), encoding="utf-8")
-        temp_path.replace(path)
+        _write_video_jobs_atomic(path, json_text(payload))
+
+
+def _write_video_jobs_atomic(path: Path, text: str) -> None:
+    """Keep the old JSON intact while Windows readers release replace locks."""
+    temp_path = None
+    try:
+        # Close the handle before replace on Windows. A unique sibling prevents
+        # separate workers from sharing or replacing each other's staging file.
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                dir=path.parent, prefix='.' + path.name + '.', suffix='.tmp',
+                delete=False) as stream:
+            temp_path = Path(stream.name)
+            stream.write(text)
+        for attempt in range(6):
+            try:
+                temp_path.replace(path)
+                return
+            except OSError as exc:
+                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                # Cleanup must not hide the original write/replace failure.
+                pass
 
 
 def existing_segment_video(segment: dict[str, Any]) -> str:

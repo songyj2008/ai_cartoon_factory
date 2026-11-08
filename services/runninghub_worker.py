@@ -4,7 +4,7 @@ from __future__ import annotations
 import atexit
 import threading
 
-from services.context import get_current_episode_name, get_current_project_name, get_project_dir, pin_runtime, OUTPUT_DIR, EPISODES_DIR
+from services.context import capture_runtime, get_project_dir, pin_runtime, OUTPUT_DIR, EPISODES_DIR
 from services.logger import log
 
 
@@ -36,7 +36,7 @@ class RunningHubWorker:
         from workflow.runninghub_sync import sync_runninghub_video_jobs
         from workflow.video_merge import finish_requested_video_merge
 
-        runtimes = {(get_project_dir(), get_current_project_name(), get_current_episode_name())}
+        runtimes = {capture_runtime()}
         if OUTPUT_DIR.exists():
             runtimes.update((path, path.name, '') for path in OUTPUT_DIR.iterdir() if path.is_dir())
         if EPISODES_DIR.exists():

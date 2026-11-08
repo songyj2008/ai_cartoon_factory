@@ -33,6 +33,23 @@ def execute(kind, args):
     from ui import project_handlers as p
     from generation.service import get_generation_service
     phase('准备输入快照')
+    if kind == 'scene_state':
+        from services.scene_state_jobs import build_scene_state_patch
+        return build_scene_state_patch(args[0])
+    if kind == 'opening_continuity':
+        from generation.pipelines.minimax_h3.continuity import build_opening_candidate
+        return build_opening_candidate(args[0])
+    if kind in ('novel_beats', 'novel_segment'):
+        from services.novel_batches import execute_beats, execute_segment
+        result = (execute_beats if kind == 'novel_beats' else execute_segment)(args)
+        phase('校验并保存候选结果')
+        _check_file('beats.json', 'beats')
+        _check_file('video_jobs.json', 'segments' if kind == 'novel_segment' else None)
+        return result
+    if kind == 'video_learning':
+        from services.video_experience import analyze
+        phase('分析已确认成片')
+        return analyze(args[1], args[2])
     if kind == 'revision_wait':
         from services.web_llm_bridge import task_status, TERMINAL
         from services.text_jobs import NeedsAttentionError
@@ -58,6 +75,8 @@ def execute(kind, args):
             if task['status'] == 'complete':
                 break
             if task['status'] == 'timeout':
+                if task.get('timeout_phase') == 'queue':
+                    raise RuntimeError(task['message'])
                 raise NeedsAttentionError('原网页修正任务已超时，无法确认发送状态；请检查原会话，不会自动重发。')
             if task['status'] in TERMINAL:
                 raise RuntimeError(task.get('message') or f"网页任务状态：{task['status']}")
@@ -67,6 +86,18 @@ def execute(kind, args):
         revised = str((task.get('result') or {}).get('revised_prompt') or '').strip()
         if not revised:
             raise ValueError('网页回复缺少修正提示词')
+        review = (task.get('result') or {}).get('revision_validation')
+        if (task.get('input') or {}).get('model_id') == 'minimax_h3_local_ref2va':
+            from generation.pipelines.minimax_h3.revision_review import compare_revision
+            from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+            revised = H3PromptCompiler.normalize_visible_role_lines(revised)
+            review = compare_revision((task.get('input') or {}).get('base_prompt') or '', revised,
+                manifest=(task.get('metadata') or {}).get('speech_manifest'),
+                target_duration_sec=(task.get('input') or {}).get('target_duration_sec'))
+        if review and review.get('blocking_issues'):
+            return {'message': '修正版结构需处理，已保留完整候选，未覆盖原稿。',
+                    'revised_prompt': revised, 'changes': (task.get('result') or {}).get('changes') or [],
+                    'revision_validation': review, 'web_task_id': child_id, 'segment_index': index}
         phase('保存修正候选')
         updated_at = task.get('updated_at')
         if isinstance(updated_at, (int, float)):
@@ -87,6 +118,7 @@ def execute(kind, args):
         return {'message':'修正提示词已生成候选，可在任务面板应用到原项目。',
                 'revised_prompt':revised,'changes':(task.get('result') or {}).get('changes') or [],
                 'prompt_provenance':provenance,
+                'revision_validation':review,
                 'web_task_id':child_id,'segment_index':index}
     if kind == 'story':
         topic, _story, duration, custom = args
@@ -138,7 +170,7 @@ def execute(kind, args):
         if kind != 'split':
             _check_file('video_jobs.json','segments')
     elif kind == 'source_replan':
-        phase('按剧情上下文重新规划')
+        phase('重新规划时长')
         from workflow.video_merge import load_video_jobs, save_video_jobs
         import copy
         jobs = load_video_jobs()
@@ -151,11 +183,94 @@ def execute(kind, args):
         beat = next((row for row in beats_data['beats'] if isinstance(row,dict) and uid and str(row.get('beat_uid') or '') == uid),None)
         if beat is None and 0 < idx <= len(beats_data['beats']): beat = beats_data['beats'][idx-1]
         if not isinstance(beat,dict): raise ValueError('找不到分段对应的 Beat')
+        if len(args) > 2 and args[2].get('timing_only') is True:
+            from generation.job_schema import resolved_model_id
+            from generation.pipelines.minimax_h3.prompt_retimer import retime_h3_prompt
+            from workflow.runninghub_queue import has_active_submission
+
+            if resolved_model_id(segment, jobs) != 'minimax_h3_local_ref2va':
+                raise ValueError('重新规划时长仅支持 H3 分段')
+            if has_active_submission(segment):
+                raise ValueError('本段视频正在生成，请完成后再重新规划时长')
+            options = args[2]
+            manifest = (segment.get('generation_config') or {}).get('asset_manifest')
+            if manifest is None:
+                manifest = (segment.get('job') or {}).get('asset_manifest') or []
+            planned = retime_h3_prompt(options.get('editor_prompt'), idx,
+                                      reference_duration_sec=options['duration_sec'], asset_manifest=manifest, draft_mode=True)
+            from services.duration_planning_llm import result_source
+            timing_source = result_source(idx)
+            duration = planned['duration_sec']
+            # Only this Beat changes. The generic duration synchronizer also
+            # updates unrelated stale segments and patches original workflows.
+            beat['estimated_duration_sec'] = duration
+            for key in ('duration_sec', 'h3_duration_sec'):
+                if key in beat:
+                    beat[key] = duration
+            beats_data['total_duration_sec'] = sum(float(row.get('estimated_duration_sec') or row.get('duration_sec') or 0)
+                                                  for row in beats_data['beats'] if isinstance(row, dict))
+            segment['generation_config'] = {**(segment.get('generation_config') or {}), 'duration_sec': duration}
+            segment['h3_prompt_source'] = 'duration_replan'
+            segment.pop('h3_prompt_plan', None)
+            segment['h3_duration_adjustment'] = {'reference_sec': options['duration_sec'], 'duration_sec': duration,
+                                                 **timing_source}
+            _save('beats.json', beats_data)
+            _save('video_jobs.json', jobs)
+            service = get_generation_service()
+            service.update_segment_generation_config(idx, asset_manifest=manifest, prompt_override=planned['prompt'],
+                prompt_provenance={'source': 'duration_replan', 'provider': timing_source.get('provider') or '时长规划',
+                                   **({'model': timing_source['model']} if timing_source.get('model') else {})})
+            # The video button rebuilds the workflow from this custom prompt.
+            # Do not create workflows in the disposable candidate directory.
+            from generation.pipelines.minimax_h3.pipeline import MiniMaxH3Ref2VAPipeline, H3_FPS
+            completed = _check_file('video_jobs.json', 'segments')
+            target = next(row for row in completed['segments'] if int(row.get('segment_index') or 0) == idx)
+            saved_prompt = str((target.get('generation_config') or {}).get('prompt_override') or planned['prompt'])
+            frames = MiniMaxH3Ref2VAPipeline._aligned_frame_count(duration)
+            target['job'] = {**(target.get('job') or {}), 'duration_sec': duration, 'fps': H3_FPS,
+                             'aligned_frame_count': frames, 'total_frames': frames,
+                             'prompt': saved_prompt, 'final_prompt': saved_prompt}
+            if 'director_prompt' in target['job']:
+                target['job']['director_prompt'] = saved_prompt
+            target['compiled_prompt_snapshot'] = saved_prompt
+            from generation.pipelines.minimax_h3.planning_drafts import refresh_saved_prompt
+            refresh_saved_prompt(target, saved_prompt)
+            target['requested_media_spec'] = {**(target.get('requested_media_spec') or {}),
+                'duration_sec': duration, 'requested_duration_sec': duration, 'fps': H3_FPS,
+                'aligned_frame_count': frames, 'aligned_duration_sec': frames / H3_FPS}
+            completed['total_duration_sec'] = sum(float((row.get('job') or {}).get('duration_sec') or 0)
+                                                  for row in completed['segments'] if isinstance(row, dict))
+            _save('video_jobs.json', completed)
+            return {'message': f'已重新规划为 {duration} 秒，并同步对应 Beat', 'duration_sec': duration,
+                    'duration_reason': planned['duration_reason'], **timing_source}
         excerpt = str(args[1] or '')
         beat['source_excerpt'] = excerpt; segment['source_excerpt'] = excerpt
+        if len(args) > 2:
+            # Page intent wins even when an older job's duration and its
+            # generation config were already out of sync.
+            segment['generation_config'] = {**(segment.get('generation_config') or {}),
+                                            'duration_sec': args[2]['duration_sec']}
+            if args[2].get('auto_duration') is True:
+                segment['h3_auto_duration'] = True
+            if args[2].get('editor_prompt'):
+                segment['h3_editor_prompt'] = args[2]['editor_prompt']
+            if 'asset_manifest' in args[2]:
+                segment['generation_config']['asset_manifest'] = args[2]['asset_manifest']
         _save('beats.json',beats_data); _save('video_jobs.json',jobs)
+        if len(args) > 2:
+            # The candidate still references the original workflow paths.
+            # Replanning builds new graphs in the isolated work directory.
+            get_generation_service().update_segment_duration(idx, args[2]['duration_sec'], patch_workflows=False)
+            beats_data = _check_file('beats.json', 'beats')
         get_generation_service().regenerate_segment_prompt(beats_data,idx)
-        _check_file('video_jobs.json','segments')
+        completed = _check_file('video_jobs.json','segments')
+        if len(args) > 2 and args[2].get('auto_duration') is True:
+            planned = next(row for row in completed['segments'] if int(row.get('segment_index') or 0) == idx)
+            actual_duration = (planned.get('job') or {}).get('duration_sec')
+            get_generation_service().update_segment_duration(idx, actual_duration, patch_workflows=False)
+            adjustment = planned.get('h3_duration_adjustment') or {}
+            return {'message': f'本段按台词重新规划为 {actual_duration} 秒', 'duration_sec': actual_duration,
+                    'duration_reason': adjustment.get('reason', '')}
     elif kind == 'pipeline':
         from workflow.master import one_click_full_generation
         phase('生成剧情、Beats 及分段提示词')

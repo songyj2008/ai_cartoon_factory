@@ -2,6 +2,21 @@
 
 APP_JS = r"""
 window.AICF = window.AICF || {};
+window.AICF.readJsonResponse = async function(response, url) {
+    var data;
+    try {
+        var text = await response.text();
+        data = JSON.parse(text);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid response');
+    } catch (error) {
+        var path = String(url || '').split('?')[0];
+        var failure = new Error((response.status >= 500 ? '后台服务异常' : '接口未返回有效 JSON') +
+            '（HTTP ' + response.status + '，' + path + '）。当前编辑内容已保留，请查看后台错误日志。');
+        failure.status = response.status; failure.code = 'INVALID_API_RESPONSE'; failure.endpoint = path;
+        throw failure;
+    }
+    return data;
+};
 window.AICF.bindProjectAssetCardSelection = function() {
     if (window.__AICF_PROJECT_ASSET_SELECTION_BOUND__) return;
     window.__AICF_PROJECT_ASSET_SELECTION_BOUND__ = true;
@@ -1297,6 +1312,16 @@ window.AICF.triggerSegmentRegen = function(segmentIndex, triggerButton) {
     });
     return false;
 };
+window.AICF.retryBeatSegment = function(index, button) {
+    if (window.AICF.archiveReadOnly) return false;
+    const card = button.closest('.group-card');
+    button.disabled = true;
+    fetch('/api/web-llm/beat-segment/retry', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({segment_index:index, batch_id:button.dataset.batchId, runtime:card.dataset.runtime})})
+      .then(r=>r.json()).then(data=>{if(!data.ok)throw new Error(data.error||data.message||'重试失败');})
+      .catch(error=>alert(error.message)).finally(()=>{button.disabled=false;});
+    return false;
+};
 window.AICF.playUsageAttemptVideo = function(row) {
     var url = row && row.dataset ? row.dataset.videoUrl : '';
     if (!url) {
@@ -1430,7 +1455,7 @@ window.AICF.mountVideoChannels = async function(segmentIndex) {
         if (!response.ok || !data.ok) throw new Error(data.message || '无法读取视频渠道');
         if (String(modal.dataset.segmentIndex) !== String(segmentIndex) || String(modal.dataset.h3Session || '') !== channelSession || !field.isConnected) return;
         field._channels = data.channels || [];
-        hint.textContent = '渠道按分段自动保存，重新生成时使用已保存的渠道。';
+        hint.textContent = '默认使用 RunningHub；切换后按分段自动保存。';
         field._channels.forEach(function(item) {
             var label = document.createElement('label');
             label.style.cssText = 'display:block;padding:8px;margin:6px 0;border:1px solid #dce2ea;border-radius:6px';
@@ -1468,10 +1493,23 @@ window.AICF.chooseVideoChannel = async function(segmentIndex) {
     var modal = document.getElementById('aicf-prompt-modal');
     var field = modal && String(modal.dataset.segmentIndex) === String(segmentIndex)
         ? modal.querySelector('.video-channel-options') : null;
-    var selected = field && field.querySelector('input:checked:not(:disabled)');
     if(field && field._savePending)await field._savePending;
-    if (!selected) throw new Error('请先在全屏编辑器右侧选择视频生成渠道。');
-    return (field._channels || []).find(function(item) { return item.id === selected.value; });
+    var selected = field && field.querySelector('input:checked');
+    var channel;
+    if (selected) {
+        channel = (field._channels || []).find(function(item) { return item.id === selected.value; });
+    } else {
+        // Card actions also work before the fullscreen picker has mounted.
+        // The server owns saved selection and defaults missing values to RunningHub.
+        var response = await fetch('/api/video-channels/segments/' + encodeURIComponent(segmentIndex));
+        var data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.message || '无法读取视频渠道');
+        var channelId = data.selected || 'runninghub';
+        channel = (data.channels || []).find(function(item) { return item.id === channelId; });
+    }
+    if (!channel) throw new Error('已保存的视频渠道不存在，请检查渠道配置。');
+    if (!channel.available) throw new Error(channel.reason || '当前视频渠道暂不可用');
+    return channel;
 };
 window.AICF.watchWebVideoTask = function(segmentIndex, taskId) {
     if (!taskId) return;
@@ -1572,7 +1610,6 @@ window.AICF.triggerSegmentVideoRegenViaGradio = function(segmentIndex, payloadOv
     return true;
 };
 window.AICF.toggleSegmentVideoOk = async function(segmentIndex, currentValue, button) {
-    if (window.AICF.archiveReadOnly) return false;
     if (button && button.disabled) return false;
     var card = button && button.closest ? button.closest('.group-card') : null;
     var feedback = card ? card.querySelector('.segment-action-feedback') : null;
@@ -1597,6 +1634,14 @@ window.AICF.toggleSegmentVideoOk = async function(segmentIndex, currentValue, bu
             body: JSON.stringify(payload)
         });
         window.AICF.replaceSegmentCardFromResponse(segmentIndex, response, card, '.action-utility');
+        if(response.learning) {
+            var updatedCard = document.querySelector('.group-card[data-segment-index="'+segmentIndex+'"]') || window.AICF.segmentCardFromButton(button);
+            var status = updatedCard && updatedCard.querySelector('.segment-action-feedback');
+            if(status) {
+                status.textContent = response.learning.message;
+                status.classList.toggle('is-error', response.learning.state==='error');
+            }
+        }
     } catch (error) {
         var message = error && error.message ? error.message : '标记视频OK失败，请重试';
         if (feedback) {
@@ -1795,7 +1840,9 @@ window.AICF.updateSegmentCardState = function(segmentIndex, response) {
     var card = document.querySelector('.group-card[data-segment-index="' + String(segmentIndex || '') + '"]');
     if (!segment || !card) return card;
     var status = String(segment.status || '').toLowerCase();
+    if (window.AICF._h3VideoRegenPending && window.AICF._h3VideoRegenPending[String(segmentIndex)]) status = 'submitting';
     var statusMap = {
+        submitting: ['提交中', 'status-running'],
         workflow_ready: ['未生成', 'status-pending'],
         needs_regenerate: ['需要重新生成', 'status-stale'],
         stale: ['需要重新生成', 'status-stale'],
@@ -1823,10 +1870,12 @@ window.AICF.updateSegmentCardState = function(segmentIndex, response) {
     var matches = window.AICF.promptTextMatches(currentPrompt, revision.prompt);
     var saveBadge = card.querySelector('[data-prompt-save-status]');
     if (saveBadge) {
+        var promptSaved = segment.prompt_saved !== false;
         saveBadge.classList.remove('status-success', 'status-pending');
-        saveBadge.classList.add(matches ? 'status-success' : 'status-pending');
-        saveBadge.textContent = revision.prompt ? (matches ? '提示词已保存' : '提示词未保存') : '提示词暂无修正版';
-        saveBadge.title = revision.prompt ? (matches ? 'H3 提示词与最新修正版一致' : 'H3 提示词与最新修正版不一致') : '还没有可用于比对的修正后完整提示词';
+        saveBadge.classList.add(promptSaved ? 'status-success' : 'status-pending');
+        saveBadge.textContent = promptSaved ? '提示词已保存' : '提示词未保存';
+        saveBadge.title = promptSaved ? '提示词已保存' : '提示词有未保存修改';
+        if (revision.prompt) saveBadge.title += '；' + (matches ? '与最新修正版一致' : '与最新修正版不一致');
     }
     var versionData = {current:config.prompt_version_info || {}, revision:revision, matches:matches};
     var versionSource = card.querySelector('.h3-prompt-version-source');
@@ -1934,6 +1983,7 @@ window.AICF.saveSegmentPrompt = async function(segmentIndex, button, overrideTex
         if (!response.ok || !result.ok) {
             throw new Error(result.message || '保存分段提示词失败');
         }
+        window.AICF.updateSegmentCardState(payload.segment_index, result);
         if (window.AICF.segmentPromptDrafts) delete window.AICF.segmentPromptDrafts[payload.segment_index];
         if (button) button.textContent = 'Saved';
         return result;
@@ -2006,6 +2056,8 @@ window.AICF.copySegmentSourceExcerpt = async function(button) {
 };
 window.AICF.materialDataFromButton = function(button) {
     var root = button && button.closest ? button.closest('.prompt-block') : null;
+    // H3 opens from the card header, outside the prompt block.
+    if (!root && button && button.closest) root = button.closest('.group-card');
     var source = root ? root.querySelector('.segment-material-source') : null;
     if (!source || !source.dataset.materials) return {characters: [], backgrounds: [], reference_roles: [], reference_image_ids: {}, scene_id: ''};
     try {
@@ -2437,6 +2489,20 @@ window.AICF.handlePromptModalKeydown = function(event) {
         first.focus();
     }
 };
+window.AICF.resetPromptModalOperationState = function(ov) {
+    // Busy flags belong to the previous editor session. Keep actual save
+    // promises intact so an accepted backend write still serializes correctly.
+    ov._editorBusy = false;
+    ov._operationPending = false;
+    ov._promptTaskBusy = false;
+    delete ov._promptTaskOwner;
+    ov._sceneStateBusy = false;
+    ov._h3SceneConfigBusy = false;
+    ov._sceneStateTask = null;
+    ov._sceneStatePending = Promise.resolve();
+    delete ov._sceneCreatePending;
+    delete ov._ensureScene;
+};
 window.AICF.openPromptModalFromButton = function(button) {
     // Finish the previous session before cloning another editor. A template's
     // inert content can survive Gradio pagination and is never data authority.
@@ -2480,7 +2546,7 @@ window.AICF.openPromptModalFromButton = function(button) {
         ov = document.createElement('div');
         ov.id = 'aicf-prompt-modal';
         ov.className = 'aicf-prompt-modal';
-        ov.innerHTML = '<div class="aicf-prompt-modal-card" role="dialog" aria-modal="true" aria-labelledby="aicf-prompt-modal-title"><div class="aicf-prompt-modal-head"><div class="aicf-prompt-modal-context"><strong id="aicf-prompt-modal-title">导演分镜全屏编辑</strong><div class="aicf-prompt-modal-segment" aria-label="当前编辑分段"><span class="aicf-prompt-modal-part">当前分段</span><span class="aicf-prompt-modal-segment-title">未命名分段</span></div></div><div class="aicf-prompt-modal-actions"><button class="aicf-prompt-modal-save" onclick="window.AICF.savePromptModal()">保存</button><button class="aicf-prompt-modal-replan" hidden onclick="window.AICF.replanPromptModal()">保存上下文并重新规划</button><button class="aicf-prompt-modal-force-save" hidden title="按页面当前图片顺序和提示词保存，并更新素材绑定" onclick="window.AICF.savePromptModal(true)">强制保存</button><button class="aicf-prompt-modal-close" aria-label="关闭" title="关闭" onclick="window.AICF.closePromptModal()">&#10005;</button></div></div><div class="aicf-prompt-modal-content"><aside class="aicf-prompt-material-panel"><div class="aicf-material-panel-title">本段参考素材</div><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>人物参考图</strong><span class="aicf-character-count">已选 0/4</span></div><div class="aicf-material-grid aicf-character-materials"></div></section><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>背景参考图</strong><span>单选</span></div><div class="aicf-material-grid aicf-background-materials"></div></section><div class="aicf-material-feedback" role="status" aria-live="polite"></div></aside><div class="aicf-prompt-editor-pane"><div class="aicf-prompt-source-context"><label for="aicf-prompt-source-excerpt">剧情上下文（source_excerpt）</label><small>补充理解本段所需的前因背景；镜头仍只表现当前 Beat。</small><textarea id="aicf-prompt-source-excerpt" spellcheck="false" aria-label="剧情上下文"></textarea></div><div class="aicf-prompt-editor-head"><label for="aicf-prompt-modal-editor">导演分镜提示词</label><small>仅在此处编辑本段提示词；可从项目已选人物中最多选择 4 张参考图，保存后会同步参考绑定。</small><div class="aicf-prompt-version-meta" hidden></div><div class="aicf-prompt-modal-feedback" role="status" aria-live="polite"></div></div><textarea id="aicf-prompt-modal-editor" class="aicf-prompt-modal-body" spellcheck="false"></textarea></div></div></div>';
+        ov.innerHTML = '<div class="aicf-prompt-modal-card" role="dialog" aria-modal="true" aria-labelledby="aicf-prompt-modal-title"><div class="aicf-prompt-modal-head"><div class="aicf-prompt-modal-context"><strong id="aicf-prompt-modal-title">导演分镜全屏编辑</strong><div class="aicf-prompt-modal-segment" aria-label="当前编辑分段"><span class="aicf-prompt-modal-part">当前分段</span><span class="aicf-prompt-modal-segment-title">未命名分段</span></div></div><div class="aicf-prompt-modal-actions"><button class="aicf-prompt-modal-save" onclick="window.AICF.savePromptModal()">保存</button><button class="aicf-prompt-modal-replan" hidden onclick="window.AICF.replanPromptModal()">保存并重新规划时长</button><button class="aicf-prompt-modal-force-save" hidden title="按页面当前图片顺序和提示词保存，并更新素材绑定" onclick="window.AICF.savePromptModal(true)">强制保存</button><button class="aicf-prompt-modal-close" aria-label="关闭" title="关闭" onclick="window.AICF.closePromptModal()">&#10005;</button></div></div><div class="aicf-prompt-modal-content"><aside class="aicf-prompt-material-panel"><div class="aicf-material-panel-title">本段参考素材</div><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>人物参考图</strong><span class="aicf-character-count">已选 0/4</span></div><div class="aicf-material-grid aicf-character-materials"></div></section><section class="aicf-material-section"><div class="aicf-material-section-head"><strong>背景参考图</strong><span>单选</span></div><div class="aicf-material-grid aicf-background-materials"></div></section><div class="aicf-material-feedback" role="status" aria-live="polite"></div></aside><div class="aicf-prompt-editor-pane"><div class="aicf-prompt-source-context"><label for="aicf-prompt-source-excerpt">剧情上下文（source_excerpt）</label><small>补充理解本段所需的前因背景；镜头仍只表现当前 Beat。</small><textarea id="aicf-prompt-source-excerpt" spellcheck="false" aria-label="剧情上下文"></textarea></div><div class="aicf-prompt-editor-head"><label for="aicf-prompt-modal-editor">导演分镜提示词</label><small>仅在此处编辑本段提示词；可从项目已选人物中最多选择 4 张参考图，保存后会同步参考绑定。</small><div class="aicf-prompt-version-meta" hidden></div><div class="aicf-prompt-modal-feedback" role="status" aria-live="polite"></div></div><textarea id="aicf-prompt-modal-editor" class="aicf-prompt-modal-body" spellcheck="false"></textarea></div></div></div>';
         var modalContent = ov.querySelector('.aicf-prompt-modal-content');
         var ltxPanel = ov.querySelector('.aicf-prompt-material-panel');
         var editorPane = ov.querySelector('.aicf-prompt-editor-pane');
@@ -2504,6 +2570,13 @@ window.AICF.openPromptModalFromButton = function(button) {
         ov._h3AutosaveTimer = null;
     }
     ov._h3Session = Number(ov._h3Session || 0) + 1;
+    window.AICF.resetPromptModalOperationState(ov);
+    // Keep tracking the same segment, without blocking an unrelated editor.
+    if(ov._sourceReplanPending && String(ov.dataset.segmentIndex)===String(segmentIndex) &&
+        ov._sourceReplanPending.runtime===String(window.AICF.promptRuntimeRevision || 0)) {
+        ov._sourceReplanPending.session=String(ov._h3Session);
+    } else delete ov._sourceReplanPending;
+    delete ov._syncSourceReplan;
     ov._previousFocus = button || document.activeElement;
     ov._sourceButton = button || null;
     ov._directorPrompt = String(promptData.directorPrompt || '');
@@ -2513,6 +2586,8 @@ window.AICF.openPromptModalFromButton = function(button) {
     ov.dataset.segmentIndex = segmentIndex || '';
     ov.dataset.modelId = modelId;
     ov.dataset.h3Session = String(ov._h3Session);
+    window.AICF.setPromptModalFeedback('', false);
+    if(window.AICF.renderH3DurationPlanning)window.AICF.renderH3DurationPlanning(ov,null);
     delete ov.dataset.promptRevisionPrompt;
     delete ov.dataset.promptProvenance;
     window.AICF.updatePromptModalSegmentContext(ov, button);
@@ -2539,9 +2614,18 @@ window.AICF.openPromptModalFromButton = function(button) {
     }
     if (modalTitle) modalTitle.textContent = isH3 ? 'H3 视频提示词全屏编辑' : '导演分镜全屏编辑';
     if (promptLabel) promptLabel.textContent = isH3 ? 'H3 视频提示词' : '导演分镜提示词';
+    var promptCount = ov.querySelector('.aicf-prompt-char-count');
+    if (!promptCount && promptLabel) {
+        promptCount = document.createElement('span');
+        promptCount.className = 'aicf-prompt-char-count';
+        promptCount.setAttribute('role', 'status');
+        promptCount.setAttribute('aria-live', 'polite');
+        promptLabel.insertAdjacentElement('afterend', promptCount);
+    }
+    if (promptCount) { promptCount.hidden = !isH3; promptCount.textContent = '计算中…'; }
     if (promptHelp) {
         promptHelp.textContent = isH3
-            ? '左侧配置图片、视频和音频参考；右侧编辑最终提交给 H3 的提示词。保存后会重新编译本段工作流。'
+            ? '此处编辑镜头、动作和台词正文；主体、参考及音色信息在“自动参考信息”中只读查看，由素材和入画名单生成。'
             : '此处与页面提示词框编辑同一内容。可从项目已选人物中最多选择 4 张参考图；保存后会同步参考绑定。';
     }
     var promptVersionSource = segmentCard && segmentCard.querySelector('.h3-prompt-version-source');
@@ -2551,6 +2635,7 @@ window.AICF.openPromptModalFromButton = function(button) {
     if (promptVersionMeta) promptVersionMeta.hidden = !isH3;
     if (isH3) window.AICF.renderH3PromptVersion(ov, promptVersionData);
     var body = ov.querySelector('.aicf-prompt-modal-body');
+    if (window.AICF.installH3PromptEditor) window.AICF.installH3PromptEditor(ov, isH3);
     if (body) {
         body.value = ov._directorPrompt;
         body.readOnly = !!window.AICF.archiveReadOnly;
@@ -2572,6 +2657,8 @@ window.AICF.openPromptModalFromButton = function(button) {
     if (forceSaveBtn) { forceSaveBtn.hidden = !isH3; forceSaveBtn.disabled = !!window.AICF.archiveReadOnly; }
     if (isH3) {
         if (window.AICF.renderH3ProjectImages) window.AICF.renderH3ProjectImages(h3ConfigPanel, materialData);
+        window.AICF.scheduleH3PromptCount(ov);
+        if (body) body.oninput = function() { window.AICF.scheduleH3PromptCount(ov); };
         if (window.AICF.refreshH3AssetCount) window.AICF.refreshH3AssetCount(h3ConfigPanel);
         if (h3ConfigPanel) {
             h3ConfigPanel.querySelectorAll('.h3-asset-input').forEach(function(input) {
@@ -2588,10 +2675,53 @@ window.AICF.openPromptModalFromButton = function(button) {
     window.AICF.mountVideoChannels(ov.dataset.segmentIndex);
     setTimeout(function() { if (body && !window.AICF.archiveReadOnly) body.focus(); }, 30);
 };
-window.AICF.savePromptModal = async function(forceSave) {
+window.AICF.savePromptModal = async function(forceSave, contentOnly) {
     if (window.AICF.archiveReadOnly) return;
     var ov = document.getElementById('aicf-prompt-modal');
     if (!ov) return;
+    if (ov._promptTaskBusy || ov._editorBusy) {
+        window.AICF.setPromptModalFeedback('正在保存或提交，请稍候。', false);
+        return;
+    }
+    if (ov._sourceReplanPending) {
+        var waitingSession = String(ov.dataset.h3Session || '');
+        try { if (ov._syncSourceReplan) await ov._syncSourceReplan(); }
+        catch (error) { window.AICF.setPromptModalFeedback(error.message || '同步时长规划失败', true); return; }
+        if (String(ov.dataset.h3Session || '') !== waitingSession) return;
+        if (ov._sourceReplanPending) {
+            window.AICF.setPromptModalFeedback('时长规划正在执行，请等待结果同步后再保存。', false);
+            return;
+        }
+    }
+    if (contentOnly === true && (!ov._staleOptimizationDraft || ov._staleOptimizationDraft !== ov._editorDraft)) {
+        window.AICF.setPromptModalFeedback('优化草稿已变化，请重新保存并检查当前状态。', true);
+        return;
+    }
+    if (ov._shotEditor && ov._shotEditor.dirty && ov._shotEditor.stale &&
+        ov._shotEditor.documents.some(function(doc) { return doc.new || doc.removed || doc.structure_changed; })) {
+        window.AICF.setPromptModalFeedback('当前文字与未保存的跨段 Shot 结构不一致，请先保存结构修改或恢复 Shot 草稿；当前文字已保留。', true);
+        return;
+    }
+    var forcedEditorDraft = forceSave === true || contentOnly === true ? ov._editorDraft : null;
+    if (ov._editorDraft && !forcedEditorDraft) {
+        try { await window.AICF.saveH3EditorDraft(ov, true); }
+        catch (error) { window.AICF.setPromptModalFeedback(error.message || '保存完整编辑稿失败', true); }
+        return;
+    }
+    if (!forcedEditorDraft && ov._shotEditor && ov._shotEditor.stale && typeof ov._shotEditor.read === 'function') {
+        try {
+            if (!await ov._shotEditor.read(false)) throw new Error('当前文字无法读取为分镜，尚未保存，请检查镜头格式。');
+        } catch (error) { window.AICF.setPromptModalFeedback(error.message, true); return; }
+    }
+    if (ov._shotEditor && ov._shotEditor.dirty && !ov._shotEditor.stale) {
+        window.AICF.setPromptModalFeedback('正在保存 Shot 草稿…', false);
+        try {
+            var shotSaved = await ov._shotEditor.save();
+            if (!shotSaved) throw new Error('Shot 草稿未提交，请重新打开编辑器后重试；请先复制备份当前文字。');
+        }
+        catch (error) { window.AICF.setPromptModalFeedback(error.message || 'Shot 保存失败', true); }
+        return;
+    }
     if (ov._promptRefreshPending) {
         window.AICF.setPromptModalFeedback('参考图提示词正在更新，请稍候。', false);
         return;
@@ -2600,6 +2730,7 @@ window.AICF.savePromptModal = async function(forceSave) {
     var modalSession = String((ov.dataset && ov.dataset.h3Session) || '');
     var body = ov.querySelector('.aicf-prompt-modal-body');
     var directorText = body ? String(body.value || '').trim() : '';
+    window.AICF.setPromptModalFeedback('正在保存当前提示词…', false);
     try { await window.AICF.savePromptSourceExcerpt(false); }
     catch (error) { window.AICF.setPromptModalFeedback(error.message || '保存剧情上下文失败', true); return; }
     if (!directorText) {
@@ -2615,20 +2746,26 @@ window.AICF.savePromptModal = async function(forceSave) {
     if (String(ov.dataset.modelId || '') === 'minimax_h3_local_ref2va') {
         try {
             var h3Response = await window.AICF.saveH3GenerationConfig(segmentIndex, ov.querySelector(forceSave === true ? '.aicf-prompt-modal-force-save' : '.aicf-prompt-modal-save'), ov, forceSave === true);
+            if (!h3Response) throw new Error('当前分段保存未完成，编辑稿仍保留，请重试。');
             if (
                 String((ov.dataset && ov.dataset.segmentIndex) || '') !== String(segmentIndex)
                 || String((ov.dataset && ov.dataset.h3Session) || '') !== modalSession
             ) return;
+            if (forcedEditorDraft && ov._editorDraft === forcedEditorDraft) {
+                window.AICF.clearH3EditorDraft(ov);
+                if (h3Response.editor_snapshot && window.AICF.syncH3EditorBaseline) window.AICF.syncH3EditorBaseline(ov, h3Response.editor_snapshot);
+                else if (window.AICF.refreshH3EditorBaseline) await window.AICF.refreshH3EditorBaseline(ov);
+                if (window.AICF.recordH3OptimizationContentSave) await window.AICF.recordH3OptimizationContentSave(ov, forcedEditorDraft.draft.optimization_attempt_id);
+            }
             var savedDirectorText = String(h3Response && h3Response.canonical_prompt || directorText);
             var h3CardTextarea = window.AICF.segmentEditorFromButton(ov._sourceButton, segmentIndex);
             if (h3CardTextarea) {
                 h3CardTextarea.value = savedDirectorText;
-                h3CardTextarea.dispatchEvent(new Event('input', {bubbles: true}));
             }
             var h3Card = window.AICF.segmentCardFromButton(ov._sourceButton);
             var h3PromptSource = h3Card && h3Card.querySelector('.h3-card-prompt-source');
             if (h3PromptSource) h3PromptSource.textContent = savedDirectorText;
-            window.AICF.setPromptModalFeedback(forceSave === true ? '已按页面图片顺序和提示词强制保存，素材绑定已更新' : 'H3 提示词与参考配置已保存', false);
+            window.AICF.setPromptModalFeedback(contentOnly === true ? '当前文字与素材已保存；未确认过期的优化状态。' : forceSave === true ? '已按页面图片顺序和提示词强制保存，素材绑定已更新' : 'H3 提示词与参考配置已保存', false);
             setTimeout(function() {
                 if (
                     String((ov.dataset && ov.dataset.segmentIndex) || '') === String(segmentIndex)
@@ -2661,7 +2798,6 @@ window.AICF.savePromptModal = async function(forceSave) {
         var cardTextarea = window.AICF.segmentEditorFromButton(ov._sourceButton, segmentIndex);
         if (cardTextarea) {
             cardTextarea.value = directorText;
-            cardTextarea.dispatchEvent(new Event('input', {bubbles: true}));
         }
         window.AICF.setPromptModalFeedback(materialsChanged ? '已保存提示词和本段参考素材' : '已保存提示词', false);
         setTimeout(function() {
@@ -2674,32 +2810,135 @@ window.AICF.savePromptModal = async function(forceSave) {
         window.AICF.setPromptModalFeedback(error && error.message ? error.message : '保存失败', true);
     }
 };
-window.AICF.savePromptSourceExcerpt = async function(replan) {
+window.AICF.readPageLLMProviders = function(ov) {
+    if (ov._h3CompositeRun && ov._h3CompositeRun.providers) return ov._h3CompositeRun.providers.slice();
+    var providers = Array.from(ov.querySelectorAll('.review-provider-options input:checked'))
+        .filter(function(input) { return !input.disabled; }).map(function(input) { return input.value; });
+    if (!providers.length) throw new Error('请先勾选本页面使用的 LLM');
+    return providers;
+};
+window.AICF.readPromptReplanOptions = function(ov) {
+    var durationField = ov && ov.querySelector('.review-duration');
+    if (!durationField || durationField.disabled) throw new Error('本段时长设置尚未加载，请稍后重试');
+    var duration = Number(durationField.value);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('本段参考时长请输入正数，视频提交范围为 4–15 秒');
+    var providers = Array.from(ov.querySelectorAll('.review-provider-options input:checked'))
+        .filter(function(input) { return !input.disabled; })
+        .map(function(input) { return input.value; });
+    var apiInput = ov.querySelector('.review-timing-api');
+    var timingApi = !!(apiInput && apiInput.checked && !apiInput.disabled);
+    if (!providers.length && !timingApi) throw new Error('请勾选网页 LLM 或 DeepSeek API（仅规划时长）');
+    return {duration_sec:duration, providers:providers, timing_api:timingApi};
+};
+window.AICF.savePromptBeforeTask = async function(ov) {
+    const A=window.AICF,session=String(ov.dataset.h3Session),index=String(ov.dataset.segmentIndex),runtime=String(A.promptRuntimeRevision||0);
+    const valid=()=>ov.classList.contains('open')&&String(ov.dataset.h3Session)===session&&String(ov.dataset.segmentIndex)===index&&String(A.promptRuntimeRevision||0)===runtime;
+    if(A.archiveReadOnly)throw new Error('当前分段只读，不能保存并提交。');
+    if(ov._h3AutosaveTimer){clearTimeout(ov._h3AutosaveTimer);ov._h3AutosaveTimer=null;}
+    if(A.h3AutosavePending)await A.h3AutosavePending;
+    if(ov._h3SavePending)await ov._h3SavePending;
+    if(!valid())throw new Error('编辑分段已切换，已取消提交。');
+    if(ov._editorDraft){await A.saveH3EditorDraft(ov,true);if(ov._editorDraft)throw new Error('完整编辑稿尚未保存，本次未提交');}
+    if(!valid())throw new Error('编辑分段已切换，已取消提交。');
+    if(String(ov.dataset.modelId)!=='minimax_h3_local_ref2va') {
+        await ov._savePromptDuration();await A.savePromptSourceExcerpt(false);
+        await A.saveSegmentPrompt(index,null,ov.querySelector('.aicf-prompt-modal-body').value,{});
+        return {segment_index:Number(index)};
+    }
+    const shot=ov._shotEditor,editor=ov.querySelector('.aicf-prompt-modal-body');
+    if(!shot||shot.reading||shot.saving)throw new Error('分镜尚在读取或保存，请稍候再提交。');
+    if(shot.stale||editor.value!==shot.lastPrompt) {
+        if(shot.dirty&&shot.documents.some(d=>d.new||d.removed||d.structure_changed))throw new Error('文字与未保存的跨段 Shot 结构不一致，请先保存结构修改，本次未提交。');
+        if(!await shot.read(false))throw new Error('当前文字无法读取为分镜，请修正后再提交。');
+    }
+    const manifest=A.readH3Manifest?A.readH3Manifest(ov):JSON.parse(ov.querySelector('.h3-asset-list')?.dataset.manifest||'[]');
+    const uploads=[...ov.querySelectorAll('.h3-asset-input')].some(input=>input.files?.length);
+    if(uploads||(A.h3ManifestSignature||JSON.stringify)(manifest)!==shot.manifestBase) {
+        if(shot.dirty)throw new Error('素材与分镜同时存在未保存修改，请先统一素材和当前分镜后保存，本次未提交。');
+        await A.saveH3GenerationConfig(index,null,ov);
+        if(!valid()||!await shot.read(false))throw new Error('素材已保存，请重新读取分镜后提交。');
+        shot.dirty=true;
+    }
+    const source=shot.documents.find(d=>d.uid===shot.sourceUid);
+    if(!source||source.removed||!source.shots.length)throw new Error('当前分段已空或已删除，请先保存整理，再打开目标分段提交。');
+    const excerpt=ov.querySelector('#aicf-prompt-source-excerpt');
+    if(excerpt&&excerpt.value!==String(excerpt.dataset.savedValue||''))shot.dirty=true;
+    if(shot.dirty&&!await shot.saveForTask())throw new Error('当前分镜未保存成功，本次未提交。');
+    if(!valid())throw new Error('内容已保存，但编辑分段已切换，本次未提交。');
+    return {segment_index:Number(index),segment_uid:shot.sourceUid,prompt:editor.value};
+};
+window.AICF.runSavedPromptAction = async function(ov,submit) {
+    if(ov._promptTaskBusy)throw new Error('正在保存或提交，请勿重复点击。');
+    ov._promptTaskBusy=true;
+    const session=String(ov.dataset.h3Session),owner={};ov._promptTaskOwner=owner;
+    const controls=[...ov.querySelectorAll('input,textarea,select,button')].map(el=>[el,el.disabled]);
+    const editor=ov.querySelector('.aicf-prompt-modal-body'),readOnly=editor.readOnly;
+    controls.forEach(([el])=>{el.disabled=true;});editor.readOnly=true;
+    let saved=false;
+    try{const target=await window.AICF.savePromptBeforeTask(ov);saved=true;return await submit(target);}
+    catch(error){error.saved=saved;throw error;}
+    finally{
+        if(ov._promptTaskOwner===owner){ov._promptTaskBusy=false;delete ov._promptTaskOwner;}
+        if(String(ov.dataset.h3Session)===session){editor.readOnly=readOnly;controls.forEach(([el,disabled])=>{if(el.isConnected)el.disabled=disabled;});ov._shotEditor?.refreshControls?.();}
+    }
+};
+window.AICF.savePromptSourceExcerpt = async function(replan, submittedOptions) {
     var ov = document.getElementById('aicf-prompt-modal');
     var field = ov && ov.querySelector('#aicf-prompt-source-excerpt');
     if (!ov || !field || window.AICF.archiveReadOnly) return null;
     var value = String(field.value || '');
     if (value === String(field.dataset.savedValue || '') && !replan) return null;
     var index = Number(ov.dataset.segmentIndex || 0);
+    var submittedSession=String(ov.dataset.h3Session || ''),submittedRuntime=String(window.AICF.promptRuntimeRevision || 0);
+    var stillCurrent=function(){return String(ov.dataset.h3Session || '')===submittedSession &&
+        Number(ov.dataset.segmentIndex || 0)===index && String(window.AICF.promptRuntimeRevision || 0)===submittedRuntime;};
+    var replanOptions = {};
+    var submittedEditorText = '';
+    if (replan === true) {
+        replanOptions = submittedOptions || window.AICF.readPromptReplanOptions(ov);
+    }
+    var payload = {segment_index:index, source_excerpt:value, regenerate_prompt:replan === true,
+        editors:{story_editor:document.querySelector('#story_editor textarea')?.value ?? '', beats_editor:document.querySelector('#beats_editor textarea')?.value ?? ''}};
+    if (replan === true) {
+        payload.duration_sec = replanOptions.duration_sec;
+        payload.providers = replanOptions.providers;
+        payload.timing_api = replanOptions.timing_api === true;
+        submittedEditorText = String(ov.querySelector('.aicf-prompt-modal-body')?.value || '');
+        payload.editor_prompt = submittedEditorText;
+        if (!payload.editor_prompt.trim()) throw new Error('编辑区提示词为空，无法重新规划时长');
+        payload.asset_manifest = _h3Manifest(ov);
+    }
+    var sourceHeaders={'Content-Type':'application/json'};
+    if(ov._editorRuntime){sourceHeaders['X-AICF-Runtime']=encodeURIComponent(ov._editorRuntime);sourceHeaders['X-AICF-Runtime-Encoding']='uri';}
     var response = await fetch('/api/segment/source-excerpt', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({segment_index:index, source_excerpt:value, regenerate_prompt:replan === true, editors:{story_editor:document.querySelector('#story_editor textarea')?.value ?? '', beats_editor:document.querySelector('#beats_editor textarea')?.value ?? ''}})
+        method: 'POST', headers: sourceHeaders,
+        body: JSON.stringify(payload)
     });
     var result = await response.json().catch(function(){return {};});
+    if(!stillCurrent())return result;
     if (!response.ok || !result.ok) throw new Error(result.message || '保存剧情上下文失败');
-    field.dataset.savedValue = value;
     var card = window.AICF.segmentCardFromButton(ov._sourceButton);
-    var source = card && card.querySelector('.segment-source-excerpt-source');
-    var view = card && card.querySelector('.segment-source-excerpt');
-    if (source) source.textContent = value;
-    if (view) view.value = value;
-    if (result.operation_id) { window.AICF.setPromptModalFeedback(result.message, false); return result; }
+    if (!replan) {
+        field.dataset.savedValue = value;
+        var source = card && card.querySelector('.segment-source-excerpt-source');
+        var view = card && card.querySelector('.segment-source-excerpt');
+        if (source) source.textContent = value;
+        if (view) view.value = value;
+    }
+    if (result.operation_id) {
+        ov._sourceReplanPending = {id:result.operation_id, session:String(ov.dataset.h3Session || ''),
+            runtime:String(window.AICF.promptRuntimeRevision || 0),
+            prompt:submittedEditorText, duration:String(replanOptions.duration_sec),
+            manifest:(window.AICF.h3ManifestSignature || JSON.stringify)(payload.asset_manifest)};
+        window.AICF.setPromptModalFeedback(result.message, false); return result;
+    }
     if (replan && result.canonical_prompt) {
         var prompt = ov.querySelector('.aicf-prompt-modal-body');
         if (prompt) { prompt.value = result.canonical_prompt; prompt.dispatchEvent(new Event('input',{bubbles:true})); }
         var h3SaveButton = ov.querySelector('.aicf-prompt-modal-save');
         if (h3SaveButton && window.AICF.saveH3GenerationConfig) {
             await window.AICF.saveH3GenerationConfig(index, h3SaveButton, ov);
+            if(!stillCurrent())return result;
         }
         card = window.AICF.segmentCardFromButton(ov._sourceButton) || card;
         var cardPrompt = card && card.querySelector('.h3-prompt-override');
@@ -2708,26 +2947,37 @@ window.AICF.savePromptSourceExcerpt = async function(replan) {
         if (preview) preview.textContent = result.canonical_prompt;
         var summary = card && card.querySelector('.prompt-summary small');
         if (summary) summary.textContent = result.canonical_prompt.length + ' 字符 / ' + (result.canonical_prompt ? result.canonical_prompt.split('\n').length : 0) + ' 行';
-        window.AICF.setPromptModalFeedback('剧情上下文已保存，镜头提示词已重新规划。', false);
+        window.AICF.setPromptModalFeedback('提示词时长已重新规划，并同步对应 Beat。', false);
     }
     return result;
 };
 window.AICF.replanPromptModal = async function() {
     var ov = document.getElementById('aicf-prompt-modal');
     if (!ov || window.AICF.archiveReadOnly) return;
+    var replanSession=String(ov.dataset.h3Session || ''),replanRuntime=String(window.AICF.promptRuntimeRevision || 0);
+    var replanCurrent=function(){return String(ov.dataset.h3Session || '')===replanSession && String(window.AICF.promptRuntimeRevision || 0)===replanRuntime;};
+    if(ov._promptTaskBusy){window.AICF.setPromptModalFeedback('正在保存或提交，请稍候。',true);return;}
     var button = ov.querySelector('.aicf-prompt-modal-replan');
-    if (button) { button.disabled=true; button.textContent='正在重新规划…'; }
     try {
-        await window.AICF.savePromptSourceExcerpt(true);
+        if(ov._sourceReplanPending && ov._syncSourceReplan)await ov._syncSourceReplan();
+        if(ov._sourceReplanPending){window.AICF.setPromptModalFeedback('已有时长规划任务正在执行，请稍候。',true);return;}
+        const options=window.AICF.readPromptReplanOptions(ov);
+        if(button){button.disabled=true;button.textContent='正在保存并规划…';}
+        await window.AICF.runSavedPromptAction(ov,async()=>{
+            window.AICF.setPromptModalFeedback('当前编辑已保存，正在提交时长规划…',false);
+            return await window.AICF.savePromptSourceExcerpt(true,options);
+        });
     } catch (error) {
-        window.AICF.setPromptModalFeedback(error.message || '重新规划失败', true);
+        if(replanCurrent())window.AICF.setPromptModalFeedback((error.saved?'当前编辑已保存，时长规划提交失败：':'保存或提交未完成：')+(error.message||'请重试'), true);
     } finally {
-        if (button) { button.disabled=false; button.textContent='保存上下文并重新规划'; }
+        if (button && replanCurrent()) { button.disabled=false; button.textContent='保存并重新规划时长'; }
     }
 };
 window.AICF.closePromptModal = function() {
     var ov = document.getElementById('aicf-prompt-modal');
     if (!ov) return;
+    if (window.AICF.cancelH3Composite) window.AICF.cancelH3Composite(ov);
+    if (ov._shotEditor && ov._shotEditor.stop) ov._shotEditor.stop();
     if (ov._webRevisionStop) ov._webRevisionStop();
     ov.querySelectorAll('audio').forEach(function(player) { player.pause(); });
     ov.classList.remove('open');
@@ -3180,15 +3430,25 @@ window._findGradioInput = window.AICF.findGradioInput;
     }
     function _h3Manifest(root) {
         var source = root ? root.querySelector('.h3-asset-list') : null;
-        if (!source || !source.dataset.manifest) return [];
+        if (!source || !source.dataset.manifest) throw new Error('参考素材尚未完整读取，未提交保存；当前稿已保留。');
         try {
             var parsed = JSON.parse(source.dataset.manifest);
-            return Array.isArray(parsed) ? parsed : [];
+            if (!Array.isArray(parsed)) throw new Error('参考素材清单格式无效');
+            return parsed;
         } catch (error) {
-            console.warn('invalid H3 asset manifest', error);
-            return [];
+            throw new Error('参考素材清单读取失败，未提交保存；当前稿已保留。');
         }
     }
+    window.AICF.h3ManifestSignature = function(items) {
+        var keys = ['asset_kind','identity_id','role_id','image_id','scene_id','background_id',
+                    'voice_only','voice_disabled','voice_usage','voice_speaker','voice_asset_id'];
+        return JSON.stringify(items.map(function(item) {
+            var metadata = {};
+            keys.forEach(function(key) { if (item.metadata && item.metadata[key] !== undefined) metadata[key] = item.metadata[key]; });
+            return {id: item.asset_id || item.id || '', type:item.type, path:item.path || item.relative_path || '',
+                    role:item.role || '', use_video_audio:!!item.use_video_audio, metadata:metadata};
+        }));
+    };
     window.AICF.hydrateH3ModalConfig = function(panel, card, segmentIndex) {
         var source = card.querySelector('.h3-card-config-source');
         var target = panel.querySelector('.h3-asset-list');
@@ -3199,6 +3459,8 @@ window._findGradioInput = window.AICF.findGradioInput;
         var manifest = JSON.parse(source.dataset.manifest);
         if (!Array.isArray(manifest)) throw new Error('本段参考配置无效，请刷新页面后重新打开。');
         target.dataset.manifest = JSON.stringify(manifest);
+        target.dataset.baseRevision = source.dataset.baseRevision || '';
+        target.dataset.segmentUid = source.dataset.segmentUid || '';
         target.dataset.segmentIndex = String(segmentIndex);
         var regenerate = panel.querySelector('.h3-config-actions button');
         if (regenerate) {
@@ -3208,7 +3470,12 @@ window._findGradioInput = window.AICF.findGradioInput;
     };
     function _scheduleH3ConfigAutosave(root) {
         if (!root || window.AICF.archiveReadOnly) return;
+        if (root.closest('.aicf-prompt-modal')?._editorDraft) return;
         var saveRoot = root.closest ? (root.closest('.aicf-prompt-modal') || root) : root;
+        if (saveRoot._shotEditor && saveRoot._shotEditor.dirty) {
+            _h3Status(saveRoot, 'Shot 草稿尚未保存，参考配置将随顶部保存一起检查。', false);
+            return;
+        }
         if (saveRoot._h3AutosaveTimer) window.clearTimeout(saveRoot._h3AutosaveTimer);
         var segmentIndex = String((saveRoot.dataset && saveRoot.dataset.segmentIndex) || '');
         if (!segmentIndex) {
@@ -3229,6 +3496,7 @@ window._findGradioInput = window.AICF.findGradioInput;
             var previous = window.AICF.h3AutosavePending;
             var pending = Promise.resolve(previous).catch(function() {}).then(function() {
                 if (String(saveRoot.dataset.segmentIndex || '') !== segmentIndex || String(saveRoot.dataset.h3Session || '') !== saveSession) return;
+                if (saveRoot._editorDraft || saveRoot._editorBusy || saveRoot._promptTaskBusy || saveRoot._sourceReplanPending || saveRoot._shotEditor?.dirty) return;
                 return window.AICF.saveH3GenerationConfig(segmentIndex, null, saveRoot);
             });
             window.AICF.h3AutosavePending = pending;
@@ -3240,6 +3508,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         }, 120);
     }
     window.AICF.scheduleH3ConfigAutosave = _scheduleH3ConfigAutosave;
+    window.AICF.readH3Manifest = _h3Manifest;
     function _h3MoveImageAsset(root, assetId, direction) {
         if (!root || window.AICF.archiveReadOnly) return false;
         var manifest = _h3Manifest(root);
@@ -3278,15 +3547,18 @@ window._findGradioInput = window.AICF.findGradioInput;
     }
     // Replacement keeps the slot identity so the reconciler preserves tag numbers.
     window.AICF.h3ReplacementAsset = function(original, candidate) {
+        var oldKind = (original.metadata || {}).asset_kind;
+        var newKind = (candidate.metadata || {}).asset_kind;
+        var changesKind = oldKind && newKind && oldKind !== newKind;
         var next = Object.assign({}, candidate, {
             id: String(original.id || original.asset_id),
             asset_id: String(original.id || original.asset_id),
             order: original.order,
-            role: original.role || candidate.role || '',
+            role: changesKind ? (candidate.role || candidate.label || '') : (original.role || candidate.role || ''),
             metadata: Object.assign({}, candidate.metadata || {})
         });
         ['asset_kind', 'identity_id', 'role_id', 'background_id', 'scene_id'].forEach(function(key) {
-            if (original.metadata && original.metadata[key]) next.metadata[key] = original.metadata[key];
+            if (!changesKind && original.metadata && original.metadata[key]) next.metadata[key] = original.metadata[key];
         });
         return next;
     };
@@ -3305,7 +3577,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         box.className = 'h3-replace-box';
         var label = document.createElement('p');
         label.setAttribute('role', 'status');
-        label.textContent = pending.candidate ? '新图片：' + String(pending.candidate.label || '上传图片') : '请选择上方素材库图片，或在这里上传。确认后保留原编号、角色和镜头对白。';
+        label.textContent = pending.candidate ? '新图片：' + String(pending.candidate.label || '上传图片') : '请选择上方素材库图片，或在这里上传。保留原编号；跨人物与场景类型替换时，同步新素材的用途和名称。';
         box.appendChild(label);
         if (pending.error) {
             var errorText = document.createElement('p');
@@ -3395,7 +3667,7 @@ window._findGradioInput = window.AICF.findGradioInput;
                 var result = await window.AICF.saveH3GenerationConfig(root.dataset.segmentIndex, confirm, root);
                 if (!result) throw new Error('保存未完成，请重新打开编辑器');
                 root._h3Replacement = null;
-                _h3Status(root, '参考图已原位替换，编号、角色绑定和镜头对白已保留。', false);
+                _h3Status(root, '参考图已原位替换，素材用途与提示词已同步。', false);
             } catch (error) {
                 if (originalManifest && pending.session === String(root.dataset.h3Session || '')) {
                     root.querySelector('.h3-asset-list').dataset.manifest = JSON.stringify(originalManifest);
@@ -3416,6 +3688,109 @@ window._findGradioInput = window.AICF.findGradioInput;
         box.appendChild(cancel);
         container.appendChild(box);
     }
+    function _h3ProjectDisplayName(root, item) {
+        var data = root._h3ProjectMaterials || {};
+        var metadata = item.metadata || {};
+        var path = _h3ComparablePath(item.path);
+        var characters = Array.isArray(data.characters) ? data.characters : [];
+        var character = characters.find(function(entry) {
+            return (metadata.identity_id && String(entry.asset_id) === String(metadata.identity_id)) ||
+                (path && (entry.images || []).some(function(image) {
+                    return _h3ComparablePath(image.image_path) === path;
+                }));
+        });
+        if (character && character.display_name) return String(character.display_name);
+        var backgrounds = Array.isArray(data.backgrounds) ? data.backgrounds : [];
+        var background = backgrounds.find(function(entry) {
+            return (metadata.background_id && String(entry.asset_id) === String(metadata.background_id)) ||
+                (path && _h3ComparablePath(entry.image_path) === path);
+        });
+        return String(background && background.display_name || item.label || '未命名图片');
+    }
+    window.AICF.h3BindCharacterAudio = function(manifest, imageId, audio) {
+        var image = manifest.find(function(a) { return a.type === 'image' && String(a.id || a.asset_id || '') === String(imageId); });
+        var identity = image && (image.metadata || {}).identity_id;
+        if (!identity) throw new Error('该图片没有人物身份，无法绑定音色。');
+        var result = manifest.filter(function(a) {
+            return !(a.type === 'audio' && ((a.metadata || {}).identity_id === identity ||
+                String(a.id || a.asset_id || '') === String(audio.id || audio.asset_id || '')));
+        }).map(function(a) {
+            if (a.type !== 'image' || (a.metadata || {}).identity_id !== identity) return a;
+            return Object.assign({}, a, {metadata: Object.assign({}, a.metadata, {voice_disabled: false})});
+        });
+        if (result.filter(function(a) { return a.type === 'audio'; }).length >= 3 || result.length >= 12)
+            throw new Error('参考音频最多 3 个，参考文件合计最多 12 个，请先移除一项。');
+        result.push(Object.assign({}, audio, {source: 'segment_upload',
+            role: '仅用于' + String(image.label || image.role || '') + '的音色参考；台词使用当前剧情，不复述参考录音',
+            metadata: Object.assign({}, audio.metadata || {}, {identity_id: identity,
+                role_id: (image.metadata || {}).role_id, binding_source: 'segment_character_voice', voice_only: true})}));
+        return result;
+    };
+    function _h3CharacterVoiceControls(root, item, info, manifest) {
+        var identity = (item.metadata || {}).identity_id;
+        if (!identity) return;
+        info.dataset.voiceIdentity = identity;
+        var box = document.createElement('div'); box.className = 'h3-character-voice-controls';
+        var title = document.createElement('strong'); title.textContent = '本段参考音色'; box.appendChild(title);
+        if ((item.metadata || {}).library_voice || (item.metadata || {}).voice_disabled || manifest.some(function(a) { return a.type === 'audio' && (a.metadata || {}).identity_id === identity && (a.metadata || {}).binding_source === 'character_voice'; })) {
+            var toggleLabel = document.createElement('label');
+            var toggle = document.createElement('input'); toggle.type = 'checkbox';
+            toggle.checked = !(item.metadata || {}).voice_disabled; toggle.disabled = !!window.AICF.archiveReadOnly;
+            toggle.onchange = function() {
+                var m = _h3Manifest(root);
+                m.forEach(function(a) { if (a.type === 'image' && (a.metadata || {}).identity_id === identity)
+                    a.metadata = Object.assign({}, a.metadata || {}, {voice_disabled: !toggle.checked}); });
+                root.querySelector('.h3-asset-list').dataset.manifest = JSON.stringify(m);
+                _scheduleH3ConfigAutosave(root);
+            };
+            toggleLabel.appendChild(toggle); toggleLabel.appendChild(document.createTextNode('自动使用人物默认音色'));
+            box.appendChild(toggleLabel);
+        }
+
+        var select = document.createElement('select'); select.setAttribute('aria-label', String(item.label || '') + '选择已有参考音频');
+        select.add(new Option('选择已有参考音频…', ''));
+        manifest.forEach(function(a, i) {
+            if (a.type !== 'audio') return;
+            select.add(new Option(a.label || '参考音频', String(i)));
+            if ((a.metadata || {}).identity_id === identity && (a.metadata || {}).voice_only)
+                select.value = String(i);
+        });
+        select.disabled = !!window.AICF.archiveReadOnly;
+        function commit(audio) {
+            var source = root.querySelector('.h3-asset-list');
+            source.dataset.manifest = JSON.stringify(window.AICF.h3BindCharacterAudio(_h3Manifest(root), item.id || item.asset_id, audio));
+            window.AICF.refreshH3AssetCount(root);
+            _scheduleH3ConfigAutosave(root);
+            _h3Status(root, '已绑定本段人物音色，正在自动保存。', false);
+        }
+        select.onchange = function() { if (select.value === '' || window.AICF.archiveReadOnly) return; try { commit(manifest[Number(select.value)]); } catch (e) { _h3Status(root, e.message, true); } };
+        box.appendChild(select);
+        var label = document.createElement('label'); label.textContent = '上传 / 替换音频';
+        var upload = document.createElement('input'); upload.type = 'file'; upload.accept = '.mp3,.wav';
+        upload.setAttribute('aria-label', String(item.label || '') + '上传或替换参考音频');
+        upload.disabled = !!window.AICF.archiveReadOnly;
+        upload.onchange = async function() {
+            if (!upload.files || !upload.files.length || window.AICF.archiveReadOnly) return;
+            if (upload.files[0].size > 15 * 1024 * 1024) { _h3Status(root, '参考音色不能超过 15 MB', true); upload.value = ''; return; }
+            var session = String(root.dataset.h3Session || '');
+            var runtime = String(window.AICF.promptRuntimeRevision || 0);
+            var segment = String(root.dataset.segmentIndex || (root.querySelector('.h3-asset-list') || {}).dataset?.segmentIndex || '');
+            upload.disabled = true;
+            try {
+                var form = new FormData(); form.append('asset_type', 'audio'); form.append('files', upload.files[0]);
+                _h3Status(root, '正在上传并校验人物参考音频…', false);
+                var data = await _requestJson('/api/segment/' + segment + '/assets', {method: 'POST', body: form});
+                if (String(root.dataset.h3Session || '') !== session || String(root.dataset.segmentIndex || segment) !== segment ||
+                    String(window.AICF.promptRuntimeRevision || 0) !== runtime || !root.isConnected) return;
+                if (!(data.assets || []).length) throw new Error('未返回有效参考音频');
+                var duration = Number((data.assets[0].metadata || {}).duration_sec);
+                if (!Number.isFinite(duration) || duration < 2 || duration > 15) throw new Error('人物参考音色需为 2–15 秒的有效音频');
+                commit(data.assets[0]);
+            } catch (e) { _h3Status(root, e.message, true); }
+            finally { upload.disabled = !!window.AICF.archiveReadOnly; upload.value = ''; }
+        };
+        label.appendChild(upload); box.appendChild(label); info.appendChild(box);
+    }
     window.AICF.renderH3SelectedPreview = function(root) {
         root = _h3EditorRoot(root);
         if (!root) return;
@@ -3435,6 +3810,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         manifest.forEach(function(item, idx) {
             var itemType = String(item && item.type || 'image').toLowerCase();
             if (itemType !== 'image') return;
+            item = Object.assign({}, item, {label: _h3ProjectDisplayName(root, item)});
             imageIndex += 1;
             var pictureNumber = imageIndex;
             var li = document.createElement('li');
@@ -3486,6 +3862,15 @@ window._findGradioInput = window.AICF.findGradioInput;
             usage.textContent = _h3ImageUsageLabel(item);
             info.appendChild(nameEl);
             info.appendChild(usage);
+            var roleInput = document.createElement('input');
+            roleInput.type = 'text'; roleInput.className = 'h3-asset-role';
+            roleInput.dataset.assetId = assetId; roleInput.value = String(item.role || '');
+            roleInput.setAttribute('aria-label', String(item.label || '图片') + '参考名称或用途');
+            roleInput.disabled = !!window.AICF.archiveReadOnly;
+            roleInput.onchange = function() { window.AICF.setH3AssetRole(String(root.dataset.segmentIndex || ''), roleInput); };
+            var details = document.createElement('div'); details.className = 'h3-character-details';
+            details.appendChild(roleInput);
+            _h3CharacterVoiceControls(root, item, details, manifest);
             var removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'card-regen-btn action-utility h3-preview-remove';
@@ -3495,6 +3880,7 @@ window._findGradioInput = window.AICF.findGradioInput;
                 return function() {
                     if (window.AICF.archiveReadOnly) return;
                     var current = _h3Manifest(root)[index] || {};
+                    if (window.AICF.editH3Reference && root.closest('.aicf-prompt-modal')) { window.AICF.editH3Reference(root, current.asset_id || current.id); return; }
                     var removeName = String(current.role || current.label || '该图片');
                     var promptField = root.querySelector('.h3-prompt-override, .aicf-prompt-modal-body');
                     if (promptField && String(promptField.value || '').indexOf('<Subject ' + String(pictureNumber) + '>') >= 0) {
@@ -3503,6 +3889,7 @@ window._findGradioInput = window.AICF.findGradioInput;
                     }
                     var m = _h3Manifest(root);
                     m.splice(index, 1);
+                    var removedIdentity = (current.metadata || {}).identity_id;
                     var source = root.querySelector('.h3-asset-list');
                     if (source) source.dataset.manifest = JSON.stringify(m);
                     window.AICF.renderH3SelectedPreview(root);
@@ -3559,9 +3946,11 @@ window._findGradioInput = window.AICF.findGradioInput;
                 actions.appendChild(voiceBtn);
             }
             li.appendChild(actions);
+            li.appendChild(details);
             list.appendChild(li);
         });
         container.appendChild(list);
+        if (window.AICF.renderH3AssetRows) window.AICF.renderH3AssetRows(root);
     };
     window.AICF.renderH3AssetRows = function(root) {
         if (!root) return;
@@ -3571,6 +3960,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         var segmentIndex = String(source.dataset.segmentIndex || (root.dataset && root.dataset.segmentIndex) || '');
         var manifest = _h3Manifest(root);
         list.replaceChildren();
+        root.querySelectorAll('.h3-bound-audio').forEach(function(row) { row.remove(); });
         if (!manifest.length) {
             var empty = document.createElement('li');
             empty.className = 'muted';
@@ -3581,7 +3971,8 @@ window._findGradioInput = window.AICF.findGradioInput;
         manifest.forEach(function(item) {
             var assetId = String(item && (item.id || item.asset_id) || '');
             var itemType = String(item && item.type || 'image').toLowerCase();
-            var row = document.createElement('li');
+            if (itemType === 'image') return;
+            var row = document.createElement('div');
             var name = document.createElement('span');
             name.textContent = itemType + ' · ' + String(item.label || item.path || assetId);
             var role = document.createElement('input');
@@ -3608,6 +3999,8 @@ window._findGradioInput = window.AICF.findGradioInput;
                     var owner = document.createElement('select');
                     owner.setAttribute('aria-label', '音频绑定人物');
                     owner.add(new Option('通用音频参考（不绑定人物）', ''));
+                    owner.add(new Option('旁白（不需要人物图片）', '__narration'));
+                    owner.add(new Option('电话另一端（不需要人物图片）', '__telephone'));
                     var seen = new Set();
                     manifest.forEach(function(image) {
                         var identity = (image.metadata || {}).identity_id;
@@ -3615,43 +4008,31 @@ window._findGradioInput = window.AICF.findGradioInput;
                             seen.add(identity); owner.add(new Option(image.label || image.role || identity, identity));
                         }
                     });
-                    owner.value = (item.metadata || {}).identity_id || '';
+                    owner.value = (item.metadata || {}).voice_usage ? '__' + item.metadata.voice_usage : (item.metadata || {}).identity_id || '';
                     owner.disabled = !!window.AICF.archiveReadOnly;
                     owner.addEventListener('change', function() {
                         item.metadata = Object.assign({}, item.metadata || {});
-                        if (owner.value) {
+                        delete item.metadata.voice_usage;
+                        delete item.metadata.voice_speaker;
+                        if (owner.value === '__narration' || owner.value === '__telephone') {
+                            delete item.metadata.identity_id;
+                            item.metadata.voice_usage = owner.value.slice(2);
+                            item.metadata.voice_only = true;
+                            if (!String(item.role || '').trim()) {
+                                item.role = item.metadata.voice_usage === 'narration' ? '旁白' : '电话另一端';
+                                role.value = item.role;
+                            }
+                        } else if (owner.value) {
                             item.metadata.identity_id = owner.value; item.metadata.voice_only = true;
                         } else {
                             delete item.metadata.identity_id; delete item.metadata.voice_only;
                         }
                         source.dataset.manifest = JSON.stringify(manifest);
+                        window.AICF.refreshH3AssetCount(root);
                         _scheduleH3ConfigAutosave(_h3EditorRoot(root));
                     });
                     row.appendChild(owner);
                 }
-            }
-            var imageIdentity = (item.metadata || {}).identity_id;
-            var hasCharacterVoice = imageIdentity && manifest.some(function(asset) {
-                var metadata = asset && asset.metadata || {};
-                return String(asset && asset.type || '').toLowerCase() === 'audio' &&
-                    String(metadata.identity_id || '') === String(imageIdentity) &&
-                    metadata.binding_source === 'character_voice';
-            });
-            if (itemType === 'image' && imageIdentity && hasCharacterVoice) {
-                var voiceLabel = document.createElement('label');
-                var voiceEnabled = document.createElement('input');
-                voiceEnabled.type = 'checkbox'; voiceEnabled.checked = !(item.metadata || {}).voice_disabled;
-                voiceEnabled.disabled = !!window.AICF.archiveReadOnly;
-                voiceEnabled.addEventListener('change', function() {
-                    manifest.forEach(function(asset) {
-                        if (asset.type === 'image' && (asset.metadata || {}).identity_id === item.metadata.identity_id)
-                            asset.metadata = Object.assign({}, asset.metadata, {voice_disabled: !voiceEnabled.checked});
-                    });
-                    source.dataset.manifest = JSON.stringify(manifest);
-                    _scheduleH3ConfigAutosave(_h3EditorRoot(root));
-                });
-                voiceLabel.appendChild(voiceEnabled); voiceLabel.appendChild(document.createTextNode('自动使用人物参考音色'));
-                row.appendChild(voiceLabel);
             }
             if (itemType === 'video') {
                 var audioLabel = document.createElement('label');
@@ -3673,7 +4054,12 @@ window._findGradioInput = window.AICF.findGradioInput;
             remove.setAttribute('aria-label', '移除 ' + String(item.label || assetId));
             remove.addEventListener('click', function() { window.AICF.removeH3Asset(segmentIndex, remove); });
             row.appendChild(remove);
-            list.appendChild(row);
+            var voiceHost = Array.from(root.querySelectorAll('[data-voice-identity]')).find(function(host) {
+                return host.dataset.voiceIdentity === String((item.metadata || {}).identity_id || '');
+            });
+            if (itemType === 'audio' && voiceHost) {
+                row.className = 'h3-bound-audio'; voiceHost.appendChild(row);
+            } else { var entry = document.createElement('li'); entry.appendChild(row); list.appendChild(entry); }
         });
     };
     function _h3ImageUsageLabel(item) {
@@ -3689,6 +4075,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         return '人物参考（锁脸）';
     }
     window.AICF.refreshH3AssetCount = function(root) {
+        if (window.AICF.scheduleH3PromptCount) window.AICF.scheduleH3PromptCount(root);
         if (!root) return;
         var manifest = _h3Manifest(root);
         var counts = {image: 0, video: 0, audio: 0};
@@ -3823,6 +4210,7 @@ window._findGradioInput = window.AICF.findGradioInput;
         root = _h3EditorRoot(root);
         if (!root) return;
         data = data && typeof data === 'object' ? data : {};
+        root._h3ProjectMaterials = data;
         var characterGrid = root.querySelector('.h3-project-character-images');
         var backgroundGrid = root.querySelector('.h3-project-background-images');
         if (characterGrid) {
@@ -3834,7 +4222,7 @@ window._findGradioInput = window.AICF.findGradioInput;
                     characterGrid.appendChild(_createH3ProjectImageOption(root, {
                         asset_id: 'project:character:' + String(character.id || '') + ':' + String(imageItem.id || ''),
                         path: String(imageItem.image_path || ''),
-                        label: String(character.display_name || character.asset_id || character.id || '人物') + ' · ' + String(imageItem.display_name || imageItem.id || '参考图'),
+                        label: String(character.display_name || character.asset_id || character.id || '人物'),
                         kind_label: '人物图片',
                         available: !!character.available && !!imageItem.available,
                         role: String(character.display_name || ''),
@@ -3892,9 +4280,9 @@ window._findGradioInput = window.AICF.findGradioInput;
     }
     async function _requestJson(url, options) {
         var response = await fetch(url, options || {});
-        var data = await response.json().catch(function() { return {}; });
+        var data = await window.AICF.readJsonResponse(response, url);
         if (!response.ok || !data || data.ok === false) {
-            throw new Error((data && data.message) || '请求失败');
+            throw new Error((data && data.message) || _validationMessage(data && data.errors) || '请求失败（HTTP ' + response.status + '）');
         }
         return data;
     }
@@ -3943,12 +4331,13 @@ window._findGradioInput = window.AICF.findGradioInput;
         if (window.AICF.archiveReadOnly) return false;
         var root = _h3ConfigRoot(segmentIndex, button);
         var assetId = button && button.dataset ? String(button.dataset.assetId || '') : '';
+        if (window.AICF.editH3Reference && root.closest('.aicf-prompt-modal')) { window.AICF.editH3Reference(root, assetId); return false; }
         var originalManifest = _h3Manifest(root);
         var removedIndex = originalManifest.findIndex(function(item) {
             return String(item && (item.id || item.asset_id) || '') === assetId;
         });
         var removedItem = removedIndex >= 0 ? originalManifest[removedIndex] : {};
-        if ((removedItem.metadata || {}).binding_source === 'character_voice') {
+        if (removedItem.type === 'audio' && (removedItem.metadata || {}).identity_id && (removedItem.metadata || {}).voice_only) {
             originalManifest.forEach(function(asset) {
                 if (asset.type === 'image' && (asset.metadata || {}).identity_id === removedItem.metadata.identity_id)
                     asset.metadata = Object.assign({}, asset.metadata, {voice_disabled: true});
@@ -3958,13 +4347,14 @@ window._findGradioInput = window.AICF.findGradioInput;
             return String(item && item.type || '').toLowerCase() === 'image';
         }).length;
         var promptField = root ? root.querySelector('.h3-prompt-override, .aicf-prompt-modal-body') : null;
-        if (removedPictureIndex && promptField && String(promptField.value || '').indexOf('<Subject ' + String(removedPictureIndex) + '>') >= 0) {
+        if (removedItem.type === 'image' && removedPictureIndex && promptField && String(promptField.value || '').indexOf('<Subject ' + String(removedPictureIndex) + '>') >= 0) {
             var approved = window.confirm('“' + String(removedItem.role || removedItem.label || '该图片') + '”仍可能在右侧镜头中使用。移除后会标记未解决引用，并在修正前阻止生成。确定移除吗？');
             if (!approved) return false;
         }
         var manifest = originalManifest.filter(function(item) {
             return String(item && (item.id || item.asset_id) || '') !== assetId;
         });
+        var removedIdentity = (removedItem.metadata || {}).identity_id;
         var source = root ? root.querySelector('.h3-asset-list') : null;
         if (source) source.dataset.manifest = JSON.stringify(manifest);
         window.AICF.refreshH3AssetCount(root);
@@ -4005,9 +4395,49 @@ window._findGradioInput = window.AICF.findGradioInput;
         _scheduleH3ConfigAutosave(root);
         return false;
     };
-    window.AICF.saveH3GenerationConfig = async function(segmentIndex, button, rootOverride, forceSave) {
+    window.AICF.showH3PromptCount = function(root, data) {
+        var counter = root.querySelector('.aicf-prompt-char-count');
+        if (!counter) return;
+        counter.textContent = String(data.prompt_chars) + '/' + String(data.prompt_max_chars || '不限');
+        counter.classList.toggle('is-over-limit', !!data.prompt_max_chars && data.prompt_chars > data.prompt_max_chars);
+        counter.title = '最终提交提示词字符数 / 当前模型字符上限（包含主体定义、素材标签和音色绑定）';
+    };
+    window.AICF.scheduleH3PromptCount = function(root) {
+        var modal = root && root.closest ? root.closest('.aicf-prompt-modal') : null;
+        if (!modal || !modal.querySelector('.aicf-prompt-char-count') || modal.dataset.modelId !== 'minimax_h3_local_ref2va') return;
+        window.clearTimeout(modal._promptCountTimer);
+        var sequence = (modal._promptCountSequence || 0) + 1;
+        modal._promptCountSequence = sequence;
+        var session = modal.dataset.h3Session;
+        var counter = modal.querySelector('.aicf-prompt-char-count');
+        counter.textContent = '计算中…';
+        counter.classList.remove('is-over-limit');
+        modal._promptCountTimer = window.setTimeout(async function() {
+            try {
+                var text = modal.querySelector('.aicf-prompt-modal-body').value;
+                var provenance = null;
+                if (modal.dataset.promptProvenance && window.AICF.promptTextMatches(text, modal.dataset.promptRevisionPrompt)) {
+                    provenance = JSON.parse(modal.dataset.promptProvenance);
+                }
+                var data = await _requestJson('/api/segment/prompt-preview', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({segment_index: Number(modal.dataset.segmentIndex), prompt_override: text,
+                        asset_manifest: _h3Manifest(modal), prompt_provenance: provenance})
+                });
+                if (modal._promptCountSequence === sequence && modal.dataset.h3Session === session) window.AICF.showH3PromptCount(modal, data);
+            } catch (error) {
+                if (modal._promptCountSequence === sequence && modal.dataset.h3Session === session) {
+                    counter.textContent = '无法计算'; counter.title = error.message;
+                }
+            }
+        }, 350);
+    };
+    window.AICF.saveH3GenerationConfig = async function(segmentIndex, button, rootOverride, forceSave, refreshState) {
         if (window.AICF.archiveReadOnly) return false;
         var root = rootOverride || _h3ConfigRoot(segmentIndex, button);
+        if (root && root.closest) root = root.closest('.aicf-prompt-modal') || root;
+        if (root?._editorBusy) throw new Error('完整编辑稿正在保存，请稍候。');
+        if (root && root._shotEditor && root._shotEditor.dirty && !root._shotEditor.stale) throw new Error('请先通过顶部保存 Shot 草稿，再生成视频或单独保存配置');
         var requestedIndex = String(segmentIndex || '');
         var rootIndex = root && root.dataset ? String(root.dataset.segmentIndex || '') : '';
         if (root && root.classList && root.classList.contains('aicf-prompt-modal')) {
@@ -4020,6 +4450,12 @@ window._findGradioInput = window.AICF.findGradioInput;
         if (!card || !root) return false;
         var saveSession = String((root.dataset && root.dataset.h3Session) || '');
         var saveRuntime = String(window.AICF.promptRuntimeRevision || 0);
+        var requestRuntime = root._editorRuntime || (card.dataset && card.dataset.runtime);
+        if (requestRuntime) root._editorRuntime = requestRuntime;
+        var runtimeHeaders = requestRuntime ? {
+            'X-AICF-Runtime': encodeURIComponent(requestRuntime),
+            'X-AICF-Runtime-Encoding': 'uri'
+        } : {};
         while (root._h3SavePending) {
             await root._h3SavePending;
             if (String(window.AICF.promptRuntimeRevision || 0) !== saveRuntime || String(root.dataset.h3Session || '') !== saveSession) {
@@ -4042,6 +4478,8 @@ window._findGradioInput = window.AICF.findGradioInput;
             var submittedPrompt = promptField
                 ? String(promptField.value || '')
                 : String(promptSource && promptSource.textContent || '');
+            var submittedManifestSnapshot = window.AICF.h3ManifestSignature(manifest);
+            var bindingSource = root.querySelector('.h3-asset-list');
             var inputs = root.querySelectorAll('.h3-asset-input');
             for (var index = 0; index < inputs.length; index += 1) {
                 var input = inputs[index];
@@ -4049,7 +4487,7 @@ window._findGradioInput = window.AICF.findGradioInput;
                 var form = new FormData();
                 form.append('asset_type', String(input.dataset.mediaType || ''));
                 Array.prototype.forEach.call(input.files, function(file) { form.append('files', file); });
-                var upload = await _requestJson('/api/segment/' + String(segmentIndex) + '/assets', {method: 'POST', body: form});
+                var upload = await _requestJson('/api/segment/' + String(segmentIndex) + '/assets', {method: 'POST', headers:runtimeHeaders, body: form});
                 (upload.assets || []).forEach(function(item) { manifest.push(item); });
                 input.value = '';
             }
@@ -4060,20 +4498,25 @@ window._findGradioInput = window.AICF.findGradioInput;
             });
             var response = await _requestJson('/api/segment/generation-config', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: Object.assign({'Content-Type': 'application/json'}, runtimeHeaders),
                 body: JSON.stringify({
                     segment_index: Number(segmentIndex),
                     generation_mode: 'ref2va',
                     asset_manifest: manifest,
+                    base_revision: bindingSource && bindingSource.dataset.baseRevision || undefined,
+                    segment_uid: bindingSource && bindingSource.dataset.segmentUid || undefined,
                     prompt_override: submittedPrompt,
                     prompt_provenance: (function() {
                         if (!root.dataset || !root.dataset.promptProvenance || !window.AICF.promptTextMatches(submittedPrompt, root.dataset.promptRevisionPrompt)) return null;
                         try { return JSON.parse(root.dataset.promptProvenance); } catch (error) { return null; }
                     })(),
-                    force_save: forceSave === true
+                    force_save: forceSave === true,
+                    refresh_scene_state: refreshState !== false
                 })
             });
             if (String(window.AICF.promptRuntimeRevision || 0) !== saveRuntime) return response;
+            if(response.state_status&&window.AICF.updateH3StateSummary)window.AICF.updateH3StateSummary(root,response);
+            if(response.scene_operation_id&&window.AICF.monitorH3Scene)window.AICF.monitorH3Scene(root,response.scene_operation_id);
             window.AICF.updateSegmentCardState(segmentIndex, response);
             var canonicalConfig = response && response.generation_config && typeof response.generation_config === 'object'
                 ? response.generation_config : {};
@@ -4084,12 +4527,26 @@ window._findGradioInput = window.AICF.findGradioInput;
                 && String((root.dataset && root.dataset.h3Session) || '') === saveSession
             );
             if (!rootStillMatches) return response;
+            if (response.editor_snapshot && window.AICF.syncH3EditorBaseline) window.AICF.syncH3EditorBaseline(root, response.editor_snapshot);
+            else if (window.AICF.refreshH3EditorBaseline) await window.AICF.refreshH3EditorBaseline(root);
+            if (String((root.dataset && root.dataset.h3Session) || '') !== saveSession || String(window.AICF.promptRuntimeRevision || 0) !== saveRuntime) return response;
+            if (window.AICF.h3ManifestSignature(_h3Manifest(root)) !== submittedManifestSnapshot ||
+                (promptField && String(promptField.value || '') !== submittedPrompt)) {
+                if (bindingSource && response.base_revision) bindingSource.dataset.baseRevision = response.base_revision;
+                throw new Error('请求时的版本已保存；当前新修改仍保留，请再次保存后继续。');
+            }
             var source = root.querySelector('.h3-asset-list');
-            if (source) source.dataset.manifest = JSON.stringify(canonicalManifest);
+            if (source) {
+                source.dataset.manifest = JSON.stringify(canonicalManifest);
+                if (response.base_revision) source.dataset.baseRevision = response.base_revision;
+            }
             // Gradio may have recycled/replaced the card during the request.
             card = _segmentCardForIndex(segmentIndex, null);
             var cardSource = card ? card.querySelector('.h3-card-config-source') : null;
-            if (cardSource) cardSource.dataset.manifest = JSON.stringify(canonicalManifest);
+            if (cardSource) {
+                cardSource.dataset.manifest = JSON.stringify(canonicalManifest);
+                if (response.base_revision) cardSource.dataset.baseRevision = response.base_revision;
+            }
             var fullscreenTemplate = card ? card.querySelector('.h3-fullscreen-config-template') : null;
             var templateSource = fullscreenTemplate && fullscreenTemplate.content
                 ? fullscreenTemplate.content.querySelector('.h3-asset-list')
@@ -4106,6 +4563,10 @@ window._findGradioInput = window.AICF.findGradioInput;
             }
             window.AICF.refreshH3AssetCount(root);
             _h3Status(root, forceSave === true ? '已按页面图片顺序和提示词强制保存，素材绑定已更新。' : 'H3 素材、主体定义与参考关系已同步保存。', false);
+            if (response.prompt_chars !== undefined) window.AICF.showH3PromptCount(root, response);
+            if (root._shotEditor && !root._shotEditor.dirty && !root._shotEditor.reading && !root._shotEditor.saving) {
+                await root._shotEditor.read(false);
+            }
             if (root.classList.contains('aicf-prompt-modal')) {
                 await window.AICF.mountVideoChannels(segmentIndex);
             }
@@ -4119,40 +4580,58 @@ window._findGradioInput = window.AICF.findGradioInput;
             if (button) { button.disabled = false; button.textContent = originalText || '保存 H3 配置'; }
         }
     };
-    window.AICF.regenerateH3Segment = async function(segmentIndex, button) {
+    window.AICF.regenerateH3Segment = async function(segmentIndex, button, options) {
+        options = options || {};
         if (window.AICF.archiveReadOnly) return false;
+        var pending = window.AICF._h3VideoRegenPending || (window.AICF._h3VideoRegenPending = {});
+        if (pending[String(segmentIndex)]) {
+            if (options.throwOnFailure) throw new Error('本段已有视频提交操作正在执行');
+            return false;
+        }
+        pending[String(segmentIndex)] = true;
         var card = _segmentCardForIndex(segmentIndex, button);
         var root = _h3ConfigRoot(segmentIndex, button) || card;
         var originalText = button ? button.textContent : '';
+        var regenerationRuntimeRevision = String(window.AICF.promptRuntimeRevision || 0);
         try {
             if (button) { button.disabled = true; button.textContent = '校验中…'; }
             var saveButton = root && root.classList && root.classList.contains('aicf-prompt-modal')
                 ? root.querySelector('.aicf-prompt-modal-save')
                 : card ? card.querySelector('.h3-prompt-save') : null;
-            await window.AICF.saveH3GenerationConfig(segmentIndex, saveButton, root);
+            if (!options.prepared) await window.AICF.saveH3GenerationConfig(segmentIndex, saveButton, root, false, false);
             var channel = await window.AICF.chooseVideoChannel(segmentIndex);
-            if (!channel) { if (button) {button.disabled = false; button.textContent = originalText;} return false; }
+            if (!channel) { if (button) {button.disabled = false; button.textContent = originalText;} if(options.throwOnFailure)throw new Error('尚未选择视频渠道，未提交生成');return false; }
+            if (options.guard) options.guard();
             if (channel.uses_workflow) {
             var validation = await _requestJson('/api/segment/validate', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: options.runtime ? {'Content-Type':'application/json','X-AICF-Runtime':encodeURIComponent(options.runtime),'X-AICF-Runtime-Encoding':'uri'} : {'Content-Type': 'application/json'},
                 body: JSON.stringify({segment_index: Number(segmentIndex)})
             });
             if (validation.errors && validation.errors.length) {
                 throw new Error(_validationMessage(validation.errors));
             }
             }
+            if (options.guard) options.guard();
             if (button) button.textContent = '提交中…';
+            if (options.guard) options.guard();
+            if (String(window.AICF.promptRuntimeRevision || 0) !== regenerationRuntimeRevision) throw new Error('项目已切换，已取消旧页面视频提交');
             var submission = await _requestJson('/api/segment/regenerate_video', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: options.runtime ? {'Content-Type':'application/json','X-AICF-Runtime':encodeURIComponent(options.runtime),'X-AICF-Runtime-Encoding':'uri'} : {'Content-Type': 'application/json'},
                 body: JSON.stringify({segment_index: Number(segmentIndex), channel_id: channel.id})
             });
-            window.AICF.replaceSegmentCardFromResponse(segmentIndex, submission, card, '.primary-mini');
+            delete pending[String(segmentIndex)];
+            var updatedCard = window.AICF.replaceSegmentCardFromResponse(segmentIndex, submission, card, '.primary-mini');
+            if (options.prepared && updatedCard && root) root._sourceButton = updatedCard.querySelector('.h3-prompt-open-action') || root._sourceButton;
             if (submission.web_video_task_id) window.AICF.watchWebVideoTask(segmentIndex, submission.web_video_task_id);
+            if (options.throwOnFailure) return submission;
         } catch (error) {
             _h3Status(root, error && error.message ? error.message : 'H3 重新生成失败', true);
             if (button) { button.disabled = false; button.textContent = originalText || '验证并重新生成'; }
+            if (options.throwOnFailure) throw error;
+        } finally {
+            delete pending[String(segmentIndex)];
         }
         return false;
     };
@@ -4162,9 +4641,28 @@ window._findGradioInput = window.AICF.findGradioInput;
 initAICF();
 """
 
+from ui.browser_runtime_ui import BROWSER_RUNTIME_JS
+APP_JS = BROWSER_RUNTIME_JS + APP_JS
+
+from ui.h3_prompt_editor_ui import PROMPT_EDITOR_JS
+APP_JS += PROMPT_EDITOR_JS
+
 from ui.web_llm_ui import WEB_LLM_JS
 
 APP_JS += WEB_LLM_JS
+from ui.h3_shot_editor_ui import SHOT_EDITOR_JS
+APP_JS += SHOT_EDITOR_JS
 from ui.text_jobs_ui import PANEL_JS
 APP_JS += PANEL_JS
+
+from ui.h3_editor_draft_ui import EDITOR_DRAFT_JS
+APP_JS += EDITOR_DRAFT_JS
+
+from ui.h3_composite_ui import COMPOSITE_JS
+APP_JS += COMPOSITE_JS
+
+from ui.scene_video_batch_ui import SCENE_BATCH_JS
+APP_JS += SCENE_BATCH_JS
+
+# Export only after every editor module has been appended.
 APP_JS_FUNCTION = APP_JS

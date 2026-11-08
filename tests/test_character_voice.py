@@ -57,9 +57,9 @@ def test_speaker_binding_and_transcript_not_in_prompt(tmp_path):
     config = H3GenerationConfig.from_mapping({"asset_manifest": bound, "prompt_override": "吴天说新台词。"})
     bindings = H3AssetBinder().bind(config)
     prompt = H3PromptCompiler().compile({}, config, bindings, duration_sec=5).text
-    assert "<Audio 1> → <Picture 1>" in prompt
+    assert "<Audio 1> → <Subject 1>" in prompt
     assert "不要当作剧情" not in prompt
-    assert H3PromptCompiler._with_character_voices(prompt, bindings) == prompt
+    assert H3PromptCompiler.compact_reference_sections(prompt, bindings) == prompt
     assert "不要当作剧情" not in json.dumps(bound, ensure_ascii=False)
     assert attach_character_voices(bound, beat, assets) == bound
     assert attach_character_voices(bound, {}, assets) == [image]
@@ -146,6 +146,53 @@ def test_automatic_speaker_voices_stop_at_three(tmp_path, monkeypatch):
     assert [item["metadata"]["identity_id"] for item in audios] == ["person0", "person1", "person2"]
     assert bound[:5] == images
     assert voices.attach_character_voices(bound, beat, tmp_path) == bound
+
+
+def test_registered_offscreen_speaker_gets_voice_without_adding_its_picture(tmp_path):
+    folder = tmp_path / 'characters/identities/offscreen-person'
+    folder.mkdir(parents=True)
+    (folder / 'voice.wav').write_bytes(b'sample')
+    (folder / 'asset_meta.json').write_text(json.dumps({'identity': {
+        'voice_reference': {'file': 'voice.wav', 'duration_sec': 3}}}), encoding='utf-8')
+    bible = {'core_characters': [{'id': 'character_phone', 'display_name': '电话人物',
+                                  'asset_identity_id': 'offscreen-person'}]}
+    background = {'asset_id': 'room', 'type': 'image', 'path': 'room.png',
+                  'metadata': {'asset_kind': 'background'}}
+    beat = {'dialogue_units': [{'speaker': 'character_phone', 'scope': 'telephone', 'line': '你好。'}]}
+    result = attach_character_voices([background], beat, tmp_path, bible)
+    assert [a for a in result if a['type'] == 'image'] == [background]
+    assert result[-1]['metadata']['role_id'] == 'character_phone'
+    assert result[-1]['metadata']['voice_speaker'] == '电话人物'
+    assert attach_character_voices(result, beat, tmp_path, bible) == result
+
+
+def test_saving_current_speaker_automatically_adds_its_library_voice(tmp_path, monkeypatch):
+    from generation.service import GenerationService
+    from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+    from generation.pipelines.minimax_h3.prompt_reconciler import H3PromptReconciler
+    from types import SimpleNamespace
+    folder = tmp_path / 'characters/identities/person'
+    folder.mkdir(parents=True)
+    (folder / 'voice.wav').write_bytes(b'sample')
+    (folder / 'asset_meta.json').write_text(json.dumps({'identity': {
+        'voice_reference': {'file': 'voice.wav', 'duration_sec': 3}}}), encoding='utf-8')
+    monkeypatch.setattr('services.context.ASSETS_DIR', tmp_path)
+    monkeypatch.setattr('generation.pipelines.minimax_h3.auto_binder.enrich_asset_manifest_metadata', lambda items: items)
+    monkeypatch.setattr('generation.pipelines.minimax_h3.prompt_compiler.load_project_bible', lambda: {})
+    image = {'asset_id': 'person', 'type': 'image', 'path': 'person.png', 'role': '说话人',
+             'metadata': {'asset_kind': 'character', 'identity_id': 'person', 'role_id': 'actor'}}
+    prompt = '【详细镜头描述】\n[Shot 1]（0–5 秒）：画面人物：<Subject 1>；<Subject 1>说：<d>[Chinese]你好。</d>'
+    service = object.__new__(GenerationService)
+    def reconcile(segment, old, new, text):
+        return {**new, 'prompt_override': H3PromptReconciler().reconcile(
+            text, H3GenerationConfig.from_mapping(old), H3GenerationConfig.from_mapping(new))}
+    service._pipeline_for = lambda model: SimpleNamespace(reconcile_generation_config=reconcile)
+    result = service._prepare_h3_prompt({}, {'asset_manifest': [image]}, {'asset_manifest': [image]}, prompt)
+    assert result['asset_manifest'][0] == image
+    assert len([a for a in result['asset_manifest'] if a['type'] == 'audio']) == 1
+    assert '<Audio 1> → <Subject 1>' in result['prompt_override']
+    again = service._prepare_h3_prompt({}, result, result, result['prompt_override'])
+    assert again['asset_manifest'] == result['asset_manifest']
 
 
 def test_editor_preserves_prepared_automatic_audio(tmp_path):

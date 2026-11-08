@@ -1,8 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 import traceback
@@ -19,8 +18,11 @@ from generation.beat_policy import beat_policy_prompt, project_beat_policy
 from generation.model_rules import rules_for_model
 from prompt_builder.profile_loader import load_beat_writer_profile
 from services.generation_policy import max_important_visible_roles
+from services.llm_payloads import project_bible_context
 from services.llm import call_deepseek_chat_sdk
 
+
+BEAT_GROUPING_REVISION = 2
 
 MIN_VIDEO_SEGMENT_SEC = 15
 MIN_TARGETED_VIDEO_SEGMENT_SEC = 8
@@ -273,46 +275,13 @@ def _additional_duration_policy_prompt(policy) -> str:
     return beat_policy_prompt(policy.model_id)
 
 
-def _target_count_range(target_duration_sec: int, policy=None) -> tuple[int, int]:
-    policy = policy or project_beat_policy()
-    target = max(policy.min_duration_sec, int(target_duration_sec or 60))
-    minimum = max(1, math.ceil(target / policy.max_duration_sec))
-    maximum = max(minimum, math.floor(target / policy.min_duration_sec))
-    return minimum, maximum
-
-
-def _clone_split_beat(beat: dict[str, Any], copy_index: int, copy_count: int) -> dict[str, Any]:
-    item = dict(beat)
-    item["title"] = f"{beat.get('title') or '剧情段落'} {copy_index}/{copy_count}"
-    return item
-
-
 def fit_beats_to_segment_count(beats, target_duration_sec, target_beat_count=None, policy=None):
-    policy = policy or project_beat_policy()
+    """Preserve the model's actual Beat count; the requested count is a reference."""
     if not isinstance(beats, list) or not beats:
         raise ValueError("DeepSeek output must contain non-empty beats array")
-    target_count = _normalise_target_beat_count(target_beat_count)
-    if target_count:
-        average = int(target_duration_sec or 60) / target_count
-        preferred_min = policy.targeted_min_duration_sec
-        effective_min = policy.min_duration_sec if policy.min_duration_sec <= average < preferred_min else preferred_min
-        if average < effective_min or average > policy.max_duration_sec:
-            raise ValueError(
-                f"target_beat_count={target_count} is incompatible with target_duration_sec={target_duration_sec}; "
-                f"average segment duration must be {effective_min}-{policy.max_duration_sec}s"
-            )
-        selected = [beat for beat in beats if isinstance(beat, dict)]
-        if len(selected) != target_count:
-            raise ValueError(f"DeepSeek output beat count {len(selected)} does not match target_beat_count={target_count}")
-        return selected
-    minimum, maximum = _target_count_range(int(target_duration_sec or 60), policy=policy)
-    selected = [beat for beat in beats if isinstance(beat, dict)]
-    if len(selected) > maximum:
-        selected = selected[:maximum]
-    while len(selected) < minimum:
-        source = selected[-1] if selected else beats[0]
-        selected.append(_clone_split_beat(source, len(selected) + 1, minimum))
-    return selected
+    if not all(isinstance(beat, dict) for beat in beats):
+        raise ValueError("Each Beat must be a JSON object")
+    return list(beats)
 
 
 def distribute_seconds(
@@ -400,32 +369,27 @@ def beat_structure_policy_prompt(policy=None):
 def beat_count_policy_prompt(target_duration_sec=None, target_beat_count=None, policy=None):
     policy = policy or project_beat_policy()
     count = _normalise_target_beat_count(target_beat_count)
-    if not count:
-        return ""
     total = int(target_duration_sec or 60)
-    average = total / count
-    short_rule = "" if policy.model_id == "minimax_h3_local_ref2va" else (
-        f"- 指定 target_beat_count 时，允许 {policy.targeted_min_duration_sec}–{min(12, policy.max_duration_sec)} 秒的短段。\n"
-        "- 不得为了凑数量而创建无剧情价值的转场、走路、进入、离开或事后反应段落。\n"
-    )
-    duration_guidance = (
-        "- 不要把总时长平均切给每个 Beat，也不要为了整齐让各 Beat 时长相同。\n"
-        "- 逐个判断剧情事件需要的实际呈现时间：综合对白字数与自然语速、动作步骤、信息密度、情绪推进、悬念停顿和事件结果，给每个 Beat 独立分配时长。\n"
-        "- 多轮对白、复杂动作、关键转折或情绪爆发可以更长；单一动作、简短反应或快速揭示可以更短，但必须完整表达事件。\n"
-        "- 先确定每个 Beat 的剧情所需时长，再微调个别 Beat 使全体总和精确等于目标；只在模型允许的单段时长范围内调整。"
-        if policy.model_id == "minimax_h3_local_ref2va"
-        else "- 依据每段剧情的信息量、对白、动作步骤和情绪节奏独立分配时长，不要平均分配；所有时长必须符合模型范围且总和精确等于目标。"
-    )
+    reference = f"参考 Beat 数量为 {count}。" if count else "未指定参考数量，由你根据内容决定 Beat 数量。"
     return f"""
 
-目标分段数量：
-- 必须恰好输出 {count} 个叙事段，不得增加或减少。
-- 目标总时长为 {total} 秒（平均 {average:.1f} 秒仅用于检查总时长和分段数量是否可行，不是每段的时长要求）。
-- 所有 estimated_duration_sec 的总和必须恰好为 {total} 秒。
-{duration_guidance}
-{short_rule.rstrip()}
-- 如果剧情事件少于目标数量，将内容最丰富的事件拆成更小但完整、具有明确戏剧价值的视频事件。
-- 如果原文事件多于目标数量，将相邻的因果过程合并为完整叙事段，不要删掉剧情转折。
+参考分段数量：
+- {reference}target_beat_count 是需要主动接近的规划目标；可根据完整对白、事件边界及模型允许的单段时长适当增减，不要求实际数量与参考值相等，但不能把“仅供参考”理解成随意大幅超量。
+- 优先保证原文对白完整、顺序正确、事件衔接自然；不为凑数量强行拆分或合并，不遗漏、改写或重复台词。
+- 对白和必要动作无法在单段允许时长内自然完成时，在合适的对白或事件边界拆成相邻 Beat；保持原文顺序，前后连续。
+- 不为凑数量创建无剧情价值的移动、转场或反应段落，也不把放不下的台词留给未规划的下一段。
+- 参考总时长为 {total} 秒；target_duration_sec 用于约束整体规模，实际总时长可根据完整剧情、对白和必要动作适当增减，不要求各段时长之和与参考值相等。
+- 不为凑参考时长新增剧情、拖长停顿、删减内容或压缩对白；total_duration_sec 按实际各段 estimated_duration_sec 之和计算。
+- 逐个根据对白的自然表达、必要动作和事件节奏独立分配时长，不平均切分，不强行加速对白。
+- 先通读整场事件及空间变化，再按连续事件分组；一次发言、反应或切镜不等于一个 Beat，同一 Beat 可以包含多个 Shot。
+- 先列出完整事件组，再在组内安排对白、动作和 Shot；不要先按句号、说话人轮次或自然段逐句拆 Beat。
+- 同一时空、同一目标或同一因果链里的短问答、接话、质疑与回应、动作及其必要反应，若能在模型单段上限内自然完成，应合在同一个 Beat；换说话人、换机位或插入反应镜头用 Shot 表达。
+- 只有一句简短对白、一个点头/惊讶反应、一次信息确认的草稿段，优先与前后同一事件组合并；只有明确换时空、独立剧情转折、或相邻事件合并后自然时长超限时才保留独立段。长独白本身可构成完整事件，不能按“句数”机械合并。
+- 示例：“准备好了吗？”→“好了。”→对方点头开始操作，是同一个事件组，可以用多 Shot，不能默认拆成三个 Beat。示例只解释分组原则，不作为故事素材。
+- 辅助表情、视线、手势、机位变化尽量与发声同时发生，不为每句对白前后各加一次独立停顿、空镜或保险时长。
+- 输出前逐对复核相邻 Beat：同事件且合并后能在单段上限内自然完成的，合并并重新安排 Shots 和时长；不能合并时须有剧情边界或实际时长依据，不能只因为“一句对白已经完整”。
+- 优先接近参考数量和总时长：数量容差约20%（至少1段），总时长容差20%。无法容纳完整原文时保留内容并明确说明预算缺口，不默默增加大量碎段，不删词或加速硬塞。
+- 每个 Beat 都须符合模型允许的 {policy.min_duration_sec}–{policy.max_duration_sec} 秒范围；各段共同完整覆盖原文内容。
 """
 
 
@@ -670,7 +634,7 @@ def call_deepseek(config, payload, output_path, temp_dir):
                 profile_name=_beat_writer_profile_name(policy),
             ),
         },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({**payload, "project_bible": project_bible_context(payload.get("project_bible"))}, ensure_ascii=False)},
     ]
     return _call_deepseek_messages(config, messages, temp_dir, name="beats_deepseek")
 
@@ -702,11 +666,17 @@ def repair_deepseek_beats(config, payload, raw_data, validation_error, temp_dir,
         repair_system += "\n\n" + str(extra_instruction).strip()
     repair_payload = {
         "validation_error": str(validation_error),
-        "original_input": payload,
+        "validation_issues": getattr(validation_error, 'issues', []),
+        "original_input": {**payload, "project_bible": project_bible_context(payload.get("project_bible"))},
         "invalid_beats_json": raw_data,
-        "repair_task": "修复 invalid_beats_json，使其通过结构校验。不要改写故事，不要新增支线。",
+        "repair_task": "按 validation_issues 定向修复对应 Beat；其他内容保持。超限时允许增加分段，不为凑参考数量删词或加速；同步各段 Shots 时间。返回完整结果，不新增剧情。",
         "target_beat_count": payload.get("target_beat_count"),
     }
+    from services.llm_payloads import referenced_feedback, INPUT_REFERENCE_RULE
+    repair_payload['validation_issues'] = referenced_feedback(
+        repair_payload['validation_issues'],
+        {key: repair_payload[key] for key in ('original_input', 'invalid_beats_json')})
+    repair_system += "\n" + INPUT_REFERENCE_RULE
     messages = [
         {"role": "system", "content": repair_system},
         {"role": "user", "content": json.dumps(repair_payload, ensure_ascii=False)},
@@ -714,7 +684,38 @@ def repair_deepseek_beats(config, payload, raw_data, validation_error, temp_dir,
     return _call_deepseek_messages(config, messages, temp_dir, name="beats_deepseek_repair")
 
 
-def normalize_beats(data, target_duration_sec=None, target_beat_count=None, model_id=None):
+class H3BeatValidationError(ValueError):
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__('每段时长须在 4-15 秒内；' + '；'.join(item['message'] for item in issues)
+                         if any(item['code'] == 'duration_out_of_range' for item in issues)
+                         else '；'.join(item['message'] for item in issues))
+
+
+def h3_beat_issues(data):
+    """Describe deterministic failures without shortening dialogue or guessing scope."""
+    from generation.pipelines.minimax_h3.prompt_planner import validate_h3_plan_dialogue_records
+    issues = []
+    for index, beat in enumerate(data.get('beats') or [], 1):
+        if not isinstance(beat, dict):
+            continue
+        try:
+            value = float(beat.get('estimated_duration_sec'))
+            valid = not isinstance(beat.get('estimated_duration_sec'), bool) and 4 <= value <= 15 and value.is_integer()
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            issues.append({'code': 'duration_out_of_range', 'beat_index': index,
+                           'actual': beat.get('estimated_duration_sec'), 'blocking': True,
+                           'message': f"Beat {index}（{beat.get('title', '')}）时长 {beat.get('estimated_duration_sec')} 秒，提交需为 4–15 秒整数；保留对白，在自然对白或事件边界拆段并同步 Shots 时间，不能只压缩总秒数。"})
+        hints = (beat.get('model_hints') or {}).get('minimax_h3_local_ref2va') or {}
+        for message in validate_h3_plan_dialogue_records(hints):
+            issues.append({'code': 'invalid_dialogue_record', 'beat_index': index, 'blocking': True,
+                           'message': f'Beat {index}: {message}；scope 使用 onscreen/offscreen/telephone/narration 等有效声源，不猜测或静默改写。'})
+    return issues
+
+
+def normalize_beats(data, target_duration_sec=None, target_beat_count=None, model_id=None, *, project_bible=None, draft_mode=False):
     if not isinstance(data, dict):
         raise ValueError("DeepSeek output must be a JSON object")
     title = str(data.get("title", "") or "故事标题")
@@ -731,22 +732,9 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
         target_beat_count=target_beat_count,
         policy=policy,
     )
-    drift_limit = model_rules.beat_planning.max_raw_duration_drift_ratio
-    raw_duration_values: list[int] = []
-    for beat in selected_beats:
-        try:
-            raw_duration_values.append(int(round(float((beat or {}).get("estimated_duration_sec") or 0))))
-        except (TypeError, ValueError):
-            raw_duration_values.append(0)
-    if drift_limit is not None and raw_duration_values and all(value > 0 for value in raw_duration_values):
-        raw_total = sum(raw_duration_values)
-        drift_ratio = abs(raw_total - target_duration_sec) / max(1, target_duration_sec)
-        if drift_ratio > float(drift_limit):
-            raise ValueError(
-                f"{model_rules.label} raw Beat plan totals {raw_total}s for a {target_duration_sec}s target "
-                f"(drift {drift_ratio:.0%}); merge or expand macro events and regenerate the complete Beat/Shot plan"
-            )
-
+    h3_issues = h3_beat_issues(data) if policy.model_id == "minimax_h3_local_ref2va" else []
+    if h3_issues and not draft_mode:
+        raise H3BeatValidationError(h3_issues)
     cleaned = []
     raw_durations = []
     visible_role_limit = model_rules.max_visible_roles or max_important_visible_roles()
@@ -840,6 +828,14 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
         source_excerpt = str(beat.get("source_excerpt") or "").strip()
         if source_excerpt:
             cleaned_beat["source_excerpt"] = source_excerpt
+        beat_issues = [issue for issue in h3_issues if issue['beat_index'] == index]
+        if beat_issues:
+            cleaned_beat.update(planning_state='warning', planning_issues=beat_issues)
+        if policy.model_id == "minimax_h3_local_ref2va" and project_bible is not None and not any(
+                issue['code'] == 'invalid_dialogue_record' for issue in beat_issues):
+            from generation.pipelines.minimax_h3.semantic_bindings import normalize_beat_bindings
+            cleaned_beat = normalize_beat_bindings(cleaned_beat, bible=project_bible,
+                                                  scene_contexts=data.get("scene_contexts", []))
         cleaned.append(cleaned_beat)
         if not model_hints:
             cleaned[-1].pop("model_hints", None)
@@ -848,13 +844,11 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
             "visible_roles": list(visible_roles),
             "reference_roles": list(reference_roles),
         }
-    # Duration is a creative decision owned by the model. Never redistribute
-    # seconds locally: invalid totals trigger the existing model repair path.
+    # Preserve plot-driven durations. The requested total is a planning
+    # reference; only actual per-segment model limits are hard constraints.
     durations = raw_durations
-    if any(value < policy.min_duration_sec or value > policy.max_duration_sec for value in durations):
+    if not (draft_mode and policy.model_id == "minimax_h3_local_ref2va") and any(value < policy.min_duration_sec or value > policy.max_duration_sec for value in durations):
         raise ValueError(f"每段时长须在 {policy.min_duration_sec}-{policy.max_duration_sec} 秒内；请根据剧情重新分配时长")
-    if sum(durations) != target_duration_sec:
-        raise ValueError(f"剧情分段时长总和 {sum(durations)} 秒不等于目标 {target_duration_sec} 秒；请根据对白、动作和节奏修复，禁止平均分配")
     for item, duration in zip(cleaned, durations):
         item["estimated_duration_sec"] = duration
     return ensure_event_fields_on_beats(
@@ -862,9 +856,13 @@ def normalize_beats(data, target_duration_sec=None, target_beat_count=None, mode
             "title": title,
             "locked_outcome": locked_outcome,
             "target_duration_sec": target_duration_sec,
+            "target_beat_count": target_beat_count,
             "total_duration_sec": sum(item["estimated_duration_sec"] for item in cleaned),
             "generation_policy": {"model_id": policy.model_id, "rules_revision": model_rules.revision, "duration_min_sec": policy.min_duration_sec, "duration_max_sec": policy.max_duration_sec},
+            "scene_contexts": data.get("scene_contexts", []),
             "beats": cleaned,
+            **({'planning_state': 'warning', 'planning_issues': h3_issues,
+                'planning_raw_response': data} if h3_issues else {}),
         }
     )
 
@@ -891,6 +889,74 @@ NOVEL_BEATS_DIALOGUE_H3 = """
 """.strip()
 
 
+def _novel_dialogue_shots(data, model_id):
+    shots = []
+    for beat in data.get('beats') or []:
+        native = ((beat.get('model_hints') or {}).get(model_id) or {}).get('shots') or []
+        shots.extend(native if native else [{'dialogues': beat.get('dialogue_units') or []}])
+    return shots
+
+
+def _review_novel_grouping(result, *, payload, config, system, policy, temp_dir):
+    """Let the model regroup an oversized draft once; never splice prose locally."""
+    from pipeline.planning_budget import budget_report
+    from generation.pipelines.minimax_h3.prompt_planner import _assert_current_dialogue_preserved
+    report = budget_report(result)
+    if not report['exceeds_reference'] or result.get('planning_issues'):
+        return result
+    log('[beats][grouping] ' + report['message'] + '；复核相邻事件分组一次')
+    request = {
+        'original_input': {**payload, 'project_bible': project_bible_context(payload.get('project_bible'))}, 'current_beats': result, 'planning_budget': report,
+        'task': '复核分组并返回完整 Beats JSON；先合并同一事件中的短对白及反应，再重新分配 Shots 和自然时长。',
+    }
+    instruction = """
+【分组复核，仅一次】
+保持完整原稿、对白原文、说话人、顺序、事件和结局。不要重写剧情。
+先识别相邻段中可在单段时长上限内自然完成的同一事件组，合并短问答、接话、动作及必要反应；换机位和换说话人通过同一 Beat 内的 Shots 表达。
+不跨明确时空变化强行合并，不把长对白加速塞入一段；不新增动作、空镜或停顿填时。不要求每句台词前后都额外计时。
+合并后的 source_excerpt 必须由被合并各段原文摘录按顺序完整连接，不重复、不遗漏。同步所有 Shots 起止时间和 estimated_duration_sec。
+尽量回到参考数量和总时长附近。若完整原文确实放不下，在顶层 grouping_reason 简述不能进一步合并的事件边界或自然发声时间依据，保留内容，不伪报秒数。
+返回完整 JSON，不能只返回修改说明。
+"""
+    review = {'status': 'retained', 'before': report}
+    try:
+        raw = _call_deepseek_messages(config, [
+            {'role': 'system', 'content': system + '\n\n' + instruction},
+            {'role': 'user', 'content': json.dumps(request, ensure_ascii=False)},
+        ], temp_dir, name='beats_novel_grouping_review')
+        candidate = normalize_beats(raw, target_duration_sec=report['target_duration_sec'],
+            target_beat_count=report['target_beat_count'], model_id=policy.model_id,
+            project_bible=payload.get('project_bible'))
+        original_shots = _novel_dialogue_shots(result, policy.model_id)
+        units = []
+        for shot in original_shots:
+            values = shot.get('dialogues', shot.get('dialogue', []))
+            units.extend(values if isinstance(values, list) else [values])
+        _assert_current_dialogue_preserved({'dialogue_units': units, 'dialogue_authoritative': True},
+            {'shots': _novel_dialogue_shots(candidate, policy.model_id)})
+        def excerpts(data):
+            return ''.join(''.join(str(b.get('source_excerpt') or '').split()) for b in data['beats'])
+        if excerpts(result) and excerpts(result) != excerpts(candidate):
+            raise ValueError('合并候选的原文摘录覆盖或顺序发生变化')
+        after = budget_report(candidate)
+        def excess(value):
+            return (max(0, value['actual_beat_count'] / value['target_beat_count'] - 1)
+                    if value['target_beat_count'] else 0) + (
+                    max(0, value['estimated_duration_sec'] / value['target_duration_sec'] - 1)
+                    if value['target_duration_sec'] else 0)
+        if excess(after) < excess(report):
+            result = candidate
+            review.update(status='regrouped', after=after)
+        review['reason'] = str(raw.get('grouping_reason') or
+            ('复核稿仍超出参考预算，请检查事件分组或调整目标。' if after['exceeds_reference'] else ''))
+    except (ValueError, TypeError, KeyError) as exc:
+        # Invalid regrouping must not replace the complete original draft.
+        review['reason'] = str(exc)
+        log('[beats][grouping] 合并候选未采用，保留原稿：' + str(exc))
+    result['grouping_review'] = review
+    return result
+
+
 def generate_novel_beats(payload, config=None, model_id="", temp_dir=None, extra_instruction=NOVEL_BEATS_EXTRA):
     """已有完整小说 → Beats：复用故事链路相同的 policy/结构/时长规则与修复流程。"""
     requested_model_id = str(model_id or (payload.get("generation_policy") or {}).get("model_id") or "").strip()
@@ -913,22 +979,6 @@ def generate_novel_beats(payload, config=None, model_id="", temp_dir=None, extra
         if auto_count:
             target_beat_count = auto_count
             payload["target_beat_count"] = auto_count
-    else:
-        # 显式分段数若与总时长不兼容（平均时长超出模型范围），改用模型默认分段数，避免硬失败。
-        average = target_duration_sec / max(1, target_beat_count)
-        effective_min = (
-            policy.min_duration_sec
-            if policy.min_duration_sec <= average < policy.targeted_min_duration_sec
-            else policy.targeted_min_duration_sec
-        )
-        if average < effective_min or average > policy.max_duration_sec:
-            if auto_count and auto_count != target_beat_count:
-                log(
-                    f"[beats][novel] target_beat_count={target_beat_count} 与 {target_duration_sec}s 不兼容"
-                    f"（平均需 {effective_min}-{policy.max_duration_sec}s），改用模型默认 {auto_count} 段"
-                )
-                target_beat_count = auto_count
-                payload["target_beat_count"] = auto_count
     policy_prompt = "\n\n".join(
         part
         for part in (
@@ -947,7 +997,7 @@ def generate_novel_beats(payload, config=None, model_id="", temp_dir=None, extra
         system += "\n\n" + str(extra_instruction).strip()
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({**payload, "project_bible": project_bible_context(payload.get("project_bible"))}, ensure_ascii=False)},
     ]
     temp_dir = Path(temp_dir) if temp_dir else Path(".")
     raw_data = _call_deepseek_messages(config, messages, temp_dir, name="beats_novel")
@@ -957,18 +1007,30 @@ def generate_novel_beats(payload, config=None, model_id="", temp_dir=None, extra
             target_duration_sec=target_duration_sec,
             target_beat_count=target_beat_count,
             model_id=active_rules.model_id,
+            project_bible=payload.get("project_bible"),
         )
     except Exception as validation_error:
         log(f"[beats][novel][repair] validation failed: {validation_error}")
         repaired_data = repair_deepseek_beats(
             config, payload, raw_data, validation_error, temp_dir, extra_instruction=extra_instruction
         )
-        result = normalize_beats(
-            repaired_data,
-            target_duration_sec=target_duration_sec,
-            target_beat_count=target_beat_count,
-            model_id=active_rules.model_id,
-        )
+        try:
+            result = normalize_beats(
+                repaired_data,
+                target_duration_sec=target_duration_sec,
+                target_beat_count=target_beat_count,
+                model_id=active_rules.model_id,
+                project_bible=payload.get("project_bible"),
+            )
+        except H3BeatValidationError as final_error:
+            log(f"[beats][novel][draft] 修正后仍有结构问题，保留可编辑候选：{final_error}")
+            result = normalize_beats(
+                repaired_data, target_duration_sec=target_duration_sec,
+                target_beat_count=target_beat_count, model_id=active_rules.model_id,
+                project_bible=payload.get('project_bible'), draft_mode=True)
+    result = _review_novel_grouping(result, payload=payload, config=config, system=system,
+                                    policy=policy, temp_dir=temp_dir)
+    result['beat_grouping_revision'] = BEAT_GROUPING_REVISION
     return result
 
 
@@ -996,11 +1058,11 @@ def run_generation(config_path="config.json", input_path=None, topic=None, outpu
         target_beat_count = _normalise_target_beat_count(target_beat_count or payload.get("target_beat_count"))
         active_model_id = str((payload.get("generation_policy") or {}).get("model_id") or model_id or "")
         try:
-            result = normalize_beats(raw_data, target_duration_sec=target_duration_sec, target_beat_count=target_beat_count, model_id=active_model_id)
+            result = normalize_beats(raw_data, target_duration_sec=target_duration_sec, target_beat_count=target_beat_count, model_id=active_model_id, project_bible=payload.get("project_bible"))
         except Exception as validation_error:
             log(f"[beats][repair] validation failed: {validation_error}")
             repaired_data = repair_deepseek_beats(config, payload, raw_data, validation_error, temp_dir)
-            result = normalize_beats(repaired_data, target_duration_sec=target_duration_sec, target_beat_count=target_beat_count, model_id=active_model_id)
+            result = normalize_beats(repaired_data, target_duration_sec=target_duration_sec, target_beat_count=target_beat_count, model_id=active_model_id, project_bible=payload.get("project_bible"))
         save_json(output_path, result)
         if target_beat_count:
             log(f"[beats] target_count={target_beat_count} actual_count={len(result['beats'])}")

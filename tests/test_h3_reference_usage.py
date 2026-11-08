@@ -79,9 +79,9 @@ def test_h3_detailed_shots_use_subject_tags_without_repeating_source_pictures():
     assert "<Subject 1>" in detail
     assert "<Subject 2>" in detail
     assert "<Subject 3>" in detail
-    assert "<Subject 4>（航天基地）" in detail
+    assert "场景使用 <Subject 4>" in detail
     assert "<Picture" not in detail
-    assert "<Subject 1>（出现于 Shot 1）：fully_preserved" in retention
+    assert "<Subject 1>：fully_preserved" in retention
     assert "<Subject 4>（出现于 Shot 1）：fully_preserved" in retention
     assert "<Picture" not in retention
 

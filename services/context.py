@@ -1,6 +1,7 @@
 """Application context: paths, config, and project/episode directory management."""
 import json
 import sys
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -26,6 +27,10 @@ CURRENT_EPISODE_NAME = ""
 PROJECT_DIR = OUTPUT_DIR / CURRENT_PROJECT_NAME
 _PINNED_RUNTIME = ContextVar("pinned_runtime", default=None)
 _ACTIVE_RUNTIME = (PROJECT_DIR, CURRENT_PROJECT_NAME, CURRENT_EPISODE_NAME)
+_SELECTION_LOCK = threading.RLock()
+_BROWSER_SESSION = ContextVar('browser_runtime_session', default=None)
+_BROWSER_RUNTIMES = {}
+_BROWSER_EPISODES = {}
 ASSETS_DIR = BASE_DIR / "assets"
 ASSET_INDEX_PATH = ASSETS_DIR / "asset_index.json"
 PYTHON_EXE = CONFIG.get("python_executable") or sys.executable or "python3"
@@ -74,6 +79,12 @@ def _activate(project_name: str, episode_name: str = "") -> Path:
     _ensure_project_meta(CURRENT_PROJECT_NAME)
     PROJECT_DIR = _ensure_runtime_dir(_runtime_dir(CURRENT_PROJECT_NAME, CURRENT_EPISODE_NAME))
     _ACTIVE_RUNTIME = (PROJECT_DIR, CURRENT_PROJECT_NAME, CURRENT_EPISODE_NAME)
+    session = _BROWSER_SESSION.get()
+    if session:
+        _BROWSER_RUNTIMES[session] = _ACTIVE_RUNTIME
+        _BROWSER_EPISODES.setdefault(session, {})[CURRENT_PROJECT_NAME] = CURRENT_EPISODE_NAME
+        # A project-selection callback may itself be pinned by process_api.
+        _PINNED_RUNTIME.set(_ACTIVE_RUNTIME)
     return PROJECT_DIR
 
 
@@ -92,21 +103,56 @@ def _load_last_project_name() -> str:
 def save_last_project_name(project_name: str) -> None:
     name = str(project_name or "current").strip() or "current"
     try:
-        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        LAST_PROJECT_PATH.write_text(json.dumps({"project_name": name}, ensure_ascii=False, indent=2), encoding="utf-8")
+        with _SELECTION_LOCK:
+            data = {}
+            if LAST_PROJECT_PATH.is_file():
+                try:
+                    data = json.loads(LAST_PROJECT_PATH.read_text(encoding='utf-8-sig'))
+                except (OSError, ValueError):
+                    pass
+            if not isinstance(data, dict):
+                data = {}
+            selections = data.get('project_episodes')
+            selections = dict(selections) if isinstance(selections, dict) else {}
+            episode = CURRENT_EPISODE_NAME if name == CURRENT_PROJECT_NAME else selections.get(name, '')
+            selections[name] = episode
+            data.update(project_name=name, episode_name=episode, project_episodes=selections)
+            PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+            temporary = LAST_PROJECT_PATH.with_suffix('.json.tmp')
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            temporary.replace(LAST_PROJECT_PATH)
     except Exception:
         pass
+
+
+def last_project_episode(project_name: str) -> str:
+    """Restore an existing episode only; never recreate a removed selection."""
+    try:
+        data = json.loads(LAST_PROJECT_PATH.read_text(encoding='utf-8-sig'))
+        selections = data.get('project_episodes') or {}
+        episode = selections.get(project_name) if isinstance(selections, dict) else None
+        if episode is None and data.get('project_name') == project_name:
+            episode = data.get('episode_name')
+        episode = str(episode or '').strip()
+        if not episode or episode in {'.', '..'} or any(char in episode for char in '/\\:'):
+            return ''
+        base = (EPISODES_DIR / project_name).resolve()
+        target = (base / episode).resolve()
+        return episode if target.parent == base and target.is_dir() else ''
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ''
 
 
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 EPISODES_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_PROJECT_NAME = _load_last_project_name()
+CURRENT_EPISODE_NAME = last_project_episode(CURRENT_PROJECT_NAME)
 _activate(CURRENT_PROJECT_NAME, CURRENT_EPISODE_NAME)
 
 # Migrate from old projects/current runtime data if outputs/current is empty.
 _OLD_PROJECT_DIR = BASE_DIR / "projects" / "current"
-if _OLD_PROJECT_DIR.exists() and not (PROJECT_DIR / "story.json").exists():
+if not CURRENT_EPISODE_NAME and _OLD_PROJECT_DIR.exists() and not (PROJECT_DIR / "story.json").exists():
     import shutil as _shutil
     try:
         for _item in _OLD_PROJECT_DIR.iterdir():
@@ -125,25 +171,46 @@ if _OLD_PROJECT_DIR.exists() and not (PROJECT_DIR / "story.json").exists():
 
 def get_project_dir():
     """Return the active runtime directory: outputs/<project> or episodes/<project>/<episode>."""
-    return (_PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)[0]
+    return capture_runtime()[0]
 
 
 def get_current_project_name() -> str:
-    return (_PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)[1]
+    return capture_runtime()[1]
 
 
 def get_current_episode_name() -> str:
-    return (_PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)[2]
+    return capture_runtime()[2]
 
 
 @contextmanager
 def pin_runtime(runtime=None):
     """Keep file ownership stable for an operation even if the UI switches project."""
-    token = _PINNED_RUNTIME.set(runtime or _PINNED_RUNTIME.get() or _ACTIVE_RUNTIME)
+    token = _PINNED_RUNTIME.set(runtime or capture_runtime())
     try:
         yield
     finally:
         _PINNED_RUNTIME.reset(token)
+
+
+def capture_runtime():
+    """Capture directory, project and episode as one consistent ownership tuple."""
+    return _PINNED_RUNTIME.get() or _BROWSER_RUNTIMES.get(_BROWSER_SESSION.get()) or _ACTIVE_RUNTIME
+
+
+@contextmanager
+def browser_session(session):
+    """Each Gradio browser session owns its selection; workers use pin_runtime."""
+    if not session:
+        yield
+        return
+    with _SELECTION_LOCK:
+        runtime = _BROWSER_RUNTIMES.setdefault(session, _ACTIVE_RUNTIME)
+        _BROWSER_EPISODES.setdefault(session, {}).setdefault(runtime[1], runtime[2])
+    token = _BROWSER_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _BROWSER_SESSION.reset(token)
 
 
 def is_archive_episode_active() -> bool:
@@ -156,13 +223,19 @@ def assert_current_runtime_writable(action: str = "修改"):
 
 
 def set_current_project_name(name: str):
-    path = _activate(name or "current", "")
-    save_last_project_name(CURRENT_PROJECT_NAME)
-    return path
+    name = str(name or 'current').strip() or 'current'
+    with _SELECTION_LOCK:
+        remembered = _BROWSER_EPISODES.get(_BROWSER_SESSION.get(), {})
+        path = _activate(name, remembered.get(name, last_project_episode(name)))
+        save_last_project_name(CURRENT_PROJECT_NAME)
+        return path
 
 
 def set_current_episode(name_or_empty: str = ""):
-    return _activate(CURRENT_PROJECT_NAME, name_or_empty or "")
+    with _SELECTION_LOCK:
+        path = _activate(get_current_project_name(), name_or_empty or "")
+        save_last_project_name(CURRENT_PROJECT_NAME)
+        return path
 
 
 def set_project_dir(path_or_name):

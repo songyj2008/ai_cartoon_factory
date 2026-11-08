@@ -155,6 +155,8 @@ def _asset_context() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
 def selected_project_materials() -> dict[str, list[dict[str, Any]]]:
     """Return only the character/background materials selected by the active project."""
     bible, identity_by_id, background_by_id = _asset_context()
+    from services.project_assets import load_project_asset_assignments
+    project_names = load_project_asset_assignments().get("character_names", {})
     characters: list[dict[str, Any]] = []
     backgrounds: list[dict[str, Any]] = []
 
@@ -174,7 +176,8 @@ def selected_project_materials() -> dict[str, list[dict[str, Any]]]:
                 "id": role_id,
                 "asset_id": asset_id,
                 "display_name": str(
-                    entry.get("display_name")
+                    (project_names.get(asset_id) or {}).get("display_name")
+                    or entry.get("display_name")
                     or entry.get("name_cn")
                     or identity.get("display_name")
                     or identity.get("name_cn")

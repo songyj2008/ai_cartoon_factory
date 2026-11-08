@@ -17,7 +17,7 @@ def duration_project(tmp_path, monkeypatch):
     workflow = {"50": {"inputs": {"totalframe": 400}}, "5": {"inputs": {"text": "8 seconds, unchanged"}}}
     wf = tmp_path / "workflow.json"
     wf.write_text(json.dumps(workflow), encoding="utf-8")
-    jobs = {"segments": [{"segment_index": 1, "workflow_path": str(wf), "job": {"duration_sec": 8, "fps": 50, "prompt": "unchanged"}, "generation_config": {"duration_sec": 8, "prompt_override": "unchanged"}, "requested_media_spec": {"duration_sec": 8, "fps": 50}, "renders": [{"prompt_snapshot": "historical", "requested_media_spec": {"duration_sec": 8}}]}, {"segment_index": 2, "job": {"duration_sec": 4, "fps": 50}}]}
+    jobs = {"segments": [{"segment_index": 1, "model_id": "ltx23_licon_msr_v2", "workflow_path": str(wf), "job": {"duration_sec": 8, "fps": 50, "prompt": "unchanged"}, "generation_config": {"duration_sec": 8, "prompt_override": "unchanged"}, "requested_media_spec": {"duration_sec": 8, "fps": 50}, "renders": [{"prompt_snapshot": "historical", "requested_media_spec": {"duration_sec": 8}}]}, {"segment_index": 2, "job": {"duration_sec": 4, "fps": 50}}]}
     for name, value in [("beats.json", beats), ("video_jobs.json", jobs)]:
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
     return tmp_path, beats, jobs

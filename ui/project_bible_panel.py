@@ -64,6 +64,9 @@ def _stable_project_bible(topic_text, identities, backgrounds, project_name=None
         if not asset_id:
             continue
         display_name = _asset_display_name(identity)
+        from services.project_assets import load_project_asset_assignments
+        local_name = load_project_asset_assignments(project_name).get('character_names', {}).get(asset_id, {})
+        display_name = str(local_name.get('display_name') or display_name).strip()
         entry = copy.deepcopy(old_character_by_asset.get(asset_id) or {})
         if not entry:
             entry = {
@@ -79,6 +82,8 @@ def _stable_project_bible(topic_text, identities, backgrounds, project_name=None
             "locked": True,
             "need_reference_image": True,
         })
+        if local_name.get('display_name') or local_name.get('aliases'):
+            entry['aliases'] = sorted(set([display_name, asset_id] + list(local_name.get('aliases') or [])))
         if preserve_supporting and asset_id in old_supporting_asset_ids:
             supporting_characters.append(entry)
         else:
@@ -203,6 +208,8 @@ UNASSIGNED_PROJECT_FILTER = "__unassigned__"
 def _asset_management_records(project_name):
     asset_index = load_asset_index()
     owners = asset_project_owners()
+    from services.project_assets import load_project_asset_assignments
+    local_names = load_project_asset_assignments(project_name).get('character_names', {}) if project_name != UNASSIGNED_PROJECT_FILTER else {}
     owned, unassigned = [], []
     for identity in ((asset_index.get("characters") or {}).get("identities") or []):
         if not isinstance(identity, dict) or not identity.get("id"):
@@ -214,7 +221,7 @@ def _asset_management_records(project_name):
         project_names = owners["characters"].get(asset_id, [])
         record = {
             "key": f"character::{asset_id}", "kind": "characters", "id": asset_id,
-            "name": _asset_display_name(identity), "image": options[0]["image_path"],
+            "name": str(local_names.get(asset_id, {}).get("display_name") or _asset_display_name(identity)), "image": options[0]["image_path"],
             "detail": f"人物 / 物品 · {len(options)} 张参考图 · {_asset_project_status(project_names)}", "projects": project_names,
         }
         if project_name == UNASSIGNED_PROJECT_FILTER:
@@ -412,6 +419,44 @@ def _asset_choice_label(asset):
     return f"{label} · {image_count}张参考图" if image_count else label
 
 
+def project_character_name_rows(project_name):
+    from services.project_assets import load_project_asset_assignments
+    assignments = load_project_asset_assignments(project_name)
+    index = load_asset_index()
+    identities = {str(item.get('id')): item for item in (index.get('characters') or {}).get('identities') or []}
+    rows = []
+    for asset_id in assignments['characters']:
+        local = assignments.get('character_names', {}).get(asset_id, {})
+        rows.append([asset_id, _asset_display_name(identities.get(asset_id, {'id': asset_id})),
+                     local.get('display_name', ''), '，'.join(local.get('aliases') or [])])
+    return rows
+
+
+def save_project_character_names(project_name, rows):
+    from services.project_assets import load_project_asset_assignments, save_project_asset_assignments, sync_generation_assets
+    if project_name == get_current_project_name():
+        assert_current_runtime_writable('保存项目人物名称')
+    assignments = load_project_asset_assignments(project_name)
+    values = rows.values.tolist() if hasattr(rows, 'values') else rows or []
+    if [str(row[0]) for row in values] != assignments['characters']:
+        raise ValueError('人物绑定已变化或素材 ID 被修改，请刷新名称表后重试')
+    names = {}
+    seen = set()
+    for asset_id, default, name, aliases in values:
+        name = str(name or '').strip()
+        effective = name or str(default)
+        if effective in seen:
+            raise ValueError('同一项目的人物名称不能重复')
+        seen.add(effective)
+        alias_values = [value.strip() for value in str(aliases or '').replace('，', ',').split(',') if value.strip()]
+        if name or alias_values:
+            names[str(asset_id)] = {'display_name': name, 'aliases': list(dict.fromkeys(alias_values))}
+    assignments['character_names'] = names
+    save_project_asset_assignments(assignments, project_name)
+    sync_generation_assets(project_name)
+    return '项目人物名称已保存；共享图片、音色和其他项目名称不变。', project_character_name_rows(project_name)
+
+
 def _scoped_asset_label(label, owners, project_name):
     owners = list(owners or [])
     if project_name in owners:
@@ -421,13 +466,15 @@ def _scoped_asset_label(label, owners, project_name):
     return f"【其他项目：{'、'.join(owners)}】{label}"
 
 def project_bible_asset_choices(project_name=None):
+    from services.project_assets import load_project_asset_assignments
     asset_index = load_asset_index()
     identities = ((asset_index.get("characters") or {}).get("identities") or [])
     backgrounds = asset_index.get("backgrounds") or []
     owners = asset_project_owners()
     project_name = project_name or get_current_project_name()
+    local_names = load_project_asset_assignments(project_name).get("character_names", {})
     character_choices = [
-        (_scoped_asset_label(_asset_choice_label(item), owners["characters"].get(str(item.get("id"))), project_name), str(item.get("id")))
+        (_scoped_asset_label(str((local_names.get(str(item.get("id"))) or {}).get("display_name") or _asset_choice_label(item)), owners["characters"].get(str(item.get("id"))), project_name), str(item.get("id")))
         for item in identities
         if isinstance(item, dict) and item.get("id")
     ]
@@ -472,3 +519,29 @@ def manual_plan_project_bible(topic_text, character_ids, background_ids, project
         log(f"保存已选人物场景失败: {e}", "ERROR")
         char_update, bg_update, gallery = project_bible_ui_state(project_name)
         return get_logs(), gallery, char_update, bg_update
+
+
+def project_character_name_form(project_name, selected=None):
+    rows = project_character_name_rows(project_name)
+    ids = [row[0] for row in rows]
+    selected = selected if selected in ids else (ids[0] if ids else None)
+    name, aliases = project_character_name_fields(project_name, selected)
+    return gr.update(choices=[(row[2] or row[1], row[0]) for row in rows], value=selected), name, aliases
+
+
+def project_character_name_fields(project_name, selected):
+    for row in project_character_name_rows(project_name):
+        if row[0] == selected:
+            return row[2], row[3]
+    return '', ''
+
+
+def save_project_character_name_form(project_name, selected, name, aliases):
+    rows = project_character_name_rows(project_name)
+    if selected not in [row[0] for row in rows]:
+        raise ValueError('请先刷新人物列表并选择本项目人物')
+    for row in rows:
+        if row[0] == selected:
+            row[2:4] = [name, aliases]
+    status, _ = save_project_character_names(project_name, rows)
+    return status, *project_character_name_form(project_name, selected)

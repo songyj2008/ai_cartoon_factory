@@ -295,6 +295,9 @@ def match_beat_assets(
     asset_index = asset_index or load_asset_index()
     identity_by_id = _identity_by_id(asset_index)
     background_by_id = _background_by_id(asset_index)
+    if str(model_id) == "minimax_h3_local_ref2va" and beat.get("binding_schema_version"):
+        from generation.pipelines.minimax_h3.semantic_bindings import normalize_beat_bindings
+        beat = normalize_beat_bindings(beat, bible=bible)
     text = _beat_text(beat)
     item = copy.deepcopy(beat if isinstance(beat, dict) else {})
     auto_match = item.get("auto_asset_match") if isinstance(item.get("auto_asset_match"), dict) else {}
@@ -319,7 +322,7 @@ def match_beat_assets(
             item.get("reference_image_ids") if isinstance(item.get("reference_image_ids"), dict) else {},
         )
         manual_scene = _text(item.get("scene_id"))
-        if manual_scene not in valid_scenes:
+        if manual_scene not in valid_scenes and str(model_id) != "minimax_h3_local_ref2va":
             manual_scene = valid_scene_list[0] if valid_scene_list else ""
         item["reference_roles"] = manual_roles
         item["reference_image_ids"] = manual_image_ids
@@ -374,6 +377,10 @@ def match_beat_assets(
         bg_score = int(first.get("score") or 0)
         bg_reasons = list(first.get("reason") or [])
         item["scene_id"] = str(first.get("scene_id") or "")
+    elif is_h3 and (item.get("model_hints", {}).get("minimax_h3_local_ref2va") or {}).get("shots"):
+        # No shot selected a usable background: let the video model build it.
+        bg_entry, bg_score, bg_reasons = {}, 0, []
+        item["scene_id"] = str(beat.get("scene_id") or "") if beat.get("binding_schema_version") else ""
     else:
         background_matches = []
         for background_entry in bible.get("allowed_backgrounds") or []:
@@ -395,8 +402,18 @@ def match_beat_assets(
         if bg_entry.get("id"):
             item["scene_id"] = str(bg_entry.get("id"))
 
+    if is_h3 and beat.get("binding_schema_version"):
+        item["scene_id"] = str(beat.get("scene_id") or "")
     existing_roles = _as_list(item.get("important_roles"))
-    if matched_roles:
+    explicit_h3_cast = is_h3 and ('visible_roles' in beat or 'reference_roles' in beat)
+    if explicit_h3_cast:
+        item['visible_roles'] = _as_list(beat.get('visible_roles'))
+        item['reference_roles'] = _as_list(beat.get('reference_roles'))
+        item['reference_image_ids'], image_match_details = _match_reference_images(
+            item['reference_roles'], text, bible, identity_by_id, beat.get('reference_image_ids') or {})
+        item['important_roles'] = list(dict.fromkeys(existing_roles + item['visible_roles']
+            + item['reference_roles'] + _as_list(item.get('offscreen_speakers'))))
+    elif matched_roles:
         item["visible_roles"] = matched_roles
         item["reference_roles"] = matched_roles
         item["reference_image_ids"] = reference_image_ids
@@ -409,7 +426,7 @@ def match_beat_assets(
         item["important_roles"] = existing_roles
         item["mentioned_roles"] = list(dict.fromkeys(existing_roles + _as_list(item.get("mentioned_roles"))))
 
-    item["offscreen_speakers"] = [role for role in _as_list(item.get("offscreen_speakers")) if role in item["important_roles"] and role not in item["visible_roles"]]
+    item["offscreen_speakers"] = [role for role in _as_list(item.get("offscreen_speakers")) if role in item["important_roles"] and (is_h3 or role not in item["visible_roles"])]
     identity_constraints = item.get("identity_constraints") if isinstance(item.get("identity_constraints"), dict) else {}
     item["identity_constraints"] = {
         **identity_constraints,
@@ -460,6 +477,9 @@ def _match_h3_shot_backgrounds(
         if not isinstance(shot, dict):
             continue
         explicit_scene = str(shot.get("scene_id") or "").strip()
+        if explicit_scene and explicit_scene not in allowed_by_scene:
+            # An authored new location must not acquire a different scene's image.
+            continue
         semantic_shot = {key: value for key, value in shot.items() if key != "scene_id"}
         shot_text = _norm(json.dumps(semantic_shot, ensure_ascii=False))
         beat_context = _norm(f"{beat.get('title') or ''} {beat.get('plot') or ''}")
@@ -486,8 +506,8 @@ def _match_h3_shot_backgrounds(
                     _background_tokens(explicit_entry, explicit_bg),
                     f"{beat_context} {shot_text}",
                 )
-            if explicit_score >= 60:
-                score, entry = explicit_score, explicit_entry
+            if beat.get("binding_schema_version") or explicit_score >= 60:
+                score, entry = max(100, explicit_score), explicit_entry
                 reasons = ["explicit:shot_scene_id", *explicit_reasons]
         if score < 60:
             continue

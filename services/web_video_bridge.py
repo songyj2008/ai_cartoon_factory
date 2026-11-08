@@ -7,6 +7,7 @@ after an uncertain web submission the user must inspect it before retrying.
 from __future__ import annotations
 
 import json
+import copy
 import hashlib
 import os
 import secrets
@@ -99,17 +100,25 @@ def enqueue_segment(segment_index: int, channel) -> dict:
             raise ValueError(reason)
         if str(segment.get("status") or "").lower() in {"queued", "running", "pending"}:
             raise ValueError("此分段已有未结束的视频任务")
+        is_h3 = resolved_model_id(segment, payload) == 'minimax_h3_local_ref2va'
+        # Preserve analysis as historical metadata, never as a video prerequisite.
+        scene_framing = segment.get('h3_scene_framing') if is_h3 else None
         prompt = channel.prompt(segment)
+        if scene_framing and prompt != scene_framing.get('source_prompt'):
+            scene_framing = None
         images = [str(path) for path in channel.assets(segment)]
         task_id = str(uuid.uuid4())
         runtime = get_project_dir().resolve()
+        from generation.pipelines.minimax_h3.continuity.revisions import snapshot_for_render
         render = begin_render(
             segment, model_id=resolved_model_id(segment, payload),
             prompt_snapshot=prompt,
-            asset_manifest=[{"asset_id": str(i), "type": "image", "path": path} for i, path in enumerate(images)],
+            asset_manifest=(copy.deepcopy((segment.get('generation_config') or {}).get('asset_manifest') or [])
+                            if is_h3 else [{"asset_id": str(i), "type": "image", "path": path} for i, path in enumerate(images)]),
             backend=channel.id, status="queued",
             source="web_video", requested_media_spec={"duration_sec": channel.duration(segment), "aspect_ratio": "16:9"},
-            metadata={"web_video_task_id": task_id},
+            metadata={"web_video_task_id": task_id, "h3_continuity_snapshot": snapshot_for_render(segment), "h3_editor_constraints_snapshot": segment.get("h3_editor_constraints") or {},
+                      "h3_scene_framing_snapshot": copy.deepcopy(scene_framing or {})},
         )
         segment.update({"status": "queued", "backend": channel.id, "task_id": task_id,
                         "submitted": False, "error": ""})
@@ -295,3 +304,13 @@ def dismiss_tasks(task_id: str | None = None) -> int:
                 raise ValueError("视频任务仍在执行，暂不能移除")
         sql="UPDATE tasks SET dismissed=1 WHERE dismissed=0 AND state IN ('complete','error','uncertain','cancelled_unclaimed')"
         return conn.execute(sql + (" AND id=?" if task_id else ""), (task_id,) if task_id else ()).rowcount
+
+
+def clear_all_tasks():
+    """Stop tracking all work, preserving media, render history and spent quota."""
+    with _LOCK, _connect() as conn:
+        count = conn.execute('SELECT COUNT(*) FROM tasks WHERE dismissed=0').fetchone()[0]
+        conn.execute("UPDATE tasks SET state=CASE WHEN state='queued' THEN 'cancelled_unclaimed' "
+                     "WHEN state IN ('claimed','submitted') THEN 'uncertain' ELSE state END, "
+                     "dismissed=1,lease='',updated_at=?", (time.time(),))
+    return count

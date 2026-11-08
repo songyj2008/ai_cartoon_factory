@@ -42,13 +42,32 @@ WEB_LLM_JS = r"""
   const A = window.AICF;
   if (A.webLLMInstalled) return;
   A.webLLMInstalled = true;
+  A.renderH3DurationPlanning=function(ov,snapshot,record){
+    clearTimeout(ov._durationPlanningTimer);delete ov._durationPlanningTimer;
+    let panel=ov.querySelector('.h3-duration-planning');
+    if(!record){if(panel){panel.textContent='';panel.hidden=true;}return;}
+    if(!panel){
+      const anchor=ov.querySelector('.aicf-prompt-version-meta');if(!anchor)return;
+      panel=document.createElement('p');panel.className='h3-duration-planning';
+      panel.setAttribute('role','status');panel.setAttribute('aria-live','polite');anchor.after(panel);
+    }
+    const part='part_'+String(snapshot.segment_index).padStart(3,'0');
+    const location=[snapshot.project_name,snapshot.episode_name,part].filter(Boolean).join(' / ');
+    const before=record.reference_sec==null?'':record.reference_sec+' → ';
+    panel.textContent=location+' · 本次时长规划：'+before+record.duration_sec+' 秒。'+(record.reason||'');
+    panel.hidden=false;
+    ov._durationPlanningTimer=setTimeout(()=>{panel.textContent='';panel.hidden=true;delete ov._durationPlanningTimer;},15000);
+  };
   let config = null, loading = null;
   const terminal = status => ['complete', 'error', 'cancelled', 'timeout'].includes(status);
   async function api(path, data) {
     const response = await fetch('/api/web-llm' + path, { method: data === undefined ? 'GET' : 'POST',
       headers: {'Content-Type': 'application/json'}, ...(data === undefined ? {} : {body: JSON.stringify(data)}) });
-    const value = await response.json();
-    if (!response.ok || !value.ok) throw new Error(value.message || '网页 LLM 请求失败');
+    const value = await (A.readJsonResponse?A.readJsonResponse(response,'/api/web-llm'+path):response.json());
+    if (!response.ok || !value.ok) {
+      const error=new Error(value.message || '网页 LLM 请求失败');
+      error.code=value.code;error.status=response.status;throw error;
+    }
     return value;
   }
   function option(select, value, label, disabled) {
@@ -132,11 +151,16 @@ WEB_LLM_JS = r"""
         const legend=document.createElement('legend');legend.textContent=title;
         const host=document.createElement('div');host.className='web-llm-route-options web-llm-provider-options';host.dataset.entry=key;host.setAttribute('aria-label',title+' LLM 服务');
         const summary=document.createElement('p');summary.className='web-llm-route-summary';fieldset.append(legend,host,summary);entries.append(fieldset);
+        if(key==='video_learning') {
+          const hint=document.createElement('p');hint.className='web-llm-route-summary';
+          hint.textContent='标记视频 OK 表示人工已认可台词完整度与节奏；提交历史主体、镜头、台词及核对状态分析，跨项目复用同一人物的节奏，不上传视频或文件。';
+          fieldset.append(hint);
+        }
       }
     });
     document.querySelectorAll('.web-llm-route-options').forEach(host => {
       renderRoutePicker(host,config.settings.overrides[host.dataset.entry]||'inherit',
-        {inherit:true,includeApi:host.dataset.entry!=='revision'});
+        {inherit:true,includeApi:!['revision','video_learning'].includes(host.dataset.entry)});
       host.dataset.ready = '1';
     });
   }
@@ -199,6 +223,67 @@ WEB_LLM_JS = r"""
       localStorage.setItem(REVIEW_DRAFTS_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (error) { console.warn('反馈修正草稿保存失败', error); }
   }
+  A.reviewDraftDuration = function(saved, snapshot) {
+    // A draft from another saved duration must never restore stale seconds.
+    if(saved && saved.duration && saved.durationBase != null &&
+       Number(saved.durationBase)===Number(snapshot.duration_sec))return saved.duration;
+    return snapshot.duration_sec;
+  };
+  A.syncReplannedDuration = function(ov, snapshot) {
+    const duration=Number(snapshot.duration_sec), beatIndex=Number(snapshot.beat_index || snapshot.segment_index);
+    if(!Number.isFinite(duration) || duration<=0)return;
+    const beatsBox=document.querySelector('#beats_editor textarea');
+    if(beatsBox && Number.isInteger(beatIndex) && beatIndex>0) {
+      const pattern=new RegExp('((?:【|\\[)Beat\\s+'+beatIndex+'(?:】|\\])[^\\r\\n]*\\r?\\n[ \\t]*时长[：:][ \\t]*)\\d+(?:\\.\\d+)?([ \\t]*(?:秒|s))','i');
+      const updated=beatsBox.value.replace(pattern,(_,prefix,suffix)=>prefix+duration+suffix);
+      if(updated!==beatsBox.value) {
+        beatsBox.value=updated;
+        beatsBox.dispatchEvent(new Event('input',{bubbles:true}));
+      }
+    }
+    const card=A.segmentCardFromButton(ov._sourceButton);
+    // Adopt a saved planning result's revision with its references. Advancing
+    // only the prompt leaves the next save using the pre-planning baseline.
+    // Locally changed references keep their old baseline and conflict guard.
+    if(snapshot.reference_revision && Array.isArray(snapshot.reference_manifest)) {
+      const signature=A.h3ManifestSignature || JSON.stringify;
+      const install=(target, requireMatch)=>{
+        if(!target)return;
+        if(requireMatch) {
+          let current;
+          try{current=JSON.parse(target.dataset.manifest);}catch(_){return;}
+          if(signature(current)!==signature(snapshot.reference_manifest))return;
+        }
+        target.dataset.manifest=JSON.stringify(snapshot.reference_manifest);
+        target.dataset.baseRevision=snapshot.reference_revision;
+        if(snapshot.segment_uid)target.dataset.segmentUid=snapshot.segment_uid;
+      };
+      install(ov.querySelector('.h3-asset-list'),true);
+      install(card?.querySelector('.h3-card-config-source'),false);
+      install(card?.querySelector('.h3-fullscreen-config-template')?.content?.querySelector('.h3-asset-list'),false);
+      // Repaint selected images and their voice controls from the adopted
+      // manifest; changing only data attributes leaves stale visible choices.
+      if(A.refreshH3AssetCount)A.refreshH3AssetCount(ov);
+    }
+    if(!card)return;
+    card.querySelectorAll('.metric-card').forEach(metric=>{
+      if(metric.querySelector('span')?.textContent==='时长')metric.querySelector('b').textContent=duration+' 秒';
+    });
+    const prompt=card.querySelector('.h3-prompt-override');
+    if(prompt && snapshot.current_prompt != null)prompt.value=snapshot.current_prompt;
+    const preview=card.querySelector('.h3-card-prompt-source, .prompt-modal-source');
+    if(preview && snapshot.current_prompt != null)preview.textContent=snapshot.current_prompt;
+    const panel=card.closest('.right-panel');
+    if(panel) {
+      let total=0;
+      panel.querySelectorAll('.metric-card').forEach(metric=>{
+        if(metric.querySelector('span')?.textContent==='时长')total+=parseFloat(metric.querySelector('b').textContent)||0;
+      });
+      panel.querySelectorAll('.stats-pill').forEach(pill=>{
+        pill.textContent=pill.textContent.replace(/当前页时长：\d+(?:\.\d+)? 秒/,'当前页时长：'+total+' 秒');
+      });
+    }
+  };
   A.mountPromptRevision = async function(ov) {
     if (ov._webRevisionStop) ov._webRevisionStop();
     const session = String(ov.dataset.h3Session), index = Number(ov.dataset.segmentIndex);
@@ -213,14 +298,41 @@ WEB_LLM_JS = r"""
     }
     const previous = review.querySelector('.aicf-review-content'); if(previous) previous.remove();
     const content = document.createElement('div'); content.className = 'aicf-review-content';
-    content.innerHTML = '<div class="aicf-review-head"><strong>本段最新视频</strong><button type="button" data-action="refresh">刷新预览</button></div><video controls preload="metadata" playsinline hidden></video><p class="review-video-info">加载视频…</p><details class="review-original"><summary>生成视频时使用的提示词</summary><textarea class="review-original-text" rows="5" aria-label="视频生成时的原提示词" readonly></textarea></details><label class="review-source-choice"><input type="checkbox" class="review-use-editor"> 使用编辑器提示词</label><p class="review-source-hint">未勾选：使用视频生成时的提示词修正。</p><label>本段时长（秒）<input type="number" class="review-duration" min="1" step="1" aria-label="本段时长（秒）"></label><p class="review-duration-hint">保存或提交修正时同步对应 Beat；提交修正后按新时长重新安排镜头。</p><h3>反馈并修正</h3><fieldset class="web-llm-provider-picker review-provider-picker"><legend>本次使用的 LLM</legend><div class="review-provider-options web-llm-provider-options" aria-label="本次修正 LLM"></div><p class="web-llm-route-summary"></p></fieldset><label>视频出现的问题<textarea class="review-issue" rows="3" placeholder="描述问题，可标明发生时间" aria-label="视频问题描述"></textarea></label><button type="button" data-action="timestamp">插入当前播放时间</button><label>期望效果（选填）<textarea class="review-expected" rows="2" aria-label="期望效果"></textarea></label><div class="review-actions"><button type="button" class="review-submit" data-action="submit">提交给网页 LLM 修正</button><button type="button" data-action="cancel" hidden>取消等待</button></div><p class="review-state" role="status" aria-live="polite">准备就绪</p><div class="review-result" hidden><h3>修改说明</h3><ul class="review-changes"></ul><details><summary>查看提交前的编辑稿</summary><pre class="review-before"></pre></details><label>修正后的完整提示词</label><div class="review-revision-meta"></div><div class="review-compare-state" role="status"></div><textarea class="review-revised" rows="7" readonly aria-label="修正版提示词"></textarea><div class="review-actions"><button type="button" data-action="apply">应用到编辑器</button><button type="button" data-action="generate">应用并生成视频</button></div></div>';
+    content.innerHTML = '<div class="aicf-review-head"><strong>本段最新视频</strong><button type="button" data-action="refresh">刷新预览</button></div><video controls preload="metadata" playsinline hidden></video><p class="review-video-info">加载视频…</p><details class="review-original"><summary>生成视频时使用的提示词</summary><textarea class="review-original-text" rows="5" aria-label="视频生成时的原提示词" readonly></textarea></details><label class="review-source-choice"><input type="checkbox" class="review-use-editor" checked> 使用当前编辑稿（先保存）</label><p class="review-source-hint">未勾选：使用视频生成时的提示词修正。</p><label>本段时长（秒）<input type="number" class="review-duration" min="1" step="1" aria-label="本段时长（秒）"></label><p class="review-duration-hint">保存或反馈修正使用此时长；规划时长仅调整原稿时间并同步 Beat。按已勾选渠道依次使用 ChatGPT、DeepSeek Pro API、DeepSeek 网页版；未勾选 API 时不会调用 API。</p><h3>反馈并修正</h3><fieldset class="web-llm-provider-picker review-provider-picker"><legend>本页面使用的 LLM</legend><div class="review-provider-options web-llm-provider-options" aria-label="网页 LLM"></div><label class="web-llm-provider-chip review-timing-api-option"><input type="checkbox" class="review-timing-api" checked aria-label="DeepSeek API，仅规划时长，模型 deepseek-v4-pro"><span>DeepSeek API（仅规划时长）</span></label><small>API 使用 deepseek-v4-pro，仅在勾选时参与规划时长；其他功能使用上方网页 LLM。</small></fieldset><label>视频出现的问题<textarea class="review-issue" rows="3" placeholder="描述问题，可标明发生时间" aria-label="视频问题描述"></textarea></label><button type="button" data-action="timestamp">插入当前播放时间</button><label>期望效果（选填）<textarea class="review-expected" rows="2" aria-label="期望效果"></textarea></label><div class="review-actions"><button type="button" class="review-submit" data-action="submit">保存并提交修正</button><button type="button" data-action="cancel" hidden>取消等待</button></div><p class="review-state" role="status" aria-live="polite">准备就绪</p><div class="review-result" hidden><h3>修改说明</h3><ul class="review-changes"></ul><details><summary>查看提交前的编辑稿</summary><pre class="review-before"></pre></details><label>修正后的完整提示词</label><div class="review-revision-meta"></div><div class="review-compare-state" role="status"></div><textarea class="review-revised" rows="7" readonly aria-label="修正版提示词"></textarea><div class="review-actions"><button type="button" data-action="apply">应用到编辑器</button><button type="button" data-action="generate">应用并生成视频</button></div></div>';
     review.appendChild(content);
     const q = selector => content.querySelector(selector);
+    const previewVideo = q('video');
+    const previewPlayer = document.createElement('div');
+    previewPlayer.className = 'review-preview-player';
+    previewVideo.before(previewPlayer);
+    previewPlayer.appendChild(previewVideo);
+    const previewTime = document.createElement('span');
+    previewTime.className = 'review-preview-time';
+    previewTime.setAttribute('aria-label', '播放秒数 / 总秒数');
+    previewPlayer.appendChild(previewTime);
+    let previewTimeFrame;
+    function updatePreviewTime() {
+      const current = Number.isFinite(previewVideo.currentTime) ? previewVideo.currentTime : 0;
+      const duration = Number.isFinite(previewVideo.duration) ? previewVideo.duration : 0;
+      previewTime.textContent = current.toFixed(2) + '/' + (duration ? String(Number(duration.toFixed(2))) : '--');
+      previewTime.hidden = previewVideo.hidden;
+    }
+    function animatePreviewTime() {
+      updatePreviewTime();
+      if (!previewVideo.paused && !previewVideo.ended) previewTimeFrame = requestAnimationFrame(animatePreviewTime);
+    }
+    for (const event of ['loadedmetadata', 'durationchange', 'timeupdate', 'seeking', 'seeked', 'pause', 'ended', 'emptied']) {
+      previewVideo.addEventListener(event, updatePreviewTime);
+    }
+    previewVideo.addEventListener('play', () => { cancelAnimationFrame(previewTimeFrame); animatePreviewTime(); });
+    updatePreviewTime();
     const selectedDetails = document.createElement('details');
     selectedDetails.className = 'review-selected';
     selectedDetails.innerHTML = '<summary>本次将提交的提示词</summary><pre class="review-selected-prompt"></pre>';
     q('.review-source-hint').after(selectedDetails);
+    q('.review-source-hint').after(q('.review-provider-picker'));
     const editor = ov.querySelector('.aicf-prompt-modal-body');
+    if(A.mountShotEditor)A.mountShotEditor(ov,content);
     function providerName(provider) {
       return config?.providers?.find(item=>item.id===provider)?.label || provider || '网页 LLM';
     }
@@ -240,6 +352,12 @@ WEB_LLM_JS = r"""
         : (matches?'编辑器与修正版一致':'编辑器尚未载入修正版');
       state.classList.toggle('is-match',matches);
       state.classList.toggle('is-different',!matches);
+      const review=task.result.revision_validation;
+      if(review){
+        const problems=review.blocking_issues||[];
+        state.textContent += problems.length?'；结构需修正：'+problems.join('；')
+          :(review.changes?.length?'；逐镜事实变化 '+review.changes.length+' 项：'+review.changes.map(c=>'Shot '+(c.shot||'全部')+' '+c.field).join('；'):'；逐镜结构已核对');
+      }
     }
     function referenceState() {
       if(String(ov.dataset.modelId)==='minimax_h3_local_ref2va') {
@@ -262,12 +380,12 @@ WEB_LLM_JS = r"""
       });
     }
     const valid = () => !stopped && ov.classList.contains('open') && String(ov.dataset.h3Session) === session && String(A.promptRuntimeRevision || 0) === runtimeRevision;
-    ov._webRevisionStop = () => { stopped = true; clearTimeout(pollTimer); q('video').pause(); };
+    ov._webRevisionStop = () => { stopped = true; clearTimeout(pollTimer); cancelAnimationFrame(previewTimeFrame); q('video').pause(); };
     function message(text, error=false) { if(valid()) {q('.review-state').textContent = text; q('.review-state').classList.toggle('is-error',error);} }
     function setControls() {
       const pending = task && !terminal(task.status);
       q('[data-action="submit"]').disabled = busy || !!pending || !snapshot || !!A.archiveReadOnly;
-      q('[data-action="submit"]').textContent = A.archiveReadOnly ? '归档只读，无法提交修正' : '提交给网页 LLM 修正';
+      q('[data-action="submit"]').textContent = A.archiveReadOnly ? '归档只读，无法提交修正' : '保存并提交修正';
       q('[data-action="submit"]').title = A.archiveReadOnly ? '当前为已归档集数，请切换到当前工作区后提交修正。' : '';
       q('[data-action="cancel"]').hidden = !pending;
       for (const action of ['apply','generate']) q('[data-action="'+action+'"]').disabled = busy || !task?.result || !!A.archiveReadOnly;
@@ -303,9 +421,10 @@ WEB_LLM_JS = r"""
         if(String(ov.dataset.modelId)==='minimax_h3_local_ref2va') {
           A.renderH3PromptVersion(ov,{current:next.prompt_version_info || {},revision:next.latest_prompt_revision || {},matches:!!next.prompt_matches_revision});
         }
-        if(!durationLoaded) {q('.review-duration').value=next.duration_sec || '';durationLoaded=true;}
+        const firstDurationLoad=!durationLoaded;
+        if(firstDurationLoad) {q('.review-duration').value=A.h3PromptDuration?.(editor.value) ?? next.duration_sec ?? '';durationLoaded=true;}
         q('.review-duration').disabled=!!A.archiveReadOnly;
-        if(changed) { const video=q('video'); video.pause(); video.hidden=!next.video_url; if(next.video_url) video.src=next.video_url; else video.removeAttribute('src'); }
+        if(changed) { const video=q('video'); video.pause(); video.hidden=!next.video_url; if(next.video_url) video.src=next.video_url; else video.removeAttribute('src'); updatePreviewTime(); }
         q('.review-video-info').textContent = next.video_url ? next.video_name + (next.video_created_at ? ' · '+next.video_created_at : '') : '本段还没有可预览的视频；新视频生成后可刷新。';
         const original=q('.review-original-text');
         if(next.snapshot_known) {original.value=next.original_prompt;original.readOnly=true;}
@@ -315,7 +434,8 @@ WEB_LLM_JS = r"""
           const saved=readDrafts()[key];
           if(saved) {
             q('.review-use-editor').checked=!!saved.useEditor;
-            if(saved.duration)q('.review-duration').value=saved.duration;
+            q('.review-timing-api').checked=saved.timing_api !== false;
+            q('.review-duration').value=A.h3PromptDuration?.(editor.value) ?? A.reviewDraftDuration(saved,next);
             q('.review-issue').value=saved.issue || '';
             q('.review-expected').value=saved.expected || '';
             if(saved.providers)renderRoutePicker(q('.review-provider-options'),saved.providers,{inherit:true,includeApi:false});
@@ -328,6 +448,7 @@ WEB_LLM_JS = r"""
           }
           reviewDraftLoaded=true;
         }
+        if(firstDurationLoad && next.duration_source==='duration_replan')A.syncReplannedDuration(ov,next);
         if(!task || result.task?.id === task.id) showTask(result.task);
         else renderRevisionComparison();
         setControls();
@@ -336,17 +457,23 @@ WEB_LLM_JS = r"""
     function sourceHint() {
       const useEditor = q('.review-use-editor').checked;
       q('.review-source-hint').textContent=useEditor
-        ? '已勾选：直接使用左侧当前编辑稿修正，包含尚未保存的修改；本次将在网页 LLM 中开启新对话。'
+        ? '已勾选：先保存左侧当前编辑稿及分镜，再使用保存后的版本修正；本次将在网页 LLM 中开启新对话。'
         : '未勾选：使用视频生成时的提示词修正。';
       q('.review-selected-prompt').textContent = (useEditor ? String(editor.value || '') : String(q('.review-original-text').value || '')).trim();
     }
     q('.review-use-editor').addEventListener('change',sourceHint);
     editor.addEventListener('input',sourceHint);
+    editor.addEventListener('input',()=>{
+      const duration=A.h3PromptDuration?.(editor.value);
+      if(duration!=null)q('.review-duration').value=duration;
+    });
     q('.review-original-text').addEventListener('input',sourceHint);
     ov._savePromptDuration = async function() {
+      if(ov._shotEditor?.dirty && !ov._shotEditor.stale)throw new Error('当前还有未保存的分镜或台词修改，请先保存后提交修正。');
       if(!valid() || !snapshot)throw new Error('时长信息尚未加载，请稍后保存');
-      const duration=Number(q('.review-duration').value);
-      if(!Number.isFinite(duration) || duration<=0 || !Number.isInteger(duration))throw new Error('本段时长请输入正整数秒');
+      const duration=A.h3PromptDuration?.(editor.value) ?? Number(q('.review-duration').value);
+      q('.review-duration').value=duration;
+      if(!Number.isFinite(duration) || duration<=0)throw new Error('本段草稿时长请输入正数');
       if(duration===Number(snapshot.duration_sec))return;
       const fresh=(await api('/segments/'+index)).snapshot;
       if(!valid() || fresh.runtime!==snapshot.runtime || fresh.segment_uid!==snapshot.segment_uid)throw new Error('编辑分段已切换，请重新打开编辑器');
@@ -356,6 +483,8 @@ WEB_LLM_JS = r"""
       });
       if(!valid())throw new Error('编辑分段已切换，请重新打开编辑器');
       snapshot=result.snapshot;
+      const referenceList=ov.querySelector('.h3-asset-list');
+      if(referenceList&&snapshot.reference_revision)referenceList.dataset.baseRevision=snapshot.reference_revision;
       q('.review-duration').value=snapshot.duration_sec;
       const card=A.segmentCardFromButton(ov._sourceButton);
       if(card)card.querySelectorAll('.metric-card').forEach(metric=>{
@@ -378,9 +507,59 @@ WEB_LLM_JS = r"""
       q('.review-duration-hint').textContent='时长已保存，并同步对应 Beat 和生成配置。';
     };
     q('video').addEventListener('error',()=>{if(valid())q('.review-video-info').textContent='视频加载失败，可刷新预览或检查原视频文件。';});
+    async function syncSourceReplan() {
+      const pending=ov._sourceReplanPending;
+      if(!pending || pending.session!==session)return;
+      let operation;
+      try { operation=(await api('/operations/'+pending.id)).result; }
+      catch(error) {
+        if(valid() && ov._sourceReplanPending===pending && error.code==='OPERATION_NOT_FOUND') {
+          delete ov._sourceReplanPending;
+          A.setPromptModalFeedback('原时长规划任务已清空或删除，可以重新提交。',false);
+          return;
+        }
+        throw error;
+      }
+      if(!valid() || ov._sourceReplanPending!==pending)return;
+      if(operation.state==='applied') {
+        const fresh=(await api('/segments/'+index)).snapshot;
+        if(!valid() || ov._sourceReplanPending!==pending)return;
+        if(fresh.runtime!==snapshot.runtime || (snapshot.segment_uid && fresh.segment_uid!==snapshot.segment_uid))
+          throw new Error('重新规划的分段已切换，请重新打开对应分段');
+        if(A.refreshH3EditorBaseline)await A.refreshH3EditorBaseline(ov);
+        if(!valid() || ov._sourceReplanPending!==pending)return;
+        const referencesUnchanged=pending.manifest==null || !A.readH3Manifest ||
+          (A.h3ManifestSignature || JSON.stringify)(A.readH3Manifest(ov))===pending.manifest;
+        const unchanged=String(editor.value || '')===pending.prompt && referencesUnchanged;
+        if(unchanged) {
+          editor.value=fresh.current_prompt;
+          if(ov._shotEditor && !ov._shotEditor.dirty)await ov._shotEditor.read(false);
+          if(A.scheduleH3PromptCount)A.scheduleH3PromptCount(ov);
+        }
+        if(String(q('.review-duration').value)===pending.duration)q('.review-duration').value=fresh.duration_sec;
+        snapshot=fresh;
+        A.syncReplannedDuration(ov,fresh);
+        delete ov._sourceReplanPending;
+        saveDraft();
+        await loadSnapshot();
+        if(!valid())return;
+        A.renderH3DurationPlanning?.(ov,fresh,{reference_sec:pending.duration,duration_sec:fresh.duration_sec,
+          reason:operation.candidate?.duration_reason||''});
+        A.setPromptModalFeedback('本段时长规划已保存：'+pending.duration+' → '+fresh.duration_sec+' 秒。'+
+          (unchanged?'':' 当前编辑稿有修改，已保留；重新打开本段可查看生成稿。'),false);
+      } else if(operation.state==='ready' && !operation.apply_error && operation.auto_apply_pending!==false) {
+        // ready is a transient state before automatic publication, not completion.
+        A.setPromptModalFeedback('结果已生成，正在保存并同步本段时长…',false);
+      } else if(['error','cancelled','needs_attention','ready'].includes(operation.state)) {
+        delete ov._sourceReplanPending;
+        A.setPromptModalFeedback(operation.message || '时长规划结果需要在任务面板处理',operation.state==='error');
+      }
+    }
+    ov._syncSourceReplan=syncSourceReplan;
     async function poll() {
       if(!valid()) return;
       try {
+        await syncSourceReplan();
         const awaitingBackgroundApply=task?.status==='complete' && !!task?.metadata?.operation_id &&
           !['applied','error','cancelled','needs_attention'].includes(task?.business_operation?.state);
         if(task && (!terminal(task.status) || awaitingBackgroundApply)) {
@@ -400,10 +579,12 @@ WEB_LLM_JS = r"""
       return [snapshot.runtime, stableId].join(':');
     }
     function saveDraft() {
+      if(!valid())return;
       const key=draftKey(); if(!key) return;
       writeDraft(key,{issue:q('.review-issue').value,expected:q('.review-expected').value,
-        providers:selectedRoutes(q('.review-provider-options')),original:q('.review-original-text').value,
-        useEditor:q('.review-use-editor').checked,duration:q('.review-duration').value});
+        timing_api:q('.review-timing-api').checked,providers:selectedRoutes(q('.review-provider-options')),original:q('.review-original-text').value,
+        useEditor:q('.review-use-editor').checked,duration:q('.review-duration').value,
+        durationBase:snapshot.duration_sec});
     }
     content.addEventListener('input',saveDraft);
     content.addEventListener('change',saveDraft);
@@ -418,18 +599,31 @@ WEB_LLM_JS = r"""
         if(action==='timestamp') {q('.review-issue').value += ' ['+q('video').currentTime.toFixed(1)+' 秒] ';q('.review-issue').dispatchEvent(new Event('input',{bubbles:true}));q('.review-issue').focus();}
         if(action==='submit') {
           if(!snapshot)throw new Error('请先加载视频信息');
-          await ov._savePromptDuration();
-          await A.savePromptSourceExcerpt(false);
-          await loadSnapshot();
-          if(!valid())return;
           const useEditor=q('.review-use-editor').checked;
           if(useEditor && !String(editor.value || '').trim())throw new Error('编辑器提示词为空，无法提交。');
-          const payload={runtime:snapshot.runtime,fingerprint:snapshot.fingerprint,providers:selectedRoutes(q('.review-provider-options')),issue:q('.review-issue').value,expected:q('.review-expected').value,edited_prompt:editor.value,use_editor_prompt:useEditor,original_prompt:useEditor?'':q('.review-original-text').value,editor_references:referenceState()};
-          const value=await api('/segments/'+index+'/revisions',payload); if(valid()) {showTask(value.task);const target=value.task?.metadata?.snapshot||{};const location=[target.project_name,target.episode_name,'第 '+index+' 段'].filter(Boolean).join(' / ');message('已加入后台任务列表（'+String(value.operation_id||'').slice(0,8)+'），绑定到 '+location+'。可以关闭窗口继续处理其他分段或草稿集。');}
+          const input={providers:A.readPageLLMProviders(ov),issue:q('.review-issue').value,expected:q('.review-expected').value,
+            use_editor_prompt:useEditor,original_prompt:useEditor?'':q('.review-original-text').value};
+          if(!input.issue.trim())throw new Error('请先填写视频出现的问题。');
+          if(!useEditor&&!input.original_prompt.trim())throw new Error('所选原视频提示词为空，请选择当前编辑稿或补充原视频提示词。');
+          message('正在保存当前编辑…');
+          await A.runSavedPromptAction(ov,async target=>{
+            if(!valid())throw new Error('内容已保存，但编辑会话已切换，本次未提交。');
+            const fresh=(await api('/segments/'+index)).snapshot;
+            if(!valid()||fresh.runtime!==snapshot.runtime||(target.segment_uid&&fresh.segment_uid&&fresh.segment_uid!==target.segment_uid))throw new Error('分段已变化，请重新打开目标分段后提交。');
+            if(target.prompt&&!A.promptTextMatches(fresh.current_prompt,target.prompt))throw new Error('保存后的提示词又发生变化，请核对最新内容后提交。');
+            snapshot=fresh;
+            const payload={...input,runtime:fresh.runtime,fingerprint:fresh.fingerprint,
+              edited_prompt:fresh.current_prompt,editor_references:referenceState()};
+            message('当前编辑已保存，正在提交网页 LLM 修正…');
+            const value=await api('/segments/'+index+'/revisions',payload);
+            if(valid()) {showTask(value.task);const location=[fresh.project_name,fresh.episode_name,'第 '+index+' 段'].filter(Boolean).join(' / ');message('已保存并加入后台修正任务（'+String(value.operation_id||'').slice(0,8)+'），绑定到 '+location+'。');}
+          });
         }
         if(action==='cancel' && task) {const value=await api('/tasks/'+task.id+'/cancel',{});if(valid())showTask(value.task);}
         if(action==='apply' || action==='generate') {
           if(!task?.result)throw new Error('还没有可应用的修正版');
+          if(action==='generate'&&task.result.revision_validation?.blocking_issues?.length)
+            throw new Error('修正版结构检查未通过，请先应用到编辑器修正：'+task.result.revision_validation.blocking_issues.join('；'));
           if(A.archiveReadOnly)throw new Error('归档只读，不能应用修正');
           if(task.input.target_duration_sec!=null && Number(q('.review-duration').value)!==Number(task.input.target_duration_sec))throw new Error('时长已修改，请按新时长重新提交修正后再应用。');
           const fresh=await api('/segments/'+index); if(!valid())return;
@@ -454,7 +648,9 @@ WEB_LLM_JS = r"""
             throw new Error('视频、参考配置或保存的提示词已变化；请对比修正版后手动合并，未覆盖编辑器。');
           if(task.metadata.editor_references && task.metadata.editor_references!==referenceState())throw new Error('等待期间参考素材已修改，请对比后手动合并，未覆盖编辑器。');
           const appliedPrompt=task.result.revised_prompt;
+          if(ov._shotEditor?.dirty)throw new Error('请先保存或撤销 Shot 调整，再应用修正版');
           editor.value=appliedPrompt;
+          if(ov._shotEditor)ov._shotEditor.read(false);
           ov.dataset.promptRevisionPrompt=appliedPrompt;
           ov.dataset.promptProvenance=JSON.stringify(taskProvenance(task));
           editor.dispatchEvent(new Event('input',{bubbles:true}));
@@ -483,7 +679,7 @@ WEB_LLM_JS = r"""
             if(valid()) {A.replaceSegmentCardFromResponse(index,value,A.segmentCardFromButton(ov._sourceButton),'.primary-mini');if(value.web_video_task_id)A.watchWebVideoTask(index,value.web_video_task_id);message('修正版已保存，视频生成任务已提交。完成后刷新预览。');}
           }
         }
-      } catch(error) {message(error.message,true);}
+      } catch(error) {message((error.saved?'当前编辑已保存，提交未完成：':'')+error.message,true);}
       finally {button.textContent=originalLabel;busy=false;if(valid())setControls();}
     });
     setControls();
@@ -522,6 +718,8 @@ WEB_LLM_CSS = """
 .web-llm-provider-picker{min-width:0;margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-subtle)}
 .web-llm-provider-picker legend{padding:0 4px;font-size:13px;font-weight:700;color:var(--text-body)}
 .web-llm-provider-options{display:flex;flex-wrap:wrap;gap:8px}
+.aicf-review-pane .review-timing-api-option{margin-top:8px!important}
+.aicf-review-pane .review-provider-picker>small{display:block;margin-top:6px;font-size:12px;line-height:1.6;color:var(--text-secondary)}
 .web-llm-box .web-llm-provider-chip,.web-llm-route-row .web-llm-provider-chip,.aicf-review-pane .web-llm-provider-chip{display:flex;align-items:center;gap:7px;min-height:40px;margin:0;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-body);font-size:13px;font-weight:600;cursor:pointer;user-select:none}
 .web-llm-box .web-llm-provider-chip>span,.web-llm-route-row .web-llm-provider-chip>span,.aicf-review-pane .web-llm-provider-chip>span{color:var(--text-body)!important;-webkit-text-fill-color:var(--text-body)!important;opacity:1!important}
 .web-llm-box .web-llm-provider-chip:has(input:checked),.web-llm-route-row .web-llm-provider-chip:has(input:checked),.aicf-review-pane .web-llm-provider-chip:has(input:checked){border-color:var(--theme-accent);background:color-mix(in srgb,var(--theme-accent) 10%,var(--surface))}
@@ -540,10 +738,15 @@ WEB_LLM_CSS = """
 .aicf-review-pane label{display:block;font-size:12px;font-weight:600;margin:12px 0 6px}.aicf-review-pane h3{font-size:14px;margin-top:16px}
 .aicf-review-pane textarea{resize:vertical;font-size:13px;line-height:1.6}.aicf-review-pane summary{cursor:pointer;font-size:13px;padding:8px 0}
 .review-source-hint,.review-duration-hint{font-size:12px;color:var(--text-muted);line-height:1.6}.review-selected{margin:8px 0;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface)}.review-selected summary{cursor:pointer;font-size:12px;font-weight:650;color:var(--text-secondary)}.review-selected-prompt{max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--text-body)}.aicf-review-pane .review-source-choice{display:flex;align-items:center;gap:8px;min-height:36px}.review-use-editor{width:16px;height:16px;flex:none}.review-duration{box-sizing:border-box;width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text-body)}
+.review-preview-player{position:relative;line-height:0}
+.aicf-review-pane .review-preview-player video::-webkit-media-controls-current-time-display,.aicf-review-pane .review-preview-player video::-webkit-media-controls-time-remaining-display{visibility:hidden}
+.review-preview-time{position:absolute;left:42px;bottom:34px;pointer-events:none;color:#fff;background:rgba(0,0,0,.65);border-radius:3px;padding:2px 4px;font:12px/1.4 sans-serif;font-variant-numeric:tabular-nums}
 .review-video-info,.review-state{font-size:12px;line-height:1.6;overflow-wrap:anywhere}.review-state{padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px}.review-state.is-error{color:var(--danger-text)}
 .review-actions{margin-top:12px}.review-actions button{flex:1}.review-before{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.review-changes{font-size:13px;padding-left:20px}
 .review-revision-meta{margin:6px 0 0;color:var(--text-secondary);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}.review-compare-state{margin:6px 0 8px;padding:6px 8px;border:1px solid var(--warning-border);border-radius:6px;background:var(--warning-soft);color:var(--warning-text);font-size:12px;font-weight:650}.review-compare-state.is-match{border-color:var(--success-border);background:var(--success-soft);color:var(--success-text)}.review-revised{width:100%;box-sizing:border-box}
 .aicf-review-pane [hidden]{display:none!important}.aicf-review-pane :focus-visible,.web-llm-box :focus-visible,.web-llm-route-row :focus-visible{outline:2px solid var(--theme-accent);outline-offset:2px}
+.aicf-prompt-editor-head .h3-duration-planning{flex-basis:100%;margin:6px 0 0;padding:8px 10px;border:1px solid var(--border,#dbe2ea);border-radius:6px;background:var(--surface-muted,#f8fafc);color:var(--text-body,#334155);font-size:13px;line-height:1.6;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}
+.aicf-prompt-editor-head .h3-duration-planning[hidden]{display:none!important}
 .aicf-prompt-modal-content:has(.aicf-review-pane){grid-template-columns:clamp(240px,19vw,340px) minmax(0,1fr) clamp(320px,26vw,480px)}
 .aicf-prompt-modal-content>.aicf-prompt-material-panel[hidden]{display:none!important}
 @media(max-width:1100px) and (min-width:861px){.aicf-prompt-modal-content:has(.aicf-review-pane){grid-template-columns:220px minmax(0,1fr) 300px}.aicf-review-pane{padding:10px}.aicf-prompt-material-panel{padding:10px}}

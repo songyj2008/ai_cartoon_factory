@@ -158,13 +158,8 @@ def _project_choices():
 
 def list_projects():
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    if not (PROJECTS_DIR / "current").exists():
-        (PROJECTS_DIR / "current").mkdir(parents=True, exist_ok=True)
-        (OUTPUT_DIR / "current").mkdir(parents=True, exist_ok=True)
-    names = sorted([p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()])
-    if "current" not in names:
-        names.insert(0, "current")
-    return names
+    # Listing projects must not create a default project as a side effect.
+    return sorted(p.name for p in PROJECTS_DIR.iterdir() if p.is_dir())
 
 
 def list_project_episodes(project_name=None):
@@ -368,7 +363,7 @@ def _segment_preserve_on_reset(segment: dict) -> bool:
     )
 
 
-def _sync_video_jobs_with_beat_durations(beats_data: dict, video_jobs_path: Path) -> str:
+def _sync_video_jobs_with_beat_durations(beats_data: dict, video_jobs_path: Path, *, patch_workflows: bool = True) -> str:
     if not video_jobs_path.exists():
         return ""
     try:
@@ -412,7 +407,8 @@ def _sync_video_jobs_with_beat_durations(beats_data: dict, video_jobs_path: Path
                     media_spec["aligned_duration_sec"] = aligned_frames / spec_fps
                     segment["requested_media_spec"] = media_spec
                 # Update the saved workflow JSON so regenerating isn't required.
-                _patch_workflow_duration(segment, duration)
+                if patch_workflows:
+                    _patch_workflow_duration(segment, duration)
                 changed_parts.append(str(segment.get("part_id") or f"part_{index:03d}"))
             break
     if changed_parts:
@@ -776,6 +772,8 @@ def _beats_display_to_json(display_text: str) -> dict:
         beat["plot"] = new_plot
         beat["estimated_duration_sec"] = _beat_duration_seconds(block.get("duration") or beat.get("estimated_duration_sec") or beat.get("duration_sec") or 15)
         if not has_existing or old_plot != str(new_plot).strip():
+            beat.pop('dialogue_authoritative', None)
+            beat.pop('dialogue_prompt_hash', None)
             beat = _rebuild_beat_auxiliary_fields(beat)
         updated_beats.append(beat)
     beats = updated_beats
@@ -1120,14 +1118,12 @@ def save_service_keys(
     comfyui_backend_url: str = "",
     deepseek_model: str = "",
     fps_value=None,
-    output_dir_value: str = "",
 ):
     saved = []
     deepseek_key = str(deepseek_key or "").strip()
     runninghub_key = str(runninghub_key or "").strip()
     comfyui_backend_url = str(comfyui_backend_url or "").strip()
     deepseek_model = str(deepseek_model or "").strip()
-    output_dir_value = str(output_dir_value or "").strip()
     placeholders = {"***", "需重新配置"}
     if deepseek_key and deepseek_key not in placeholders:
         set_secret(DEEPSEEK_API_KEY_ENV, deepseek_key)
@@ -1158,9 +1154,6 @@ def save_service_keys(
             saved.append("FPS")
     except Exception:
         log(f"[settings][warn] FPS 无效，已忽略: {fps_value}", "WARN")
-    if output_dir_value:
-        CONFIG["output_dir"] = output_dir_value
-        saved.append("output dir")
     if saved:
         _save_global_config()
     if saved:
@@ -1192,14 +1185,14 @@ def generate_story_with_duration(topic_text, duration_select, custom_duration):
 
 
 def generate_novel_segments_with_duration(novel_text, duration_select, custom_duration, target_segment_count):
-    """已有完整小说 → 生成 Beats → 再生成 Segments；覆盖 beats.json 与 video_jobs.json。"""
+    """已有完整小说 → 生成 Beats → 再生成 Segments；生成前保留已有结果。"""
     assert_current_runtime_writable("小说生成 Beats / Segments")
     ensure_project_dirs()
     raw_novel_text = str(novel_text or "")
     if not raw_novel_text.strip():
         raise ValueError("完整小说不能为空")
     # The button submission is the source of truth. Persist it before any
-    # destructive cleanup or remote model call so a failed generation cannot
+    # remote model call so a failed generation cannot
     # discard a long-form input.
     save_novel_source_text(raw_novel_text)
     try:
@@ -1210,18 +1203,14 @@ def generate_novel_segments_with_duration(novel_text, duration_select, custom_du
         update_ui_run_config(novel_segment_count=count)
     duration = _save_duration_state(duration_select, custom_duration)
     model_id = current_default_video_model()
-    # 清空旧 beats 与分段信息，按新的小说链路重新生成。
-    for stale_name in ("beats.json", "video_jobs.json", "novel_segments.json"):
-        stale_path = get_project_dir() / stale_name
-        if stale_path.exists():
-            stale_path.unlink()
+    # Keep existing Beats and prompts intact until generation produces a result.
     log("[novel_beats] ① 把小说切分为 Beats（保留对白与原文）", "STEP")
     data = generate_novel_beats(raw_novel_text, duration, count, model_id)
     actual_count = len(data.get("beats", []))
     if count and actual_count != count:
         log(
-            f"[novel_beats] 目标分段数 {count} 与 {duration}s 总时长不兼容，已按模型规则自动调整为 {actual_count} 段",
-            "WARN",
+            f"[novel_beats] 参考 Beat 数量 {count}，模型根据内容实际生成 {actual_count} 段",
+            "INFO",
         )
     (get_project_dir() / "beats.json").write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1469,7 +1458,7 @@ def set_current_project(project_name, outgoing_topic=None):
         char_update,
         bg_update,
         asset_gallery,
-        gr.update(choices=_episode_choices(project_name), value=""),
+        gr.update(choices=_episode_choices(project_name), value=get_current_episode_name()),
         novel_update,
         _runtime_novel_segment_count(),
         _runtime_target_beat_count(),

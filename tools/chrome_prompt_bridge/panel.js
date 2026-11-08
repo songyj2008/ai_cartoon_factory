@@ -89,11 +89,11 @@ function renderTask(next) {
 function loadSelectors() {
   const tab = tabs.find(item => item.id === Number($("target").value));
   const config = settings[P.provider(tab?.url)] || {};
-  for (const key of ["editor", "send", "reply"]) $(`${key}-selector`).value = config[key] || "";
+  for (const key of ["editor", "send", "reply", "user"]) $(`${key}-selector`).value = config[key] || "";
 }
 async function refresh() {
   const previous = activeTask() ? String(task.tab_id) : $("target").value;
-  tabs = (await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.deepseek.com/*", "https://*.doubao.com/*"] })).filter(tab => P.provider(tab.url));
+  tabs = (await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.deepseek.com/*", "https://*.doubao.com/*", "https://www.qianwen.com/*"] })).filter(tab => P.provider(tab.url));
   $("target").replaceChildren();
   const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = tabs.length ? "请选择一个对话标签页" : "未找到对话，请先打开并登录"; $("target").append(placeholder);
   for (const tab of tabs) {
@@ -102,16 +102,19 @@ async function refresh() {
   if (tabs.some(tab => String(tab.id) === previous)) $("target").value = previous;
   else if (tabs.length === 1) $("target").value = String(tabs[0].id);
   loadSelectors();
-  for (const id of ['deepseek','chatgpt','doubao']) {
+  for (const id of ['deepseek','chatgpt','doubao','qianwen']) {
     const select = $("backend-" + id);
-    select.replaceChildren(new Option("自动管理标签页池（数量见下方状态）", ""));
+    const pending=id==='qianwen' && !globalThis.TextProviderPolicy?.policy(id)?.available;
+    select.replaceChildren(new Option(pending ? '待网页核验，尚未启用' : '自动管理标签页池（数量见下方状态）', ""));
     select.disabled = true;
   }
 }
 async function sendMessage(type, selectedTask) {
   const tab = await chrome.tabs.get(selectedTask.tab_id);
   if (P.provider(tab.url) !== selectedTask.provider) throw new Error("目标标签页已关闭或切换网站，请重新选择。");
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["protocol.js", "text_provider_policy.js", "content.js"] });
+  if(P.provider(tab.url)==='千问' && !globalThis.TextProviderPolicy?.policy('qianwen')?.available)
+    throw new Error('千问适配待网页核验，尚未启用站点权限或自动提交。');
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["protocol.js", "text_provider_policy.js", "text_attachments.js", "qianwen.js", "content.js"] });
   const response = await chrome.tabs.sendMessage(tab.id, { type, task: selectedTask });
   if (!response?.ok) throw new Error(response?.error || "网页未响应，请查看目标标签页。");
   if (response.task) renderTask(response.task);
@@ -170,7 +173,7 @@ $("save-selectors").addEventListener("click", run(async () => {
   const tab = tabs.find(item => item.id === Number($("target").value));
   if (!tab) throw new Error("先选择要配置的网站标签页。");
   const config = {};
-  for (const key of ["editor", "send", "reply"]) {
+  for (const key of ["editor", "send", "reply", "user"]) {
     config[key] = $(`${key}-selector`).value.trim();
     if (config[key]) { try { document.querySelector(config[key]); } catch { throw new Error(`${key} 选择器语法无效。`); } }
   }

@@ -38,6 +38,22 @@ def _profile_and_template():
     return profile, template
 
 
+def _stub_h3_prompt_model(monkeypatch):
+    def fake_model(system, user, **kwargs):
+        payload = json.loads(user)
+        return {
+            "core_idea": payload["current_beat"].get("plot", "人物继续当前事件"),
+            "shot_mode": "one_take",
+            "shots": [{
+                "start_sec": 0,
+                "end_sec": payload["duration_sec"],
+                "action": payload["current_beat"].get("plot", "人物继续当前事件"),
+            }],
+        }, 0
+
+    monkeypatch.setattr("generation.pipelines.minimax_h3.prompt_planner._call_model", fake_model)
+
+
 def test_h3_adapter_assembles_dynamic_image_video_and_audio_inputs():
     profile, template = _profile_and_template()
     generation_config = {
@@ -127,7 +143,12 @@ def test_h3_adapter_materializes_only_selected_reference_counts():
 
     build = H3Ref2VAWorkflowAdapter(profile=profile).build(
         template,
-        {"plot": "Two travelers follow a moving light."},
+        {
+            "plot": "Two travelers follow a moving light.",
+            "model_hints": {"minimax_h3_local_ref2va": {"shots": [{
+                "start_sec": 0, "end_sec": 5, "action": "Two travelers follow a moving light.",
+            }]}},
+        },
         generation_config,
         duration_sec=5,
     )
@@ -196,7 +217,12 @@ def test_h3_adapter_applies_profile_declared_reference_controls():
 
     build = H3Ref2VAWorkflowAdapter(profile=profile).build(
         template,
-        {"plot": "A lantern glows."},
+        {
+            "plot": "A lantern glows.",
+            "model_hints": {"minimax_h3_local_ref2va": {"shots": [{
+                "start_sec": 0, "end_sec": 5, "action": "A lantern glows.",
+            }]}},
+        },
         {"generation_mode": "ref2va", "asset_manifest": [{"id": "image", "type": "image", "path": "image.png"}]},
         duration_sec=5,
     )
@@ -221,6 +247,11 @@ def test_h3_validator_enforces_model_limits_without_rewriting_assets():
 
 def test_h3_manual_prompt_can_replace_a_stale_longer_beat_timeline(tmp_path, monkeypatch):
     pipeline = MiniMaxH3Ref2VAPipeline()
+
+    def unexpected_model(*args, **kwargs):
+        raise AssertionError("manual prompt overrides must not invoke the text model")
+
+    monkeypatch.setattr("generation.pipelines.minimax_h3.prompt_planner._call_model", unexpected_model)
     manual_prompt = "[reference generation] 5 秒。\n[Shot 1]（0–3 秒）：人物奔跑。\n[Shot 2]（3–5 秒）：人物停下。"
     beat = {
         "id": 1,
@@ -260,6 +291,7 @@ def test_h3_manual_prompt_can_replace_a_stale_longer_beat_timeline(tmp_path, mon
 
 def test_h3_prompt_regeneration_does_not_append_auto_assets_to_persisted_picker_selection(tmp_path, monkeypatch):
     pipeline = MiniMaxH3Ref2VAPipeline()
+    _stub_h3_prompt_model(monkeypatch)
     selected = [
         {"id": "panda", "type": "image", "path": "panda.png", "role": "金色熊猫"},
         {"id": "sugar", "type": "image", "path": "sugar.png", "role": "3号糖宝宝"},
@@ -328,6 +360,7 @@ def test_h3_beat_asset_signature_falls_back_to_characters_list():
 
 def test_h3_does_not_replace_persisted_manifest_when_beat_signature_changes(tmp_path, monkeypatch):
     pipeline = MiniMaxH3Ref2VAPipeline()
+    _stub_h3_prompt_model(monkeypatch)
     persisted_auto = [
         {
             "id": "old-char",
@@ -374,6 +407,7 @@ def test_h3_does_not_replace_persisted_manifest_when_beat_signature_changes(tmp_
 
 def test_h3_does_not_re_add_removed_character_when_beat_signature_unchanged(tmp_path, monkeypatch):
     pipeline = MiniMaxH3Ref2VAPipeline()
+    _stub_h3_prompt_model(monkeypatch)
     curated = [
         {
             "id": "kept",
@@ -526,10 +560,16 @@ def test_h3_runninghub_queue_full_is_kept_in_local_queue(monkeypatch):
                 "part_id": "part_001",
                 "model_id": pipeline.spec.id,
                 "status": "workflow_ready",
+                "workflow_path": "saved.json",
                 "job": {"model_id": pipeline.spec.id},
             }
         ],
     }
+    from generation.pipelines.minimax_h3.continuity.revisions import revision
+    segment = payload['segments'][0]
+    segment['segment_uid'] = 'queue-full-test'
+    segment['generation_config'] = {'prompt_override': 'saved screenplay', 'duration_sec': 4}
+    segment['workflow_source_revision'] = revision(segment)
     saved = []
     provider = type("Provider", (), {"name": "runninghub"})()
 

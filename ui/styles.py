@@ -8,44 +8,44 @@ CSS = """
 :root,
 :root[data-aicf-theme="linear"],
 body[data-aicf-theme="linear"] {
-    --theme-bg: #f7f8fa;
-    --theme-bg-subtle: #f4f6f8;
+    --theme-bg: #f5f6fa;
+    --theme-bg-subtle: #f1f5f9;
     --theme-surface: #ffffff;
-    --theme-surface-subtle: #f9fafb;
+    --theme-surface-subtle: #f8fafc;
     --theme-surface-muted: #f1f5f9;
-    --theme-border: #e5e7eb;
-    --theme-border-strong: #cbd5e1;
+    --theme-border: #e2e8f0;
+    --theme-border-strong: #8492a6;
     --theme-text-title: #0f172a;
     --theme-text-card: #1f2937;
-    --theme-text-body: #374151;
-    --theme-text-secondary: #4b5563;
-    --theme-text-label: #374151;
-    --theme-text-placeholder: #6b7280;
-    --theme-text-disabled: #d1d5db;
-    --theme-accent: #2563eb;
+    --theme-text-body: #334155;
+    --theme-text-secondary: #475569;
+    --theme-text-label: #475569;
+    --theme-text-placeholder: #64748b;
+    --theme-text-disabled: #94a3b8;
+    --theme-accent: #4f46e5;
     --theme-accent-foreground: #ffffff;
-    --theme-accent-hover: #1d4ed8;
-    --theme-accent-soft: #eff6ff;
-    --theme-success: #22c55e;
-    --theme-success-text: #15803d;
-    --theme-success-soft: #f0fdf4;
-    --theme-warning: #f59e0b;
-    --theme-warning-text: #b45309;
+    --theme-accent-hover: #4338ca;
+    --theme-accent-soft: #eef2ff;
+    --theme-success: #047857;
+    --theme-success-text: #047857;
+    --theme-success-soft: #ecfdf5;
+    --theme-warning: #92400e;
+    --theme-warning-text: #92400e;
     --theme-warning-soft: #fffbeb;
-    --theme-danger: #ef4444;
-    --theme-danger-text: #b91c1c;
-    --theme-danger-soft: #fef2f2;
-    --theme-focus: rgba(37, 99, 235, 0.18);
-    --theme-accent-border: #bfdbfe;
-    --theme-accent-border-strong: #93c5fd;
-    --theme-accent-soft-hover: #dbeafe;
-    --theme-success-border: #bbf7d0;
+    --theme-danger: #be123c;
+    --theme-danger-text: #be123c;
+    --theme-danger-soft: #fff1f2;
+    --theme-focus: rgba(79, 70, 229, 0.18);
+    --theme-accent-border: #c7d2fe;
+    --theme-accent-border-strong: #818cf8;
+    --theme-accent-soft-hover: #e0e7ff;
+    --theme-success-border: #a7f3d0;
     --theme-warning-border: #fde68a;
-    --theme-danger-border: #fecaca;
+    --theme-danger-border: #fecdd3;
     --theme-scrollbar-thumb: #cbd5e1;
     --theme-overlay-scrim: rgba(15, 23, 42, 0.36);
     --theme-preview-scrim: rgba(15, 23, 42, 0.5);
-    --theme-active-ring: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    --theme-active-ring: 0 0 0 3px rgba(79, 70, 229, 0.12);
     --theme-danger-ring: 0 0 0 3px rgba(239, 68, 68, 0.12);
     --theme-radius-sm: 8px;
     --theme-radius: 10px;
@@ -1885,78 +1885,6 @@ select:disabled {
     display: none !important;
 }
 
-.beat-risk-row {
-    align-items: flex-end !important;
-    gap: 14px !important;
-}
-
-.beat-risk-row .beat-split-index,
-#complex_beat_index {
-    flex: 0 0 188px !important;
-    width: 188px !important;
-    min-width: 188px !important;
-}
-
-/* Gradio places Number inside a flex .form wrapper; reserve space there too. */
-.beat-risk-row > .form:has(#complex_beat_index) {
-    flex: 0 0 188px !important;
-    width: 188px !important;
-    min-width: 188px !important;
-}
-
-.beat-risk-row .beat-split-index input,
-#complex_beat_index input {
-    width: 100% !important;
-}
-
-.beat-risk-row .beat-risk-detect-btn,
-.beat-risk-row .beat-split-submit-btn,
-.beat-risk-row .beat-add-submit-btn,
-.beat-risk-row .beat-delete-submit-btn {
-    flex: 0 0 auto !important;
-    min-width: 156px !important;
-}
-
-.beat-risk-row .beat-delete-submit-btn button,
-.beat-risk-row .beat-delete-submit-btn.gr-button,
-.beat-risk-row .beat-delete-submit-btn {
-    border-color: color-mix(in srgb, #ef4444 52%, var(--border)) !important;
-    color: #b91c1c !important;
-    background: color-mix(in srgb, #fee2e2 76%, var(--surface)) !important;
-}
-
-.beat-risk-row .beat-add-submit-btn button,
-.beat-risk-row .beat-add-submit-btn.gr-button,
-.beat-risk-row .beat-add-submit-btn {
-    border-color: color-mix(in srgb, #22c55e 52%, var(--border)) !important;
-    color: #15803d !important;
-    background: color-mix(in srgb, #dcfce7 76%, var(--surface)) !important;
-}
-
-.beat-risk-row > *,
-.beat-risk-row .form,
-.beat-risk-row .wrap {
-    min-width: 0 !important;
-}
-
-.beat-risk-row button,
-.beat-risk-row button.gr-button,
-.beat-risk-row .gr-button {
-    height: 38px !important;
-    min-height: 38px !important;
-    margin: 0 !important;
-    padding: 0 14px !important;
-    line-height: 1 !important;
-}
-
-.beat-risk-row input:not([type="checkbox"]):not([type="radio"]) {
-    height: 38px !important;
-    min-height: 38px !important;
-    font-size: 13px !important;
-    font-weight: 600 !important;
-    color: var(--text-title) !important;
-}
-
 #segment_pager.segment-pager {
     display: flex !important;
     align-items: center !important;
@@ -1987,24 +1915,6 @@ select:disabled {
     font-size: 13px !important;
     font-weight: 600 !important;
     font-variant-numeric: tabular-nums;
-}
-
-@media (max-width: 720px) {
-    .beat-risk-row {
-        align-items: stretch !important;
-    }
-
-    .beat-risk-row .beat-split-index,
-    #complex_beat_index,
-    .beat-risk-row > .form:has(#complex_beat_index),
-    .beat-risk-row .beat-risk-detect-btn,
-    .beat-risk-row .beat-split-submit-btn,
-    .beat-risk-row .beat-add-submit-btn,
-    .beat-risk-row .beat-delete-submit-btn {
-        flex: 1 1 100% !important;
-        width: 100% !important;
-        min-width: 100% !important;
-    }
 }
 
 input[type="checkbox"],
@@ -4354,7 +4264,7 @@ div[role="button"] {
     padding: 6px 8px;
     border: 1px solid var(--warning-border);
     border-radius: 6px;
-    background: color-mix(in srgb, var(--warning-soft) 72%, white);
+    background: var(--warning-soft);
 }
 
 .beat-risk-select {
@@ -4388,13 +4298,13 @@ div[role="button"] {
 .beat-risk-notice.warn {
     border: 1px solid var(--warning-border);
     background: var(--warning-soft);
-    color: #92400e !important;
+    color: var(--warning-text) !important;
 }
 
 .beat-risk-notice.ok {
     border: 1px solid var(--success-border);
     background: var(--success-soft);
-    color: #166534 !important;
+    color: var(--success-text) !important;
 }
 
 /* Gradio may apply disabled-label colors inside this accordion. Keep result
@@ -4407,12 +4317,12 @@ div[role="button"] {
 
 .beat-risk-notice.warn b,
 .beat-risk-notice.warn span {
-    color: #92400e !important;
+    color: var(--warning-text) !important;
 }
 
 .beat-risk-notice.ok b,
 .beat-risk-notice.ok span {
-    color: #166534 !important;
+    color: var(--success-text) !important;
 }
 
 #complex_beat_index label,
@@ -4756,6 +4666,22 @@ body.minimal-mode .one-click-action-row {
 }
 
 .h3-preview-actions { display: flex; flex-direction: column; gap: 6px; }
+.h3-preview-info { min-width: 0; }
+.h3-selected-preview-list > li { flex-wrap: wrap; }
+.h3-character-details { flex: 0 0 100%; min-width: 0; }
+.h3-character-details > input { width: 100%; min-width: 0; box-sizing: border-box; }
+.h3-character-voice-controls { display: grid; gap: 6px; margin-top: 8px; }
+.h3-character-voice-controls label { display: grid; gap: 4px; }
+.h3-character-voice-controls label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.h3-character-voice-controls select,
+.h3-character-voice-controls input[type="file"],
+.h3-preview-info > input { width: 100%; min-width: 0; box-sizing: border-box; }
+.h3-character-voice-controls select { min-height: 36px; }
+.h3-bound-audio { display: grid; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.h3-bound-audio input, .h3-bound-audio select, .h3-bound-audio audio { width: 100%; min-width: 0; box-sizing: border-box; }
+.h3-bound-audio button { min-height: 36px; }
+.h3-character-voice-controls :focus-visible { outline: 2px solid var(--focus, #6366f1); outline-offset: 2px; }
+
 .h3-replace-box { padding: 10px; margin: 8px 0; border: 1px solid #6366f1; border-radius: 8px; background: #f5f7ff; color: #172033; }
 .h3-replace-box p { margin: 0 0 8px; line-height: 1.5; }
 .h3-replace-box input { width: 100%; margin: 8px 0; }
@@ -5205,8 +5131,10 @@ body.minimal-mode .one-click-action-row {
 """
 
 from ui.web_llm_ui import WEB_LLM_CSS
+from ui.h3_shot_editor_ui import SHOT_EDITOR_CSS
 
 CSS += WEB_LLM_CSS
+CSS += SHOT_EDITOR_CSS
 from ui.text_jobs_ui import PANEL_CSS
 CSS += PANEL_CSS
 
@@ -5302,4 +5230,304 @@ CSS += r"""
     background: transparent !important;
     color: inherit !important;
 }
+
+.aicf-prompt-char-count {
+    margin-left: 16px;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: #334155;
+}
+.aicf-prompt-char-count.is-over-limit { color: #b91c1c; }
 """
+
+from ui.h3_editor_draft_ui import EDITOR_DRAFT_CSS
+CSS += EDITOR_DRAFT_CSS
+from ui.h3_prompt_editor_ui import PROMPT_EDITOR_CSS
+CSS += PROMPT_EDITOR_CSS
+
+CSS += r"""
+/* Beat operations: one primary action, compact aligned fields, readable labels.
+   Gradio supplies .form wrappers; size those along with their Number fields. */
+#beat_management_panel {
+    --beat-resource: #0e7490;
+    --beat-resource-soft: #ecfeff;
+    --block-label-text-color: var(--text-label);
+    --block-info-text-color: var(--text-secondary);
+    --body-text-color: var(--text-body);
+    --input-border-color: var(--border-strong);
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    background: var(--surface) !important;
+    box-shadow: var(--shadow) !important;
+    overflow: visible !important;
+    padding: 0 !important;
+}
+#beat_management_panel > .label-wrap {
+    justify-content: space-between !important;
+    padding: 12px 16px !important;
+    color: var(--text-title) !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+}
+#beat_management_panel > .label-wrap > span:not(.icon) {
+    flex: 1;
+    text-align: left !important;
+}
+#beat_management_panel > [data-testid="accordion-content"] > .column {
+    gap: 16px !important;
+    padding: 0 16px 16px !important;
+}
+#beat_management_panel :where(.beat-check-toolbar,.beat-manage-row,.beat-copy-row) {
+    align-items: flex-end !important;
+    gap: 8px 12px !important;
+}
+#beat_management_panel .beat-check-toolbar {
+    align-items: center !important;
+    padding-top: 4px;
+}
+#beat_management_panel .beat-check-toolbar > .block {
+    flex: 1 1 200px !important;
+    min-width: 0 !important;
+}
+#beat_management_panel .hide-container {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+#beat_management_panel .beat-section-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+#beat_management_panel .beat-section-mark {
+    flex-shrink: 0;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+}
+#beat_management_panel .beat-mark-resource {
+    color: var(--beat-resource);
+    background: var(--beat-resource-soft);
+}
+#beat_management_panel :where(.beat-manage-row,.beat-copy-row) > .form {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    width: auto !important;
+    gap: 12px !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+#beat_management_panel .beat-number-field {
+    flex: 0 1 108px !important;
+    width: 108px !important;
+    min-width: 96px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+#beat_management_panel :where(.beat-number-field,#ignore_beat_risk_box) :where(label,.label-wrap,.block-label,span) {
+    color: var(--text-label) !important;
+    opacity: 1 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    line-height: 1.5 !important;
+}
+#beat_management_panel .beat-number-field label {
+    display: block !important;
+    margin: 0 !important;
+    background: transparent !important;
+    padding: 0 !important;
+}
+#beat_management_panel .beat-number-field [data-testid="block-info"] {
+    display: block;
+    margin-bottom: 4px;
+}
+#beat_management_panel .beat-number-field input {
+    box-sizing: border-box;
+    height: 36px !important;
+    min-height: 36px !important;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: var(--radius-sm) !important;
+    background: var(--surface) !important;
+    color: var(--text-body) !important;
+    padding: 6px 10px !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    font-variant-numeric: tabular-nums;
+}
+#beat_management_panel :where(button.beat-control,.beat-control button) {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    margin: 0 !important;
+    padding: 0 14px !important;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: var(--radius-sm) !important;
+    background: var(--surface) !important;
+    color: var(--text-body) !important;
+    box-shadow: none !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    line-height: 1.4 !important;
+    cursor: pointer;
+    transition: background-color var(--motion), border-color var(--motion), color var(--motion);
+}
+#beat_management_panel :where(button.beat-control,.beat-control button):hover {
+    background: var(--surface-muted) !important;
+    border-color: var(--text-secondary) !important;
+}
+#beat_management_panel :where(button.beat-check-primary,.beat-check-primary button) {
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: var(--accent-foreground) !important;
+    font-weight: 600 !important;
+}
+#beat_management_panel :where(button.beat-check-primary,.beat-check-primary button):hover {
+    background: var(--accent-hover) !important;
+    border-color: var(--accent-hover) !important;
+}
+#beat_management_panel :where(button.beat-action-outline,.beat-action-outline button) {
+    color: var(--accent) !important;
+    border-color: var(--accent-border-strong) !important;
+}
+#beat_management_panel :where(button.beat-action-outline,.beat-action-outline button):hover {
+    background: var(--accent-soft) !important;
+    border-color: var(--accent) !important;
+}
+#beat_management_panel :where(button.beat-action-danger,.beat-action-danger button) {
+    margin-left: auto !important;
+    color: var(--danger-text) !important;
+    border-color: transparent !important;
+    background: transparent !important;
+}
+#beat_management_panel :where(button.beat-action-danger,.beat-action-danger button):hover {
+    background: var(--danger-soft) !important;
+    border-color: var(--danger-border) !important;
+}
+#beat_management_panel :where(button,input,summary):focus-visible {
+    outline: 2px solid var(--accent) !important;
+    outline-offset: 2px !important;
+    box-shadow: none !important;
+}
+#beat_management_panel button:disabled {
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
+}
+#beat_management_panel .beat-copy-section {
+    padding: 12px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    background: var(--surface-subtle) !important;
+}
+#beat_management_panel .beat-copy-section > .styler {
+    gap: 8px !important;
+    background: transparent !important;
+}
+/* Gradio 6 repeats Group classes on an inner wrapper. Style the shell once. */
+#beat_management_panel .beat-copy-section .beat-copy-section,
+#beat_management_panel .beat-generation-options .beat-generation-options {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+#beat_management_panel .beat-copy-footnote {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 4px 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+#beat_management_panel .beat-copy-footnote details {
+    max-width: 100%;
+}
+#beat_management_panel .beat-copy-footnote summary {
+    color: var(--accent);
+    cursor: pointer;
+}
+#beat_management_panel .beat-copy-footnote p {
+    margin: 4px 0 0 !important;
+    max-width: 400px;
+    font-size: 12px !important;
+    color: var(--text-secondary) !important;
+}
+#beat_management_panel .beat-generation-options {
+    padding: 12px 0 0 !important;
+    border: 0 !important;
+    border-top: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+}
+#beat_management_panel .beat-generation-options > .styler {
+    gap: 4px !important;
+    background: transparent !important;
+}
+#beat_management_panel #ignore_beat_risk_box {
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+}
+#beat_management_panel #ignore_beat_risk_box label {
+    display: flex !important;
+    align-items: flex-start !important;
+    gap: 8px !important;
+    padding: 4px 0 !important;
+    cursor: pointer;
+}
+#beat_management_panel #ignore_beat_risk_box input { margin-top: 2px !important; }
+#beat_management_panel .beat-helper :where(p,span) {
+    margin: 0 !important;
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    line-height: 1.5 !important;
+}
+#beat_management_panel .block.beat-checkbox-help { padding-left: 24px !important; }
+#beat_management_panel #beat_risk_notice:not(:has(.prose > *)),
+#beat_management_panel #beat_risk_notice:empty { display: none !important; }
+#beat_management_panel .beat-risk-select {
+    color: var(--warning-text) !important;
+    background: var(--surface) !important;
+    border-color: var(--warning-text) !important;
+}
+#beat_management_panel .beat-risk-codes { color: var(--warning-text) !important; }
+@media (max-width: 600px) {
+    #beat_management_panel > [data-testid="accordion-content"] > .column { padding: 0 12px 12px !important; }
+    #beat_management_panel button.beat-control,
+    #beat_management_panel .beat-control button,
+    #beat_management_panel .beat-number-field input {
+        min-height: 44px !important;
+        height: 44px !important;
+    }
+    #beat_management_panel .beat-check-toolbar > .block { flex-basis: 100% !important; }
+    #beat_management_panel .beat-manage-row,
+    #beat_management_panel .beat-copy-row { gap: 12px 8px !important; }
+    #beat_management_panel .beat-number-field { min-width: 92px !important; width: 96px !important; }
+    #beat_management_panel .beat-copy-footnote { flex-direction: column; }
+    #beat_management_panel #ignore_beat_risk_box label { min-height: 44px; align-items: center !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    #beat_management_panel button { transition: none !important; }
+}
+"""
+
+from ui.scene_video_batch_ui import SCENE_BATCH_CSS
+CSS += SCENE_BATCH_CSS

@@ -27,38 +27,53 @@ _WAKE = threading.Event()
 _WORKER = None
 _ACTIVE_EXECUTIONS = {}
 MAX_CONCURRENT_OPERATIONS = 13  # Up to twelve website jobs, plus one API job.
-TITLES = {'story':'生成剧情', 'beats':'拆分 Beats', 'novel':'小说 → Beats → Segments',
+TITLES = {'scene_video_batch':'连续场景批量生成','scene_video_step':'准备场景视频分段','scene_state':'提取场景人物状态', 'opening_continuity':'根据场景人物状态优化提示词', 'story':'生成剧情', 'beats':'拆分 Beats', 'novel':'小说 → Beats → Segments',
+          'novel_beats':'小说 → Beats', 'novel_segment':'Beat → Segment',
           'prompts':'生成分段提示词', 'segment':'重生成分段提示词',
-          'source_replan':'按剧情上下文重新规划', 'pipeline':'一键流程：准备文字及工作流',
+          'source_replan':'重新规划时长', 'pipeline':'一键流程：准备文字及工作流',
           'split':'拆分复杂 Beat', 'feedback':'分析视频问题', 'metadata':'补全素材描述',
-          'revision_wait':'修正视频提示词'}
-LIVE = ('preparing', 'queued', 'running')
+          'revision_wait':'修正视频提示词', 'video_learning':'视频 OK 经验分析'}
+LIVE = ('preparing', 'queued', 'running', 'waiting_children')
 CLEARABLE = ('ready', 'applied', 'cancelled', 'error')
-APPLIED_RETENTION_SECONDS = 7 * 24 * 60 * 60
+APPLIED_RETENTION_SECONDS = 24 * 60 * 60
+FAILED_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MERGE_BASELINE_DIR = '.apply_baseline'
 SEGMENT_MERGE_FILES = ('beats.json','video_jobs.json')
 OUTPUTS = ('story.json', 'beats.json', 'video_jobs.json', 'novel_source.json',
            'video_feedback_analysis.json')
-STAGES = {
+STAGES = {'scene_state':['读取场景稿件','提取人物状态','校验并保存状态','状态已保存'],
+    'opening_continuity':['读取人物状态','规划本段','校验候选','生成完成'],
     'story':['准备任务','生成剧情','校验候选','生成完成','应用完成'],
     'beats':['准备任务','拆分 Beats','校验候选','生成完成','应用完成'],
     'novel':['准备任务','拆分 Beats 与 Segments','校验候选','生成完成','应用完成'],
     'prompts':['准备任务','生成分段提示词','校验候选','生成完成','应用完成'],
     'segment':['准备任务','重生成分段提示词','校验候选','生成完成','应用完成'],
-    'source_replan':['准备任务','按剧情上下文重新规划','校验候选','生成完成','应用完成'],
+    'source_replan':['准备任务','重新规划时长','校验候选','生成完成','应用完成'],
     'pipeline':['准备任务','生成剧情、Beats 及提示词','校验候选','生成完成','应用完成'],
     'split':['准备任务','拆分复杂 Beat','校验候选','生成完成','应用完成'],
     'feedback':['准备任务','分析视频问题','分析完成'],
     'metadata':['准备任务','补全素材描述','补全完成'],
+    'video_learning':['准备任务','分析已确认成片','保存持久经验','分析完成'],
     'revision_wait':['准备任务','等待网页回复','保存修正候选','生成完成','应用完成'],
 }
 
 
 class NeedsAttentionError(RuntimeError):
-    """The original browser request may have been sent; never replay it."""
+    """A durable request cannot safely continue without review."""
+
+    def __init__(self, message, *, reason='web_timeout'):
+        super().__init__(message)
+        self.reason = reason
 
 
 def _progress(item):
+    if item.get('batch_version') == 1:
+        total = int(item.get('segment_total') or 0)
+        completed = int(item.get('segment_processed', item.get('segment_completed')) or 0)
+        beats_done = bool(item.get('beats_task_applied'))
+        return {'percent': round((int(beats_done) + completed) / (1 + total) * 100) if total else 0,
+                'node': item.get('phase') or '准备批次', 'step': int(beats_done)+completed,
+                'total': 1+total, 'stages': []}
     stages = STAGES.get(item['kind'], ['准备任务','处理中','已完成'])
     state, phase = item['state'], str(item.get('phase') or '')
     if state == 'preparing':
@@ -255,6 +270,9 @@ def _merge_json_values(base, candidate, current, path=(), conflicts=None):
         return _clone_json(candidate)
 
     values = (base, candidate, current)
+    if path and path[-1]=='h3_continuity':
+        conflicts.append(_render_json_path(path))
+        return _clone_json(current)
     if any(isinstance(value, dict) for value in values if value is not _MISSING) and all(
         value is _MISSING or isinstance(value, dict) for value in values
     ):
@@ -360,12 +378,31 @@ def _stage_merged_json(item, name, source, work):
         current = _json_value(source / name)
     except (OSError, ValueError, TypeError) as exc:
         raise ValueError(f'{name} 无法安全合并 JSON：{exc}') from exc
+    # Totals are derived from the rows, so independent duration edits must not
+    # conflict on the shared summary or retain either snapshot's stale sum.
+    collection = {'beats.json': 'beats', 'video_jobs.json': 'segments'}[name]
+    documents = (base, candidate, current)
+    recalculate_total = any(isinstance(doc, dict) and 'total_duration_sec' in doc for doc in documents) and all(
+        doc is _MISSING or (isinstance(doc, dict) and isinstance(doc.get(collection), list)
+                            and all(isinstance(row, dict) for row in doc[collection]))
+        for doc in documents)
+    if recalculate_total:
+        base, candidate, current = (
+            {key: value for key, value in doc.items() if key != 'total_duration_sec'}
+            if isinstance(doc, dict) else doc for doc in documents)
     conflicts = []
     merged = _merge_json_values(base, candidate, current, (name,), conflicts)
     if conflicts:
         return None, sorted(set(conflicts)), True
     if merged is _MISSING:
         return None, [], True
+    if recalculate_total:
+        if collection == 'beats':
+            merged['total_duration_sec'] = sum(float(row.get('estimated_duration_sec') or row.get('duration_sec') or 0)
+                                               for row in merged[collection])
+        else:
+            merged['total_duration_sec'] = sum(float((row.get('job') or {}).get('duration_sec') or 0)
+                                               for row in merged[collection])
     staged = work / '.apply_merge' / name
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -377,7 +414,12 @@ def _snapshot_files(source):
 
 
 def _target_segment(kind, args, source):
-    argument_index = {'segment':0,'source_replan':0,'split':2,'revision_wait':1}.get(kind)
+    if kind in ('opening_continuity', 'scene_state'):
+        jobs=json.loads((source/'video_jobs.json').read_text(encoding='utf-8-sig'))
+        segment=next((s for s in jobs.get('segments',[]) if s.get('segment_uid')==args[0].get('segment_uid')),None)
+        if segment:return {k:segment.get(k) for k in ('segment_index','segment_uid','beat_uid')}
+        return None
+    argument_index = {'segment':0,'source_replan':0,'split':2,'revision_wait':1,'video_learning':0}.get(kind)
     if argument_index is None:
         return None
     try:
@@ -393,25 +435,74 @@ def _target_segment(kind, args, source):
     return None
 
 
-def submit(kind, args, editors=None, *, start=True, hold=False):
+def submit(kind, args, editors=None, *, start=True, hold=False, batch=None, page_providers=None):
     if kind not in TITLES:
         raise ValueError('未知文字任务')
-    context.assert_current_runtime_writable('提交文字任务')
+    # Learning reads a frozen render and writes only the separate experience library.
+    # Archived episodes must remain available as approved learning samples.
+    if kind != 'video_learning':
+        context.assert_current_runtime_writable('提交文字任务')
     from services.web_llm_bridge import get_settings, routes_for
     if kind in ('story', 'beats', 'novel', 'pipeline', 'prompts', 'segment', 'source_replan', 'split'):
         from services.project_assets import sync_generation_assets
         sync_generation_assets()
     source = context.get_project_dir().resolve()
     identifier = str(uuid.uuid4())
-    routes = get_settings()
+    routes = copy.deepcopy(batch['routes']) if batch and batch.get('routes') else get_settings()
+    batch_key = None
+    if kind == 'novel':
+        from services.novel_batches import input_key, resume_existing
+        batch_key = input_key(source, args, routes)
+        resumed = resume_existing(batch_key)
+        if resumed:
+            if start:
+                ensure_worker()
+                _WAKE.set()
+            return resumed
+    if batch:
+        identifier = str(uuid.uuid5(uuid.UUID(batch['id']), batch['stage_key']))
+    has_page_providers = page_providers is not None
+    timing_only = kind == 'source_replan' and len(args) > 2 and args[2].get('timing_only') is True
+    timing_api = args[2].get('timing_api', False) if timing_only else False
+    if type(timing_api) is not bool:
+        raise ValueError('规划时长 API 选项必须为布尔值')
+    if page_providers is None and kind == 'source_replan' and len(args) > 2:
+        page_providers = args[2].get('providers')
+        has_page_providers = True
+    if has_page_providers:
+        from services.web_llm_bridge import ENTRIES, resolve_page_providers
+        selected = ['api'] if timing_only and timing_api and page_providers == [] else resolve_page_providers(page_providers,config=routes)
+        if kind == 'source_replan' and not timing_only and 'chatgpt' in selected:
+            # ChatGPT is the first timing channel when selected. The dedicated
+            # retimer owns its API -> DeepSeek web fallback, outside this pool.
+            selected = ['chatgpt']
+        # Only this task's frozen routes change. All calls and repair attempts
+        # made by this page operation use its selection, not feature defaults.
+        routes = copy.deepcopy(routes)
+        routes.setdefault('overrides', {}).update({entry:list(selected) for entry in ENTRIES})
     route_fingerprint = {'default_providers':routes.get('default_providers') or [routes.get('default_provider')],
                          'overrides':routes.get('overrides')}
+    timing_policy = None
+    if timing_only:
+        from services.duration_planning_llm import POLICY, MODEL, provider_order
+        timing_policy = {'version': POLICY, 'model': MODEL,
+                         'order': provider_order(routes_for('prompt', config=routes), api_enabled=timing_api)}
+        if not timing_policy['order']:
+            raise ValueError('请勾选规划时长使用的网页 LLM 或 DeepSeek API')
+        route_fingerprint['duration_policy'] = timing_policy
     signature = hashlib.sha256(json.dumps([str(source),kind,args,editors or {},route_fingerprint], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    if batch:
+        signature = hashlib.sha256((signature + identifier).encode()).hexdigest()
     with _LOCK, database() as db:
         db.execute('BEGIN IMMEDIATE')
-        for row in db.execute("SELECT * FROM operations WHERE state IN ('preparing','queued','running')"):
+        if batch:
+            existing = db.execute('SELECT * FROM operations WHERE id=?', (identifier,)).fetchone()
+            if existing:
+                return {**_decode(existing), 'duplicate': True}
+        for row in db.execute("SELECT * FROM operations WHERE state IN ('preparing','queued','running','waiting_children')"):
             item = _decode(row)
-            if item['signature'] == signature:
+            if ((kind != 'novel' and item['signature'] == signature)
+                    or (kind == 'novel' and item.get('batch_key') == batch_key)):
                 return {**item,'duplicate':True}
         work = root() / identifier / 'work'
         work.mkdir(parents=True)
@@ -421,7 +512,7 @@ def submit(kind, args, editors=None, *, start=True, hold=False):
             shutil.copy2(path, work / path.name)
         merge_baseline_dir = work / MERGE_BASELINE_DIR
         merge_baseline_files = {}
-        mergeable_files = SEGMENT_MERGE_FILES if kind in ('segment','source_replan','revision_wait') else ()
+        mergeable_files = SEGMENT_MERGE_FILES if kind in ('segment','source_replan','revision_wait','novel_segment') else ()
         for name in mergeable_files:
             original = source / name
             if original.is_file():
@@ -446,10 +537,14 @@ def submit(kind, args, editors=None, *, start=True, hold=False):
         if context.ASSET_INDEX_PATH.is_file():
             shutil.copy2(context.ASSET_INDEX_PATH, meta / 'asset_index.json')
         meta_sources[str(context.ASSET_INDEX_PATH.resolve())] = digest(context.ASSET_INDEX_PATH)
-        entry = {'story':'story','beats':'beats','novel':'beats','prompts':'prompt','segment':'prompt',
+        entry = {'scene_state':'other','opening_continuity':'other','story':'story','beats':'beats','novel':'beats','prompts':'prompt','segment':'prompt',
+                 'novel_beats':'beats','novel_segment':'prompt',
                  'source_replan':'prompt','pipeline':'story','feedback':'feedback','metadata':'other',
-                 'split':'beats','revision_wait':'revision'}.get(kind,'other')
+                 'split':'beats','revision_wait':'revision','video_learning':'video_learning'}.get(kind,'other')
         provider_candidates = routes_for(entry,config=routes)
+        if timing_policy:
+            # Reserve the first channel, not a load-balanced fallback pool.
+            provider_candidates = timing_policy['order'][:1]
         if kind == 'revision_wait' and len(args) > 2 and isinstance(args[2],dict):
             requested = args[2].get('providers') or args[2].get('provider') or 'inherit'
             provider_candidates = routes_for(entry,requested,config=routes)
@@ -461,8 +556,21 @@ def submit(kind, args, editors=None, *, start=True, hold=False):
         for recovery_entry in recovery_entries:
             recovery_providers.extend(routes_for(recovery_entry,config=routes))
         recovery_safe = all(value != 'api' for value in recovery_providers)
+        if timing_policy:
+            recovery_safe = True  # API attempts/results have durable timing receipts.
         segment = _target_segment(kind,args,source)
         input_version = hashlib.sha256(json.dumps([baseline, meta_sources, args, editors or {}, routes],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+        planning_resumed_from = None
+        if kind in ('novel', 'pipeline', 'prompts', 'segment', 'source_replan'):
+            from generation.pipelines.minimax_h3.planning_checkpoints import inherit_plans
+            # Reuse only validated private plans from identical failed inputs.
+            # Browser leases/results and partial project outputs are not copied.
+            for row in db.execute("SELECT * FROM operations WHERE state='error' ORDER BY updated DESC"):
+                prior = _decode(row)
+                if (prior.get('signature') == signature and prior.get('input_version') == input_version
+                        and inherit_plans(prior['work'], work)):
+                    planning_resumed_from = prior['id']
+                    break
         initial_state = 'preparing' if hold else 'queued'
         initial_phase = '准备网页任务' if hold else '已排队'
         item = {'kind':kind,'title':TITLES[kind], 'args':args,'editors':editors or {},
@@ -471,10 +579,34 @@ def submit(kind, args, editors=None, *, start=True, hold=False):
                 'baseline':baseline,'merge_baseline_files':merge_baseline_files,
                 'meta_baseline':meta_sources,'routes':routes,
                 'provider':provider,'provider_candidates':provider_candidates,
+                'timing_policy':timing_policy,
                 'entry':entry,'segment':segment,'input_version':input_version,
+                'planning_resumed_from':planning_resumed_from,
                 'recovery_version':1 if recovery_safe else 0,'recovery_safe':recovery_safe,'web_calls':{},
                 'phase':initial_phase,'children':[], 'history':[{'at':time.time(),'state':initial_state,'phase':initial_phase}],
                 'timings':{'queued_at':time.time()},'message':'已提交后台队列，可离开当前页面'}
+        if kind == 'novel':
+            from services.novel_batches import generation_model
+            item.update(batch_version=1, batch_key=batch_key, stage_attempts={}, stage_tasks=[],
+                        batch_model_id=generation_model(), segment_total=0, segment_completed=0,
+                        active_stage='beats', recovery_safe=False)
+        if batch:
+            item.update(batch_id=batch['id'], batch_stage=batch['stage'], batch_index=batch.get('index', 0),
+                        batch_input=batch.get('input'))
+            if batch.get('checkpoint_work'):
+                from generation.pipelines.minimax_h3.planning_checkpoints import inherit_plans
+                inherit_plans(batch['checkpoint_work'], work)
+        if kind == 'novel_segment':
+            beats_data = _json_value(source / 'beats.json')
+            index = int(args[0])
+            if not 1 <= index <= len(beats_data.get('beats') or []):
+                raise ValueError('Beat 不存在')
+            beat = beats_data['beats'][index - 1]
+            item['segment'] = {'segment_index': index, 'beat_uid': beat['beat_uid']}
+            item['title'] = f"Beat {index} → Segment {index}"
+            if not batch:
+                from services.novel_batches import _stage_input
+                item['batch_input'] = _stage_input(source, index)
         now = time.time()
         db.execute('INSERT INTO operations VALUES (?,?,?,?,?)',
                    (identifier,initial_state,now,now,json.dumps(item,ensure_ascii=False)))
@@ -549,8 +681,10 @@ def inspect(identifier):
         raise ValueError('只有需要处理的任务可以检查恢复')
     if item.get('attention_reason') == 'web_timeout':
         raise ValueError('原网页任务已超时；请检查原会话，不能自动重新发送')
+    if item.get('attention_reason') in ('api_result_unconfirmed', 'timing_input_changed', 'cancelled_by_user'):
+        raise ValueError(item.get('message') or '原时长请求不能自动重发，请检查任务记录')
     resumable_revision = item['kind'] == 'revision_wait' and bool(item.get('children'))
-    resumable_operation = item.get('recovery_version') == 1 and item.get('provider') != 'api'
+    resumable_operation = item.get('recovery_version') == 1 and (item.get('provider') != 'api' or item.get('timing_policy'))
     if not (resumable_revision or resumable_operation):
         raise ValueError('任务缺少可安全续接的网页任务编号或阶段信息，保留为待人工处理')
     from services.web_llm_bridge import task_status
@@ -569,8 +703,10 @@ def cancel(identifier):
             return item
         update(identifier, 'cancelled', message='已停止本地任务；网页已发送的请求可能仍在生成')
         from services.web_llm_bridge import cancel_task
-        for child in get(identifier)['children']:
+        for child in get(identifier).get('children', []):
             cancel_task(child, current_runtime=False)
+        for stage in item.get('stage_tasks', []):
+            cancel(stage)
     _WAKE.set()
     return get(identifier)
 
@@ -594,9 +730,43 @@ def delete(identifier):
         item = _decode(db.execute('SELECT * FROM operations WHERE id=?', (identifier,)).fetchone())
         if item['state'] not in CLEARABLE:
             raise ValueError('任务仍在执行或需要处理，暂不能删除')
-        db.execute('DELETE FROM operations WHERE id=?', (identifier,))
-    _remove_work_directory(item)
+        if item.get('batch_id') and db.execute('SELECT 1 FROM operations WHERE id=?', (item['batch_id'],)).fetchone():
+            raise ValueError('这是可续跑批次的子任务，请从总批次管理记录')
+        removing = [item]
+        for child_id in item.get('stage_tasks', []):
+            row = db.execute('SELECT * FROM operations WHERE id=?', (child_id,)).fetchone()
+            if row:
+                child = _decode(row)
+                if child['state'] not in CLEARABLE:
+                    raise ValueError('批次仍有未结束的子任务，请先取消或处理')
+                removing.append(child)
+        _preserve_pending_merge_baselines(db, removing)
+        db.executemany('DELETE FROM operations WHERE id=?', ((row['id'],) for row in removing))
+    for removed in removing:
+        _remove_work_directory(removed)
     return {'id':identifier,'deleted':True}
+
+
+def clear_all_tasks():
+    """Explicit user reset, across projects, including live and unresolved tasks."""
+    from services import web_llm_bridge, web_video_bridge, video_experience
+    with _LOCK:
+        with database() as db:
+            items = [_decode(row) for row in db.execute('SELECT * FROM operations')]
+        for item in items:
+            cancel(item['id'])
+        videos = web_video_bridge.clear_all_tasks()
+        bridge_result = web_llm_bridge.clear_all_tasks()
+        if video_experience.library_path().exists():
+            with video_experience.database() as db:
+                db.execute("UPDATE samples SET active=0,token='',status='cancelled',updated=? WHERE status='queued'", (time.time(),))
+        with database() as db:
+            db.execute('DELETE FROM operations')
+        for item in items:
+            if item['state'] not in LIVE:
+                _remove_work_directory(item)
+    _WAKE.set()
+    return {'deleted':len(items),'video_tasks':videos,**bridge_result}
 
 
 def _preserve_pending_merge_baselines(db, applied_items):
@@ -645,18 +815,38 @@ def _preserve_pending_merge_baselines(db, applied_items):
 
 
 def _delete_expired_applied(now=None):
-    """Delete applied task records and snapshots after seven days."""
-    cutoff = (time.time() if now is None else now) - APPLIED_RETENTION_SECONDS
+    """Expire history only; candidates and recovery work retain their snapshots."""
+    now = time.time() if now is None else now
     with _LOCK, database() as db:
         db.execute('BEGIN IMMEDIATE')
         items = [_decode(row) for row in db.execute(
-            "SELECT * FROM operations WHERE state='applied' AND updated<=?", (cutoff,)).fetchall()]
+            "SELECT * FROM operations WHERE (state='applied' AND updated<=?) "
+            "OR (state IN ('cancelled','error') AND updated<=?)",
+            (now - APPLIED_RETENTION_SECONDS, now - FAILED_RETENTION_SECONDS)).fetchall()]
+        # Batch stage records are durable resume checkpoints, not short-lived history.
+        items = [item for item in items if not item.get('batch_version') and not item.get('batch_id')]
         if items:
             _preserve_pending_merge_baselines(db, items)
             db.executemany('DELETE FROM operations WHERE id=?', ((item['id'],) for item in items))
     for item in items:
         _remove_work_directory(item)
     return len(items)
+
+
+_LAST_BRIDGE_CLEANUP = 0
+
+
+def _cleanup_bridge_history():
+    global _LAST_BRIDGE_CLEANUP
+    now = time.time()
+    if now - _LAST_BRIDGE_CLEANUP < 60:
+        return
+    with database() as db:
+        protected = {child for row in db.execute('SELECT payload FROM operations')
+                     for child in json.loads(row['payload']).get('children', [])}
+    from services.web_llm_bridge import cleanup_history
+    cleanup_history(protected, now=now)
+    _LAST_BRIDGE_CLEANUP = now
 
 
 def record_apply_error(identifier, message):
@@ -677,17 +867,37 @@ def clear_finished():
         db.execute('BEGIN IMMEDIATE')
         items = [_decode(row) for row in db.execute(
             f'SELECT * FROM operations WHERE state IN ({placeholders})', CLEARABLE).fetchall()]
-        db.execute(f'DELETE FROM operations WHERE state IN ({placeholders})', CLEARABLE)
+        clearing = {item['id'] for item in items}
+        items = [item for item in items if not item.get('batch_id') or item['batch_id'] in clearing
+                 or not db.execute('SELECT 1 FROM operations WHERE id=?', (item['batch_id'],)).fetchone()]
+        _preserve_pending_merge_baselines(db, items)
+        db.executemany('DELETE FROM operations WHERE id=?', ((item['id'],) for item in items))
     for item in items:
         _remove_work_directory(item)
     return {'deleted':len(items)}
+
+
+_VISIBLE_OPERATIONS = """
+    COALESCE(json_extract(o.payload, '$.superseded'), 0) = 0
+    AND NOT EXISTS (
+      SELECT 1 FROM operations p
+      WHERE p.id = json_extract(o.payload, '$.batch_id')
+        AND json_extract(p.payload, '$.batch_version') = 1
+        AND NOT EXISTS (SELECT 1 FROM json_each(p.payload, '$.stage_records') s WHERE s.value = o.id)
+    )
+"""
 
 
 def list_jobs():
     ensure_worker()
     _delete_expired_applied()
     with database() as db:
-        items = [_decode(row) for row in db.execute('SELECT * FROM operations ORDER BY created DESC LIMIT 100')]
+        items = [_decode(row) for row in db.execute(
+            f'SELECT o.* FROM operations o WHERE {_VISIBLE_OPERATIONS} ORDER BY o.created DESC, o.id DESC')]
+    return _job_views(items)
+
+
+def _job_views(items):
     def duration(item,state):
         timings=item.get('timings') or {}
         total=float((timings.get('state_seconds') or {}).get(state,0) or 0)
@@ -695,14 +905,38 @@ def list_jobs():
             total += max(0,time.time()-float(timings.get('state_started_at') or item['updated']))
         return max(0,int(total))
     listed=[]
+    active_stages = {item['id']: set((item.get('stage_records') or {}).values())
+                     for item in items if item.get('batch_version') == 1}
     for item in items:
-        omitted=('routes','baseline','merge_baseline_files','meta_baseline','args','work','editors','result')
+        if item.get('superseded') or (item.get('batch_id') in active_stages and item['id'] not in active_stages[item['batch_id']]):
+            continue
+        omitted=('routes','baseline','merge_baseline_files','meta_baseline','args','work','editors','result','timing_calls')
         listed.append({**{k:v for k,v in item.items() if k not in omitted},
              'progress':_progress(item),'queued_seconds':duration(item,'queued'),
-             'elapsed_seconds':duration(item,'running'),
+             'elapsed_seconds':max(0,int((item.get('timings',{}).get('finished_at') or time.time())-item['created'])) if item.get('batch_version') else duration(item,'running'),
              'attention_seconds':duration(item,'needs_attention'),
              'editor_keys':list(item['editors'])})
     return listed
+
+
+def list_jobs_page(limit=50, offset=0):
+    """Keep every live task visible while paging through retained history."""
+    limit = max(1, min(100, int(limit)))
+    offset = max(0, int(offset))
+    ensure_worker()
+    _delete_expired_applied()
+    ended = "o.state IN ('applied','cancelled','error')"
+    query = f'SELECT o.* FROM operations o WHERE {_VISIBLE_OPERATIONS}'
+    with database() as db:
+        total = db.execute(f'SELECT COUNT(*) FROM operations o WHERE {_VISIBLE_OPERATIONS} AND {ended}').fetchone()[0]
+        if offset >= total:
+            offset = max(0, (total-1) // limit * limit)
+        live = [_decode(row) for row in db.execute(query + f' AND NOT ({ended}) ORDER BY o.created DESC, o.id DESC')]
+        history = [_decode(row) for row in db.execute(query + f' AND {ended} ORDER BY o.created DESC, o.id DESC LIMIT ? OFFSET ?',
+                                                     (limit, offset))]
+    return {'tasks': _job_views(live + history),
+            'pagination': {'offset': offset, 'limit': limit, 'total': total,
+                           'active': len(live), 'has_more': offset+limit < total}}
 
 
 def recover_interrupted():
@@ -711,7 +945,9 @@ def recover_interrupted():
     with database() as db:
         for row in db.execute("SELECT * FROM operations WHERE state IN ('preparing','running','applying','ready')").fetchall():
             item = _decode(row)
-            if item['state'] == 'preparing':
+            if item.get('batch_version') == 1 or item.get('kind') == 'scene_video_batch':
+                state, next_phase = 'waiting_children', '恢复分步任务'
+            elif item['state'] == 'preparing':
                 from services.web_llm_bridge import task_status
                 child_id = str(uuid.uuid5(uuid.UUID(item['id']),'revision'))
                 try:
@@ -734,12 +970,15 @@ def recover_interrupted():
                 state, next_phase = 'ready', '结果待应用'
                 item['message'] = '保存过程曾中断，已恢复原文件；正在重新核对并应用候选结果。'
                 retry_apply.append((item['id'],item.get('editors') or {}))
-            elif item.get('recovery_version') == 1 and item.get('provider') != 'api':
+            elif item.get('recovery_version') == 1 and (item.get('provider') != 'api' or item.get('timing_policy')):
                 # Every web call is keyed by business operation + call index.
                 # Replaying this function therefore reads the old result or
                 # waits for the old task instead of dispatching another send.
                 state, next_phase = 'queued', '恢复原任务'
                 item['message'] = '后台已恢复，将读取或等待原网页任务；不会重新发送。'
+                if item.get('timing_policy'):
+                    next_phase = '恢复时长规划记录'
+                    item['message'] = '后台将读取已保存的时长调用记录；未确认结果的 API 请求不会自动重发。'
             elif item['kind'] == 'revision_wait' and item.get('children'):
                 state, next_phase = 'queued', '恢复原网页任务'
                 item['message'] = '后台已恢复，将读取或等待原网页任务；不会重新发送。'
@@ -763,10 +1002,36 @@ def _execute(item):
     item['_web_call_cursor'] = 0
     token = ACTIVE.set(item)
     try:
+        if item.get('kind') == 'scene_video_batch':
+            update(item['id'], 'waiting_children', phase='准备连续场景')
+            return
+        if item.get('kind') == 'scene_video_step':
+            from services.scene_video_batches import execute_step
+            result = execute_step(item)
+            check_cancelled()
+            update(item['id'], 'applied', result=result, message=result['message'], changes={'runtime':{},'meta':{}},auto_apply_pending=False)
+            return
+        if item.get('batch_version') == 1:
+            update(item['id'], 'waiting_children', phase='等待分步任务', message='Beats 与每个 Segment 独立保存')
+            return
         with context.pin_runtime((Path(item['work']), item['project'], item['episode'])):
             from services.text_job_operations import execute
             result = execute(item['kind'], item['args'])
             check_cancelled()
+            if item['kind'] == 'scene_state':
+                from services.scene_state_jobs import commit_scene_state_patch
+                with _LOCK:
+                    saved = commit_scene_state_patch(item, result)
+                    update(item['id'], 'applied', result=saved, phase='状态已保存',
+                           message=saved['message'], changes={'runtime':{},'meta':{}}, auto_apply_pending=False)
+                return
+            if item['kind'] == 'video_learning':
+                update(item['id'], 'applied', result=result, phase='分析完成',
+                       message=result['message'], changes={'runtime':{},'meta':{}}, auto_apply_pending=False)
+                return
+            if item['kind'] == 'opening_continuity':
+                update(item['id'],'ready',result=result,phase='结果已生成',auto_apply_pending=False,changes={'runtime':{},'meta':{}},message='承接候选已生成，请载入全屏编辑器预览；未修改项目')
+                return
             baseline = item['baseline']
             after = {path.name:digest(path) for path in _snapshot_files(Path(item['work']))}
             for name in OUTPUTS:
@@ -793,12 +1058,14 @@ def _execute(item):
                         json.loads(staged.read_text(encoding='utf-8-sig'))
             if not runtime_changes and not meta_changes and result is None:
                 raise ValueError('未产生有效结果，请查看生成错误')
+            review = (result or {}).get('revision_validation') if isinstance(result, dict) else None
+            blocked = bool(review and review.get('blocking_issues'))
             update(item['id'],'ready',changes={'runtime':runtime_changes,'meta':meta_changes},
                    files=[name for name,op in runtime_changes.items() if op=='write'],result=result,phase='结果已生成',
-                   auto_apply_pending=item['kind'] != 'metadata',
-                   message='结果已通过校验，正在核对原项目版本并应用。')
+                   auto_apply_pending=item['kind'] != 'metadata' and not blocked,
+                   message='修正版结构需处理，候选已保留，未自动应用。' if blocked else '结果已通过校验，正在核对原项目版本并应用。')
             try:
-                if item['kind'] != 'metadata':
+                if item['kind'] != 'metadata' and not blocked:
                     apply(item['id'],item.get('editors') or {})
             except Exception as exc:
                 record_apply_error(item['id'],str(exc))
@@ -807,7 +1074,7 @@ def _execute(item):
     except NeedsAttentionError as exc:
         try:
             update(item['id'],'needs_attention',message=str(exc),phase='需要人工处理',
-                   attention_reason='web_timeout')
+                   attention_reason=getattr(exc, 'reason', 'web_timeout'))
         except ValueError:
             pass
     except Exception as exc:
@@ -818,10 +1085,23 @@ def _execute(item):
             # worker is unwinding; never leak an unhandled thread exception.
             pass
     finally:
+        # A business operation that stopped must not leave unclaimed browser
+        # children holding a segment or service pool indefinitely.
+        try:
+            finished = get(item['id'])
+            if finished['state'] in ('error', 'cancelled'):
+                from services.web_llm_bridge import cancel_task
+                for child in finished.get('children', []):
+                    cancel_task(child, current_runtime=False)
+        except ValueError:
+            # A global clear defers a running job's snapshot cleanup until it exits.
+            _remove_work_directory(item)
+        except Exception:
+            pass
         ACTIVE.reset(token)
 
 
-def _claim_runnable(active_counts, limits=None):
+def _claim_runnable(active_counts, limits=None, *, active_learning=0):
     """Claim the oldest job with capacity in its initial service's pool."""
     if limits is None:
         from services.web_llm_bridge import get_settings
@@ -829,9 +1109,21 @@ def _claim_runnable(active_counts, limits=None):
     now = time.time()
     with database() as db:
         db.execute('BEGIN IMMEDIATE')
-        for row in db.execute("SELECT * FROM operations WHERE state='queued' ORDER BY created").fetchall():
+        rows = db.execute("SELECT * FROM operations WHERE state='queued' ORDER BY created").fetchall()
+        rows.sort(key=lambda row: _decode(row).get('kind') == 'video_learning')
+        for row in rows:
             item = _decode(row)
+            if item.get('kind') == 'scene_state':
+                lane = (item['source'], item['args'][0]['context_id'])
+                active = db.execute("SELECT * FROM operations WHERE state IN ('running','waiting_children','needs_attention')").fetchall()
+                if any((other['source'], other['args'][0]['context_id']) == lane
+                       for other in map(_decode, active) if other['kind'] == 'scene_state'
+                       and other['args'][0].get('manual') is True and other['args'][0].get('input_revision')):
+                    continue
             candidates=item.get('provider_candidates') or [item.get('provider') or 'api']
+            if item.get('kind') == 'video_learning':
+                if active_learning:
+                    continue
             available=[provider for provider in candidates if active_counts.get(provider,0) <
                        (1 if provider=='api' else limits.get(provider,1))]
             if not available:
@@ -857,26 +1149,46 @@ def _run_claimed(item):
         _WAKE.set()
 
 
+def _dispatch_available():
+    from services.novel_batches import reconcile_pending
+    reconcile_pending()
+    from services.scene_video_batches import reconcile_pending as reconcile_scenes
+    reconcile_scenes()
+    _delete_expired_applied()
+    try:
+        _cleanup_bridge_history()
+    except Exception:
+        # History maintenance cannot stop task dispatch.
+        pass
+    launched = False
+    from services.web_llm_bridge import get_settings
+    limits = get_settings()['concurrency']
+    with _LOCK:
+        while len(_ACTIVE_EXECUTIONS) < MAX_CONCURRENT_OPERATIONS:
+            counts = {}
+            for entry in _ACTIVE_EXECUTIONS.values():
+                counts[entry['provider']] = counts.get(entry['provider'],0) + 1
+            learning_count = sum(entry.get('kind') == 'video_learning' for entry in _ACTIVE_EXECUTIONS.values())
+            item = _claim_runnable(counts,limits,active_learning=learning_count)
+            if item is None:
+                break
+            thread = threading.Thread(target=_run_claimed,args=(item,),
+                                      name='text-operation-'+item['id'][:8],daemon=True)
+            _ACTIVE_EXECUTIONS[item['id']] = {'provider':item.get('dispatch_provider') or item.get('provider') or 'api',
+                                               'thread':thread, 'kind':item['kind']}
+            thread.start()
+            launched = True
+    return launched
+
+
 def _loop():
     while True:
-        _delete_expired_applied()
-        launched = False
-        from services.web_llm_bridge import get_settings
-        limits = get_settings()['concurrency']
-        with _LOCK:
-            while len(_ACTIVE_EXECUTIONS) < MAX_CONCURRENT_OPERATIONS:
-                counts = {}
-                for entry in _ACTIVE_EXECUTIONS.values():
-                    counts[entry['provider']] = counts.get(entry['provider'],0) + 1
-                item = _claim_runnable(counts,limits)
-                if item is None:
-                    break
-                thread = threading.Thread(target=_run_claimed,args=(item,),
-                                          name='text-operation-'+item['id'][:8],daemon=True)
-                _ACTIVE_EXECUTIONS[item['id']] = {'provider':item.get('dispatch_provider') or item.get('provider') or 'api',
-                                                   'thread':thread}
-                thread.start()
-                launched = True
+        try:
+            launched = _dispatch_available()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('文字任务调度暂时失败，将重试')
+            launched = False
         if not launched:
             _WAKE.wait(2)
             _WAKE.clear()
@@ -914,7 +1226,25 @@ def result(identifier):
             continue
         history.append({'node':phase_name,'state':entry.get('state'),'at':entry.get('at')})
     preview = {}
+    published_beats_text = None
+    if item.get('kind') == 'novel_beats':
+        from ui.project_handlers import beats_json_to_display
+        path = Path(item['work']) / 'beats.json'
+        if path.is_file():
+            published_beats_text = beats_json_to_display(path.read_text(encoding='utf-8-sig'))
     work = Path(item.get('work') or '')
+    stage_tasks = []
+    if item.get('batch_version') == 1:
+        for stage_id in (item.get('stage_records') or {}).values():
+            try:
+                stage = get(stage_id)
+                stage_tasks.append({'id': stage_id, 'title': stage['title'], 'state': stage['state']})
+            except ValueError:
+                continue
+        for name in ('beats.json', 'video_jobs.json'):
+            path = Path(item['source']) / name
+            if path.is_file() and path.stat().st_size <= 750_000:
+                preview[name] = _json_value(path)
     if work.is_dir():
         for name,operation in item.get('changes',{}).get('runtime',{}).items():
             path = work / name
@@ -932,12 +1262,17 @@ def result(identifier):
             'progress':_progress(item),'phase':item.get('phase',''),
             'failure_reason':item.get('message','') if item['state'] in ('error','needs_attention') else '',
             'message':item.get('message',''),'history':history,'web_tasks':web_tasks,
+            'auto_apply_pending':item.get('auto_apply_pending'), 'apply_error':item.get('apply_error'),
+            'batch_version':item.get('batch_version'),'stage_tasks':stage_tasks,
+            'published_beats_text':published_beats_text,
             'timings':item.get('timings',{})}
 
 
 def apply(identifier, editors):
     # Application is serialized and always targets the immutable submission path.
     from workflow.video_merge import video_jobs_lock
+    if get(identifier)['kind'] == 'opening_continuity':
+        raise ValueError('承接结果仅为编辑稿候选，请在全屏编辑器载入并保存')
     source = Path(get(identifier)['source'])
     with _LOCK, video_jobs_lock(source):
         item = get(identifier)
@@ -945,11 +1280,17 @@ def apply(identifier, editors):
             return item
         if item['state'] != 'ready':
             raise ValueError('任务尚无可应用结果')
+        review = (item.get('result') or {}).get('revision_validation')
+        if review and review.get('blocking_issues'):
+            raise ValueError('修正版结构检查未通过，原稿未覆盖：' + '；'.join(review['blocking_issues']))
+        if item.get('kind') == 'novel_segment':
+            from services.novel_batches import validate_stage_target
+            validate_stage_target(item)
         source = Path(item['source'])
         if item.get('episode') and not (source / '.draft').is_file():
             raise PermissionError('任务所属集数已归档，候选结果保留为待应用状态')
         target = item.get('segment') or {}
-        if item.get('kind') in ('segment','source_replan','revision_wait') and not (
+        if item.get('kind') in ('segment','source_replan','revision_wait','novel_segment') and not (
                 target.get('segment_uid') or target.get('beat_uid')):
             raise ValueError('原分段缺少稳定编号，无法安全自动应用；候选结果已保留')
         changed_editors = []
@@ -970,7 +1311,7 @@ def apply(identifier, editors):
         merged_deletes = set()
         conflicts = []
         for name,op in runtime_changes.items():
-            if item.get('kind') in ('segment','source_replan','revision_wait') and op == 'write' and name in SEGMENT_MERGE_FILES:
+            if item.get('kind') in ('segment','source_replan','revision_wait','novel_segment') and op == 'write' and name in SEGMENT_MERGE_FILES:
                 staged, fields, mergeable = _stage_merged_json(item, name, source, work)
                 if fields:
                     conflicts.extend(fields)
@@ -1001,6 +1342,16 @@ def apply(identifier, editors):
         targets += [(Path(original),work/'project_meta'/Path(original).name,op)
                     for original,op in meta_changes.items()]
         journal = []
+        for target,staged,op in targets:
+            if target.name=='video_jobs.json' and op!='delete':
+                candidate_jobs=json.loads(staged.read_text(encoding='utf-8-sig'))
+                if candidate_jobs.get('h3_scene_continuity'):
+                    from generation.pipelines.minimax_h3.continuity.revisions import reconcile_ledger_revisions
+                    reconcile_ledger_revisions(candidate_jobs)
+                    normalized=work/'.apply_merge'/'continuity_video_jobs.json'
+                    normalized.parent.mkdir(parents=True,exist_ok=True)
+                    normalized.write_text(json.dumps(candidate_jobs,ensure_ascii=False),encoding='utf-8')
+                    targets=[(a,normalized if a==target else b,c) for a,b,c in targets]
         for index,(target,staged,op) in enumerate(targets):
             backup_path = backup / f'{index:03d}_{target.name}'
             existed = target.exists()
@@ -1021,8 +1372,24 @@ def apply(identifier, editors):
             _rollback_journal(get(identifier))
             update(identifier,'ready',message='保存失败，原文件已恢复，可重试应用')
             raise
-        return update(identifier,'applied',phase='已应用',journal=[],apply_error=None,
-                      message='结果已保存到提交时所属的项目和集数。')
+        previous_preserved = (item.get('result') or {}).get('previous_preserved') is True
+        has_planning_issues = item.get('kind') == 'novel_segment' and (item.get('result') or {}).get('planning_state') in ('warning', 'invalid')
+        if item.get('batch_id') and item.get('kind') == 'source_replan':
+            parent = get(item['batch_id'])
+            if parent['kind'] == 'scene_video_batch':
+                from services.scene_video_batches import _stamp
+                from workflow.video_merge import load_video_jobs
+                with context.pin_runtime((source, item['project'], item['episode'])):
+                    saved_data = load_video_jobs()
+                    target = next(r for r in saved_data['segments'] if int(r.get('segment_index') or 0) == int(item['args'][0]))
+                    update(identifier, result={**(item.get('result') or {}), 'scene_batch_stamp': _stamp(saved_data, target['segment_uid'])})
+        finished = update(identifier,'applied',phase='问题草稿已保存' if has_planning_issues else '已应用',journal=[],apply_error=None,
+                          message=('本次生成失败，已保留原提示词，后续 Beat 继续生成。' if previous_preserved else
+                                  '本段结果及问题已保留，后续 Beat 继续生成。') if has_planning_issues else '结果已保存到提交时所属的项目和集数。')
+        if item.get('kind') in ('novel_beats', 'novel_segment'):
+            from services.novel_batches import stage_applied
+            stage_applied(finished)
+        return finished
 
 
 def _rollback_journal(item):

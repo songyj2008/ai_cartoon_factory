@@ -3,6 +3,13 @@ import pytest
 from scripts.story_script import generate_beats as beats
 
 
+@pytest.fixture(autouse=True)
+def isolate_api_budget_tests(monkeypatch):
+    from services import web_llm_bridge
+
+    monkeypatch.setattr(web_llm_bridge, "routes_for", lambda _entry: ["api"])
+
+
 @pytest.mark.parametrize("config,expected", [
     ({"deepseek_model": "deepseek-v4-flash"}, 65536),
     ({"deepseek_model": "deepseek-v4-pro"}, 65536),

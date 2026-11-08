@@ -1,4 +1,4 @@
-﻿"""Durable local queue and provider routing for browser-backed LLM calls.
+"""Durable local queue and provider routing for browser-backed LLM calls.
 
 The browser never receives file-system authority. Jobs contain immutable text
 snapshots; applying a revision remains an explicit action in the project UI.
@@ -25,12 +25,19 @@ PROVIDERS = [
     {"id": "deepseek", "label": "DeepSeek", "url": "https://chat.deepseek.com/", "available": True},
     {"id": "chatgpt", "label": "ChatGPT", "url": "https://chatgpt.com/", "available": True},
     {"id": "doubao", "label": "豆包", "url": "https://www.doubao.com/chat/", "available": True},
-    {"id": "qianwen", "label": "千问（待适配）", "url": "", "available": False},
+    {"id": "qianwen", "label": "千问", "url": "https://www.qianwen.com/", "available": True},
 ]
-ENTRIES = {"story": "剧情生成", "beats": "Beats 拆分", "prompt": "分段提示词", "feedback": "视频问题分析", "revision": "视频反馈修正", "other": "其他 LLM 调用"}
+ENTRIES = {"story": "剧情生成", "beats": "Beats 拆分", "prompt": "分段提示词", "feedback": "视频问题分析", "revision": "视频反馈修正", "video_learning": "视频 OK 经验分析", "other": "其他 LLM 调用"}
 TERMINAL = {"complete", "error", "cancelled", "timeout"}
 TIMEOUT = 900
+QUEUE_TIMEOUT = 900
+HISTORY_RETENTION = 24 * 60 * 60
+FAILURE_RETENTION = 7 * 24 * 60 * 60
 _ROUTE_LOCK = threading.RLock()
+
+
+class TaskGoneError(ValueError):
+    """An authenticated extension may retire a task absent from this backend."""
 
 
 def _default_concurrency():
@@ -54,15 +61,16 @@ def _conversation_title(operation, data, metadata, entry):
     operation = operation or {}
     kinds = {
         'story':'剧情生成', 'beats':'拆Beats', 'novel':'小说拆分',
+        'novel_beats':'小说Beats', 'novel_segment':'分段规划',
         'prompts':'提示词生成', 'segment':'提示词重生',
-        'source_replan':'提示词重规划', 'pipeline':'一键流程',
+        'source_replan':'重新规划时长', 'pipeline':'一键流程',
         'split':'Beat拆分', 'feedback':'问题分析', 'metadata':'素材补全',
-        'revision_wait':'提示词修正', 'revision':'提示词修正',
+        'revision_wait':'提示词修正', 'revision':'提示词修正', 'video_learning':'成片经验分析',
     }
     kind = operation.get('kind')
     task_label = kinds.get(kind) or {
         'story':'剧情生成', 'beats':'拆Beats', 'prompt':'提示词生成',
-        'feedback':'问题分析', 'revision':'提示词修正',
+        'feedback':'问题分析', 'revision':'提示词修正', 'video_learning':'成片经验分析',
     }.get(entry, '文字任务')
 
     user_data = {}
@@ -161,6 +169,9 @@ def _connect():
     conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, runtime TEXT, status TEXT, created REAL, updated REAL, lease TEXT, payload TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, seen REAL, providers TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS client_capabilities (id TEXT PRIMARY KEY, seen REAL, capabilities TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS task_tombstones (id TEXT PRIMARY KEY, deleted REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS queue_reset (id INTEGER PRIMARY KEY, epoch REAL NOT NULL)")
     try:
         with conn:
             yield conn
@@ -272,10 +283,27 @@ def save_settings(payload):
             if entry not in ENTRIES:
                 raise ValueError("未知的 LLM 功能入口")
             selected=validate_routes(route,inherit=True,allow_empty=True)
+            if entry == 'video_learning' and 'api' in selected:
+                raise ValueError('视频 OK 经验分析请选择网页 LLM 服务')
             value["overrides"][entry] = selected[0] if selected==['inherit'] else selected
         value["routing_defaults_migrated"] = True
         db.execute("UPDATE settings SET value=? WHERE id=1", (_dump(value),))
         return value
+
+
+def resolve_page_providers(providers, *, config=None):
+    """A fullscreen page's Inherit means global, not an entry override."""
+    requested=validate_routes(providers,inherit=True)
+    if 'api' in requested:
+        raise ValueError('本页面其他功能仅支持网页 LLM；API 请使用“仅规划时长”复选框')
+    if requested!=['inherit']:
+        return requested
+    config=config or get_settings()
+    resolved = validate_routes(config['default_providers'] if 'default_providers' in config
+                               else [config.get('default_provider') or 'deepseek'])
+    if 'api' in resolved:
+        raise ValueError('本页面默认渠道须为网页 LLM；API 请使用“仅规划时长”复选框')
+    return resolved
 
 
 def routes_for(entry, override="inherit", *, config=None):
@@ -313,6 +341,10 @@ def choose_provider(providers, seed=''):
 
 def entry_for_label(label):
     label = str(label).lower()
+    # Continuity operations share the Other route, including the historical
+    # state-trace label whose "prompt" substring must not select prompt routing.
+    if label == "h3_composition_patch" or label.startswith("h3_prompt_state_trace_"):
+        return "other"
     if "story" in label:
         return "story"
     if "beat" in label:
@@ -330,24 +362,77 @@ def runtime_key(root=None):
 
 def _decode(row):
     if not row:
-        raise ValueError("修正任务不存在")
+        raise TaskGoneError("原网页任务已结束或已清理")
     value = json.loads(row["payload"])
     value.update(status=row["status"], updated_at=row["updated"], created_at=row["created"])
     if row["status"] == "cancelled":
         value["message"] = "已取消等待；网页中的生成不会自动停止，迟到结果不会应用。"
     elif row["status"] == "timeout":
-        value["message"] = f"任务等待已达 {TIMEOUT} 秒，已停止等待，未自动重发。请检查扩展、登录状态和网页额度。"
+        value["message"] = (
+            f"等待扩展领取已达 {QUEUE_TIMEOUT} 秒，已释放队列占用；请检查扩展连接和登录状态。"
+            if value.get('timeout_phase') == 'queue' else
+            f"任务等待已达 {TIMEOUT} 秒，已停止等待，未自动重发。请检查扩展、登录状态和网页额度。")
     return value
 
 
 def _expire(db):
     # Queue residence is not execution time. Only claimed work expires.
     now = time.time()
+    for row in db.execute("SELECT id,payload FROM tasks WHERE status='queued' AND created<=?",
+                          (now - QUEUE_TIMEOUT,)).fetchall():
+        value = json.loads(row['payload'])
+        value['timeout_phase'] = 'queue'
+        db.execute("UPDATE tasks SET status='timeout',updated=?,payload=? WHERE id=?",
+                   (now, _dump(value), row['id']))
     for row in db.execute("SELECT id,created,payload FROM tasks WHERE status IN ('claimed','waiting')").fetchall():
         payload = json.loads(row['payload'])
         deadline = payload.get('execution_deadline_at') or payload.get('execution_started_at',row['created']) + TIMEOUT
         if now >= deadline:
             db.execute("UPDATE tasks SET status='timeout',updated=? WHERE id=?",(now,row['id']))
+
+
+def cleanup_history(protected_ids=(), *, now=None):
+    """Keep referenced results; retain small tombstones to prevent replay."""
+    now = time.time() if now is None else now
+    protected = set(protected_ids)
+    with _connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        rows = db.execute("SELECT id FROM tasks WHERE (status='complete' AND updated<=?) "
+                          "OR (status IN ('error','cancelled','timeout') AND updated<=?)",
+                          (now - HISTORY_RETENTION, now - FAILURE_RETENTION)).fetchall()
+        identifiers = [(row['id'],) for row in rows if row['id'] not in protected]
+        db.executemany('INSERT OR REPLACE INTO task_tombstones VALUES (?,?)',
+                       ((identifier, now) for (identifier,) in identifiers))
+        db.executemany('DELETE FROM tasks WHERE id=?', identifiers)
+        db.execute('DELETE FROM task_tombstones WHERE deleted<=?', (now - FAILURE_RETENTION,))
+        db.execute('DELETE FROM clients WHERE seen<=?', (now - FAILURE_RETENTION,))
+    return len(identifiers)
+
+
+def _h3_revision_shot_speech(prompt, manifest=None):
+    """Read the same dialogue state the Shot editor displays, from the selected draft."""
+    from generation.pipelines.minimax_h3.shot_editor import parse_prompt
+
+    try:
+        document = parse_prompt(prompt, 'revision', manifest)
+    except ValueError:
+        # Unstructured drafts remain editable; do not invent a silent timeline.
+        return []
+    result = []
+    for index, shot in enumerate(document['shots'], 1):
+        options = {option['key']: option for option in shot['speaker_options']}
+        dialogues = [
+            {'speaker': options[row['speaker_key']]['tag'], 'scope': row['scope'], 'line': row['line'], **{k: row[k] for k in ('delivery_spans', 'source_type', 'voice_asset_id') if k in row}}
+            for row in shot['dialogues']
+        ]
+        result.append({'shot': index, 'start_sec': shot['original_start_cs'] / 100,
+                       'end_sec': shot['original_end_cs'] / 100,
+                       'editor_state': ('有台词' if shot['speech_state'] == 'tagged' else
+                                        '无台词' if shot['speech_state'] in ('explicit_silent', 'silent') else '未确认'),
+                       'speech_state': shot['speech_state'], 'issues': shot['speech_issues'],
+                       **({'rule_issues': shot['speech_rule_issues']} if shot.get('speech_rule_issues') else {}),
+                       'dialogues': dialogues})
+    return result
 
 
 def create_task(provider, kind, data, *, entry="revision", metadata=None):
@@ -370,7 +455,62 @@ def create_task(provider, kind, data, *, entry="revision", metadata=None):
             "从 0 秒连续安排到目标总时长，最后一个 Shot 必须在目标总时长结束；按新时长合理安排动作与对白节奏。"
             "只修改反馈涉及的问题；不生成全局代码规则。没有提供视频，不要声称看过视频。"
             "只以 base_prompt 作为修正底稿；任务输入中不会包含其他候选提示词。"
+            "剧情、台词、说话归属及镜头内容均以 base_prompt 为准，除非 video_issues 或 expected_result 明确要求改变。"
+            "context 仅为辅助信息，不得从其中恢复底稿已删除的台词、人物发言或事件，也不得用旧上下文覆盖当前底稿。"
         )
+        if data.get("model_id") == "minimax_h3_local_ref2va":
+            from generation.pipelines.minimax_h3.rules import h3_segment_planning_rules
+            from services.video_experience import retrieve, PLANNING_RULES as EXPERIENCE_RULES
+
+            shot_speech = _h3_revision_shot_speech(data.get('base_prompt') or '', metadata.get('speech_manifest'))
+            if shot_speech:
+                data = {**data, 'shot_speech': shot_speech}
+            try:
+                experiences = retrieve(metadata.get('speech_manifest') or [], prompt=data.get('base_prompt') or '', purpose='revision')
+            except Exception as exc:
+                from services.logger import log
+                log(f'[video_learning] 经验库暂不可用，本次按所选底稿修正：{exc}', 'WARN')
+                experiences = []
+            if experiences:
+                data = {**data, 'approved_prompt_experiences': experiences}
+                instructions += '\n\n' + EXPERIENCE_RULES + (
+                    '\n本次仅修正反馈指定范围及直接冲突，base_prompt 仍是唯一创作底稿。'
+                    '案例只辅助本次相关问题的声画衔接与声音归属，不授权新增剧情、人物、动作或台词，'
+                    '也不授权重写无关镜头。保持本次 revised_prompt 输出协议。')
+            instructions += "\n\n" + h3_segment_planning_rules() + (
+                "\n当前为反馈修正：以 base_prompt 的台词、人物和参考编号为准，保留现有素材编号。"
+                "\n【按现有 Shot 状态修正声音（依据 H3 手册：画面过程说明、镜头怎么拆）】"
+                "shot_speech 如有提供，是所选 base_prompt 按现有 Shot 编辑器读取的台词状态，"
+                "逐镜列出原起止时间、说话人、发声方式和台词，不是另一份创作底稿。"
+                "speech_state 为 unverified 或标记‘未确认’时，只表示结构未能确认，必须结合原文及跨镜声音理解，"
+                "不能据此令全镜静默；修正版须明确写出对白标签或全镜无对白。"
+                "标记‘无台词’的 Shot，明确写本镜无对白，仅保留底稿已有动作声、环境声及必要呼吸声；"
+                "台词状态与写法合规性分开判断：rule_issues 是待修正的写法问题，不改变无台词状态。"
+                "仅当本次反馈涉及声音、口型或明确要求全段规范化时，补齐相关镜头的无对白与听者说明；"
+                "不得新增台词、凭空添加声音或改变 Shot 时长。明确的跨镜续说须保留并注明范围；"
+                "画内人物不做说话口型，不为填时添加对白、旁白、电话声，也不从上下文恢复已删除的台词。"
+                "有台词时按 dialogues 的 speaker、scope、line 明确谁说、从哪里发声及原文；"
+                "正文采用自然语言：画内用‘人物说’，画外用‘人物在画外说’，电话用‘人物在画外通过电话说’，旁白用‘画外旁白说’，其后接‘：<d>[Chinese]台词原文</d>’。speaker、scope、line 只用于内部归属，不抄写 telephone、onscreen 等内部字段值；电话和画外音不要求额外音色素材，有参考时按指定用途使用。"
+                "不额外添加‘对白标签’或‘说话人’标题，不改变台词原文。"
+                "offscreen 写清画外说话人，telephone 写清电话另一端声音，narration 写清旁白；"
+                "画内听者和其他未发言人物不代说、不对这些声音做说话口型。"
+                "若底稿明确一句话跨 Shot 延续，保留同一声音身份和续说关系，明确覆盖的镜头；"
+                "空对白列表仅表示本镜没有独立台词，不能截断明确的跨镜续说，不能因切镜重说整句。"
+                "人物在某镜画外发声不等于整段不得出镜；音色参考只锁定对应人物音色，不整段播放参考录音。"
+                "【输出从简】有对白时保证自然发声，辅助表演尽量并行；无对白时以必要事件和表演为主。"
+                "默认局部修正：保留底稿有效的镜头风格、必要动作、站位、情绪和表演，只修改反馈指定问题及直接冲突，不重新组织整段表演。仅用户明确要求精简或去冗余时清理已有冗余。"
+                "每镜围绕台词按需表达动作与情绪，不强制补齐表演字段，不机械限制细节数量；保留剧情必要动作。"
+                "电话或画外对白明确说话人、音色引用、声音来源及听者口型覆盖范围，台词原文只在 <d> 中出现一次，声音段不再转述、解释或指导逐字发音。"
+                "音色绑定只在独立的【人物音色绑定】章节写一次，主体定义只写人物简介与图片绑定。全段通用的音色参考、防代说和口型约束集中说明一次，每个 Shot 必须保留当前发声、声源及听者状态；无台词镜头保留明确无对白说明。"
+                "只在发生必要变化时补充连续性，不反复列出沿用的站位、持物、姿态或听者状态；清理与本镜台词状态矛盾的描述。"
+                "底稿时间轴已经覆盖 target_duration_sec 时，保留 Shot 数量、起止时间和 At 时间戳；"
+                "仅在本次目标总时长不同或反馈明确要求调整时间时重新安排。"
+                "video_issues 或 expected_result 明确要求改变某镜台词状态时按该要求修改，其他镜头保持。"
+                "输出仍采用本次 revised_prompt 协议，不输出规划器的 Shots JSON。"
+                "修正后的提示词正文使用自然语言描述画面人物，例如‘画面人物：<Subject 1>、<Subject 2>。’，"
+                "不要输出 visible_roles: [...] 等内部结构字段或数组；原稿有这种写法时，保留人物范围并改为上述自然语言。"
+                "若约束无法同时满足，在 changes 说明冲突，revised_prompt 保留底稿，不能伪造可执行的新稿。"
+            )
         example = {"request_id": identifier, "changes": ["修改说明"], "revised_prompt": "完整新提示词"}
     else:
         instructions = (
@@ -388,10 +528,12 @@ def create_task(provider, kind, data, *, entry="revision", metadata=None):
         "下面只是包裹结构示例，data 内部必须采用任务实际要求的完整结构。"
     )
     request = f"{instructions}\n\n任务输入：\n{_dump(data)}\n\n{format_rules}\n{start}\n{json.dumps(example, ensure_ascii=False, indent=2)}\n{end}"
+    from services.llm_payloads import request_metrics
+    input_metrics = request_metrics(request)
     request_fingerprint = hashlib.sha256(_dump([provider,kind,entry,data,request]).encode()).hexdigest()
     conversation_title = _conversation_title(operation, data, metadata, entry)
     value = {"id": identifier, "provider": provider, "kind": kind, "entry": entry,
-             "request": request, "input": data, "metadata": metadata or {},
+             "request": request, "input": data, "metadata": metadata or {}, "input_metrics": input_metrics,
              "conversation_title": conversation_title, "request_fingerprint":request_fingerprint,
              "message": "等待扩展领取任务"}
     # Only consecutive revisions of the same segment share conversational scope.
@@ -402,6 +544,11 @@ def create_task(provider, kind, data, *, entry="revision", metadata=None):
         db.execute("BEGIN IMMEDIATE")
         _expire(db)
         previous = db.execute("SELECT * FROM tasks WHERE id=?", (identifier,)).fetchone()
+        reset = db.execute('SELECT epoch FROM queue_reset WHERE id=1').fetchone()
+        if operation and reset and float(operation.get('created', now)) <= reset[0]:
+            raise TaskGoneError('任务已被一键清空，不再创建网页请求')
+        if not previous and db.execute('SELECT 1 FROM task_tombstones WHERE id=?', (identifier,)).fetchone():
+            raise TaskGoneError('原网页任务已清理，不会重新发送')
         if previous:
             saved = _decode(previous)
             if saved.get('request_fingerprint') != request_fingerprint:
@@ -419,11 +566,21 @@ def task_status(identifier, *, current_runtime=False):
     with _connect() as db:
         _expire(db)
         row = db.execute("SELECT * FROM tasks WHERE id=?", (identifier,)).fetchone()
+        if row is None:
+            raise TaskGoneError('原网页任务已结束或已清理')
         if row and current_runtime and row["runtime"] != runtime_key():
             raise ValueError("此任务属于其他项目或集数")
         value = _decode(row)
-        if value["status"] == "timeout":
-            value["message"] = f"任务等待已达 {TIMEOUT} 秒，已停止等待，未自动重发。请检查扩展、登录状态和网页额度。"
+        return value
+
+
+def leased_task(identifier, lease):
+    with _connect() as db:
+        _expire(db)
+        row = db.execute('SELECT * FROM tasks WHERE id=?', (identifier,)).fetchone()
+        value = _decode(row)
+        if row['status'] not in {'claimed','waiting'} or not lease or not secrets.compare_digest(row['lease'], lease):
+            raise PermissionError('视频附件领取凭据无效或任务已结束')
         return value
 
 
@@ -454,7 +611,9 @@ def cancel_task(identifier, *, current_runtime=True):
     return task_status(identifier)
 
 
-def claim(client_id, providers, *, tab_id=None):
+def claim(client_id, providers, *, tab_id=None, capabilities=None):
+    if capabilities is not None and (not isinstance(capabilities, list) or not all(isinstance(v, str) for v in capabilities)):
+        raise ValueError('扩展能力列表格式错误')
     providers = [p for p in providers if p in {x["id"] for x in PROVIDERS if x["available"]}]
     if not client_id or len(client_id) > 100:
         raise ValueError("扩展客户端编号无效")
@@ -477,6 +636,9 @@ def claim(client_id, providers, *, tab_id=None):
         rows = db.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created").fetchall()
         for row in rows:
             value = _decode(row)
+            required = value.get('metadata', {}).get('required_capability')
+            if required and required not in (capabilities or []):
+                continue
             provider = value['provider']
             same_provider = [task for task in active if task['provider'] == provider]
             # Old extensions without tab identities stay serial. They cannot
@@ -503,7 +665,20 @@ def pool_status():
         for row in db.execute("SELECT payload FROM tasks WHERE status='queued'"):
             provider = json.loads(row[0])['provider']
             queued[provider] = queued.get(provider,0) + 1
-    return {'limits':limits,'queued':queued}
+        reset = db.execute('SELECT epoch FROM queue_reset WHERE id=1').fetchone()
+    return {'limits':limits,'queued':queued,'reset_epoch':reset[0] if reset else 0}
+
+
+def clear_all_tasks():
+    """Invalidate every lease and tell connected extensions to drop local tasks."""
+    with _connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        ids = [row[0] for row in db.execute('SELECT id FROM tasks')]
+        epoch = time.time()
+        db.executemany('INSERT OR REPLACE INTO task_tombstones VALUES (?,?)', [(i, epoch) for i in ids])
+        db.execute('DELETE FROM tasks')
+        db.execute('INSERT OR REPLACE INTO queue_reset VALUES (1,?)', (epoch,))
+    return {'web_tasks':len(ids), 'reset_epoch':epoch}
 
 
 def validate_result(task, result):
@@ -546,6 +721,15 @@ def report(identifier, lease, status, *, result=None, message="", raw="", diagno
             return value
         if status == "complete":
             validate_result(value, result)
+            if value['kind'] == 'revision' and value.get('input', {}).get('model_id') == 'minimax_h3_local_ref2va':
+                from generation.pipelines.minimax_h3.revision_review import compare_revision
+                from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+                result = {**result, 'revised_prompt': H3PromptCompiler.normalize_visible_role_lines(result['revised_prompt'])}
+                inputs = value['input']
+                result = {**result, 'revision_validation': compare_revision(
+                    inputs.get('base_prompt') or '', result['revised_prompt'],
+                    manifest=(value.get('metadata') or {}).get('speech_manifest'),
+                    target_duration_sec=inputs.get('target_duration_sec'))}
             value["result"] = result
         message = str(message)[:2000]
         history = value.setdefault("status_history", [])
@@ -569,15 +753,43 @@ def connection_status():
     return {"connected": bool(rows), "providers": sorted({p for row in rows for p in json.loads(row["providers"])})}
 
 
-def heartbeat(client_id, providers):
+def heartbeat(client_id, providers, capabilities=None, provider_capabilities=None):
     if not client_id or len(client_id) > 100:
         raise ValueError("扩展客户端编号无效")
     providers = [p for p in providers if p in {x["id"] for x in PROVIDERS if x["available"]}]
+    if provider_capabilities is not None and (
+        not isinstance(provider_capabilities, dict) or
+        any(key not in {p['id'] for p in PROVIDERS} or not isinstance(values, list) or
+            not all(isinstance(value, str) for value in values)
+            for key, values in provider_capabilities.items())
+    ):
+        raise ValueError('按服务声明的扩展能力格式错误')
+    advertised = ({provider: provider_capabilities.get(provider, []) for provider in providers}
+                  if provider_capabilities is not None else
+                  [v for v in capabilities or [] if isinstance(v, str)])
     with _connect() as db:
         db.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (client_id, time.time(), _dump(providers)))
+        db.execute('INSERT OR REPLACE INTO client_capabilities VALUES (?,?,?)',
+                   (client_id, time.time(), _dump(advertised)))
 
 
-def wait_for_llm(system_prompt, user_prompt, *, kind, entry, provider, call_hint=None):
+def supports_capability(capability, providers):
+    with _connect() as db:
+        rows = db.execute('SELECT clients.providers,client_capabilities.capabilities FROM clients '
+                          'JOIN client_capabilities ON clients.id=client_capabilities.id '
+                          'WHERE clients.seen>? AND client_capabilities.seen>?', (time.time()-90,time.time()-90)).fetchall()
+    for row in rows:
+        advertised = json.loads(row['capabilities'])
+        shared = set(providers).intersection(json.loads(row['providers']))
+        if isinstance(advertised, dict):
+            if any(capability in advertised.get(provider, []) for provider in shared):
+                return True
+        elif capability in advertised and shared:
+            return True
+    return False
+
+
+def wait_for_llm(system_prompt, user_prompt, *, kind, entry, provider, call_hint=None, metadata=None):
     from services.text_jobs import NeedsAttentionError, check_cancelled, current, link_child, phase
     check_cancelled()
     started = time.time()
@@ -599,7 +811,7 @@ def wait_for_llm(system_prompt, user_prompt, *, kind, entry, provider, call_hint
     if existing:
         selected = existing['provider']
         task = create_task(selected, kind, request_data, entry=entry,
-                           metadata={'call_key':call_key} if job else None)
+                           metadata={**(metadata or {}), **({'call_key':call_key} if job else {})})
     else:
         # Keep selection and insertion together inside this process. Concurrent
         # segment compilers then observe one another's queued tasks and spread
@@ -613,7 +825,7 @@ def wait_for_llm(system_prompt, user_prompt, *, kind, entry, provider, call_hint
             selected = existing['provider'] if existing else choose_provider(
                 candidates, f"{job['id'] if job else runtime_key()}:{call_key}")
             task = create_task(selected, kind, request_data, entry=entry,
-                               metadata={'call_key':call_key} if job else None)
+                               metadata={**(metadata or {}), **({'call_key':call_key} if job else {})})
     try:
         if job:
             from services.text_jobs import record_web_call
@@ -644,8 +856,19 @@ def wait_for_llm(system_prompt, user_prompt, *, kind, entry, provider, call_hint
         if task["status"] == "complete":
             return task["result"]["data"], round(time.time() - started, 2)
         if task["status"] == "timeout":
+            if (metadata or {}).get('ordered_timing_fallback'):
+                # This task is terminal; any late browser reply cannot become
+                # the timing result. The next channel has a different call key.
+                raise RuntimeError('网页时长规划已超时，转下一渠道；不会重发原网页任务')
+            if task.get('timeout_phase') == 'queue':
+                raise RuntimeError(task['message'])
             raise NeedsAttentionError('原网页任务已超时，无法确认请求是否已发送；请检查原会话和任务记录，不会自动重发。')
         if task["status"] in TERMINAL:
+            if task['status'] == 'cancelled' and (metadata or {}).get('ordered_timing_fallback'):
+                raise NeedsAttentionError('网页时长规划已取消，停止后续渠道调用', reason='cancelled_by_user')
+            if task['status'] == 'error' and (metadata or {}).get('preserve_invalid_json') and task.get('raw'):
+                return {'_parse_error': task.get('message') or 'JSON 无法解析',
+                        '_raw_text': task['raw']}, round(time.time() - started, 2)
             raise RuntimeError(task.get("message") or f"网页 LLM 任务 {task['status']}")
         web_results.wait(revision, 1)
 
@@ -677,6 +900,7 @@ def segment_snapshot(index):
     current = str(config.get("prompt_override") or job.get("final_prompt") or job.get("prompt") or job.get("director_prompt") or "")
     asset_manifest = config.get("asset_manifest") or job.get("asset_manifest") or []
     source_excerpt = str(segment.get("source_excerpt") or "").strip()
+    beat_index, beat_duration = int(index), None
     beats_path = root / "beats.json"
     if beats_path.is_file():
         try:
@@ -687,6 +911,8 @@ def segment_snapshot(index):
             if beat is None and isinstance(beats, list) and 0 < int(index) <= len(beats):
                 beat = beats[int(index) - 1]
             if isinstance(beat, dict):
+                beat_index = next(i for i, row in enumerate(beats, 1) if row is beat)
+                beat_duration = beat.get("estimated_duration_sec") or beat.get("duration_sec")
                 source_excerpt = str(beat.get("source_excerpt") or source_excerpt).strip()
         except (OSError, ValueError, TypeError):
             pass
@@ -701,17 +927,21 @@ def segment_snapshot(index):
     latest_prompt_revision = config.get("latest_prompt_revision") if isinstance(config.get("latest_prompt_revision"), dict) else {}
     revision_prompt = str(latest_prompt_revision.get("prompt") or "").strip()
     data = {"runtime": runtime_key(root), "project_name": project_name, "episode_name": episode_name,
+            "model_id": segment.get("model_id") or jobs.get("default_model_id") or "",
             "segment_count": len(jobs.get("segments") or []),
             "segment_index": index, "segment_uid": segment.get("segment_uid", ""),
             "beat_uid": segment.get("beat_uid", ""),
             "render_id": render.get("render_id", ""), "video_url": "/gradio_api/file=" + video.resolve().as_posix() if video else "",
             "video_name": video.name if video else "", "video_created_at": render.get("created_at", ""),
             "original_prompt": original, "current_prompt": current, "snapshot_known": bool(original),
+            "original_asset_manifest": render.get('asset_manifest'),
             "prompt_version_info": prompt_version_info,
             "latest_prompt_revision": latest_prompt_revision,
             "prompt_matches_revision": bool(revision_prompt) and current.strip().replace("\r\n", "\n").replace("\r", "\n") == revision_prompt.replace("\r\n", "\n").replace("\r", "\n"),
             "duration_sec": job.get("duration_sec"),
-            "context": {"title": segment.get("title", ""), "source_excerpt": source_excerpt,
+            "beat_index": beat_index, "beat_duration_sec": beat_duration,
+            "duration_source": segment.get("h3_prompt_source", ""),
+            "context": {"h3_editor_constraints": segment.get("h3_editor_constraints") or {}, "title": segment.get("title", ""), "source_excerpt": source_excerpt,
                         "plot": (segment.get("job") or {}).get("plot", ""),
                         "requested_media_spec": {**(segment.get("requested_media_spec") or {}), "duration_sec": job.get("duration_sec"), "fps": job.get("fps")},
             "historical_video_media_spec": render.get("requested_media_spec") or {},
@@ -724,6 +954,11 @@ def segment_snapshot(index):
         if key not in {"prompt_version_info", "latest_prompt_revision", "prompt_matches_revision"}
     }
     data["fingerprint"] = hashlib.sha256(_dump(fingerprint_data).encode()).hexdigest()
+    if data['model_id'] == 'minimax_h3_local_ref2va':
+        from generation.pipelines.minimax_h3.editor_draft import snapshot as editor_snapshot
+        saved = editor_snapshot(segment)
+        data['reference_revision'] = saved['reference_revision']
+        data['reference_manifest'] = saved['asset_manifest']
     return data
 
 
@@ -753,9 +988,30 @@ def revision_task(index, payload, *, operation_id=None, provider_override=None, 
                           existing.get('metadata',{}).get('operation_id') == str(operation_id))
     if existing and existing["status"] not in TERMINAL and not same_operation:
         raise ValueError("本段已有未结束的修正任务，请先等待或取消")
+    context = snapshot["context"]
+    if use_editor:
+        # Historical story/dialogue and render metadata are not another draft.
+        # The editor owns all creative content, including unsaved deletions.
+        media = context.get("requested_media_spec") or {}
+        context = {"requested_media_spec": {key: media[key] for key in ("duration_sec", "fps", "has_audio") if key in media}}
+    from services.llm_payloads import reference_context
+    context = dict(context)
+    if "asset_manifest" in context:
+        context["asset_manifest"] = reference_context(context["asset_manifest"])
+    for field in ("reference_images", "background_image"):
+        context.pop(field, None)
     llm_input = {"base_prompt": base_prompt, "target_duration_sec": snapshot["duration_sec"],
                  "video_issues": issue, "expected_result": str(payload.get("expected") or ""),
-                 "context": snapshot["context"]}
+                 "context": context}
+    constraints=(snapshot.get('context') or {}).get('h3_editor_constraints')
+    if constraints:
+        from generation.pipelines.minimax_h3.continuity.state import planning_constraints
+        selected_manifest=(snapshot.get('context') or {}).get('asset_manifest') if use_editor else snapshot.get('original_asset_manifest')
+        valid_constraints=planning_constraints(constraints,base_prompt,selected_manifest or [])
+        if valid_constraints:llm_input['editor_constraints']=valid_constraints
+    if snapshot.get("model_id") == "minimax_h3_local_ref2va":
+        llm_input["model_id"] = snapshot["model_id"]
+    speech_manifest = (snapshot.get('context') or {}).get('asset_manifest') if use_editor else snapshot.get('original_asset_manifest')
     current_version = int((snapshot.get("prompt_version_info") or {}).get("version") or 0)
     latest_version = int((snapshot.get("latest_prompt_revision") or {}).get("version") or 0)
     return create_task(provider, "revision", llm_input,
@@ -765,5 +1021,6 @@ def revision_task(index, payload, *, operation_id=None, provider_override=None, 
                                  "prompt_source": "editor" if use_editor else "video",
                                  "force_new_conversation": use_editor,
                                  "editor_prompt": edited,
+                                 "speech_manifest": speech_manifest,
                                  "editor_references": str(payload.get("editor_references") or ""),
                                  **({'operation_id':str(operation_id),'call_key':'revision'} if operation_id else {})})

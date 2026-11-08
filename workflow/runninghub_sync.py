@@ -121,6 +121,52 @@ def _is_runninghub_pending(segment: dict[str, Any]) -> bool:
     return bool(task_id) and backend in {"", "runninghub"}
 
 
+def _sync_untracked_runninghub_tasks(segment: dict[str, Any]) -> bool:
+    """Reconcile older accepted retries that the current-task poll cannot see."""
+    from generation.render_history import find_render
+    from workflow.runninghub_usage import runninghub_attempt_model_id
+
+    changed = False
+    current = _saved_task_id(segment)
+    active = {"submitted", "running", "pending", "queued", "executing", "processing"}
+    candidates = {
+        str(item.get("task_id") or ""): item
+        for item in segment.get("runninghub_attempts") or []
+        if str(item.get("status") or "").lower() in active
+    }
+    for render in segment.get("renders") or []:
+        submission = render.get("submission") or {}
+        if str(render.get("status") or "").lower() in active and submission.get("backend") == "runninghub":
+            task_id = str(submission.get("task_id") or "")
+            candidates.setdefault(task_id, {"task_id": task_id})
+    for task_id, attempt in candidates.items():
+        if not task_id or task_id == current:
+            continue
+        try:
+            model_id = runninghub_attempt_model_id(segment, attempt) or resolved_model_id(segment)
+            provider = RunningHubSubmitProvider(model_id=model_id)
+            status = provider.client.get_task_status(task_id)
+            text = _status_text(status)
+            if _has_terminal_failure_status(status):
+                terminal = "cancelled" if any(marker in str(status).lower() for marker in _CANCELLED_MARKERS) else "failed"
+            elif text in DONE_STATUSES:
+                terminal = "success"
+            else:
+                continue
+        except Exception as exc:
+            if not _is_remote_missing_error(exc):
+                log(f"[runninghub][history][sync] {task_id}: {exc}", "WARN")
+                continue
+            terminal = "cancelled"
+        record_runninghub_attempt(segment, task_id, status=terminal)
+        render = find_render(segment, task_id=task_id)
+        if render:
+            render["status"] = terminal
+            render.setdefault("submission", {})["submitted"] = False
+        changed = True
+    return changed
+
+
 def _promote_completed_task_render(segment: dict[str, Any]) -> bool:
     """Repair a completed task whose UI still points at an older render."""
     if str(segment.get("status") or "").strip().lower() != "success":
@@ -157,6 +203,8 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
         retired_segments = [item for item in payload.get("retired_segments") or [] if isinstance(item, dict)]
         recovered_deferred = False
         for item in [*segments, *retired_segments]:
+            if _sync_untracked_runninghub_tasks(item):
+                recovered_deferred = True
             if recover_interrupted_deferred_regeneration(item):
                 recovered_deferred = True
             if _promote_completed_task_render(item):

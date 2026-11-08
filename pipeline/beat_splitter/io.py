@@ -133,7 +133,16 @@ def replace_beat(beats_data: dict[str, Any], beat_index: int, replacement_beats:
     beats = [item for item in (data.get("beats") or []) if isinstance(item, dict)]
     original = beat_at_index(data, beat_index)
     original_duration = int(round(float(original.get("estimated_duration_sec") or original.get("duration_sec") or 10)))
-    durations = distribute_duration(original_duration, len(replacement_beats))
+    h3 = (data.get('generation_policy') or {}).get('model_id') == 'minimax_h3_local_ref2va'
+    if h3:
+        durations = []
+        for item in replacement_beats:
+            value = float(item.get('estimated_duration_sec') or 0)
+            if not 4 <= value <= 15 or not value.is_integer():
+                raise ValueError('H3 replacement duration must be a 4-15 second integer')
+            durations.append(int(value))
+    else:
+        durations = distribute_duration(original_duration, len(replacement_beats))
     allowed_roles = set(
         _unique_text(original.get("important_roles"))
         + _unique_text(original.get("visible_roles"))
@@ -146,7 +155,7 @@ def replace_beat(beats_data: dict[str, Any], beat_index: int, replacement_beats:
     clean_replacements: list[dict[str, Any]] = []
     for offset, (beat, duration) in enumerate(zip(replacement_beats, durations), start=1):
         item = deepcopy(beat)
-        if original_scene_id:
+        if original_scene_id and not h3:
             item["scene_id"] = original_scene_id
         else:
             item.setdefault("scene_id", "")

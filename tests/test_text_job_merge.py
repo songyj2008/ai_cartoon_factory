@@ -106,6 +106,16 @@ def test_apply_merges_independent_segment_changes(tmp_path, monkeypatch, kind):
         assert segments[1]['job']['prompt'] == 'candidate prompt'
 
 
+def test_invalid_revision_cannot_bypass_review_via_apply_api(tmp_path, monkeypatch):
+    identifier, source = _seed_apply_task(tmp_path, monkeypatch, kind='revision_wait')
+    before = {name: (source / name).read_bytes() for name in ('beats.json', 'video_jobs.json')}
+    text_jobs.update(identifier, 'ready', result={
+        'revision_validation': {'blocking_issues': ['Shot 1 台词状态未确认']}})
+    with pytest.raises(ValueError, match='结构检查未通过'):
+        text_jobs.apply(identifier, {})
+    assert all((source / name).read_bytes() == value for name, value in before.items())
+
+
 @pytest.mark.parametrize('kind', ['segment', 'revision_wait'])
 def test_apply_keeps_conflict_on_same_segment_field(tmp_path, monkeypatch, kind):
     identifier, source = _seed_apply_task(
@@ -187,6 +197,62 @@ def test_json_three_way_merge_reports_overlapping_leaf():
 
     assert merged == current
     assert conflicts == ['beats.json.beats[uid:b1].plot']
+
+
+def _seed_duration_task(tmp_path, monkeypatch, *, candidate_segment=2, same_target=False, durations=(8, 12)):
+    identifier, source = _seed_apply_task(
+        tmp_path, monkeypatch, current_segment=candidate_segment if same_target else 3 - candidate_segment,
+        candidate_segment=candidate_segment, kind='source_replan')
+    item = text_jobs.get(identifier)
+    work = source.parent / 'operations' / identifier / 'work'
+    for name, collection in [('beats.json', 'beats'), ('video_jobs.json', 'segments')]:
+        paths = [work / text_jobs.MERGE_BASELINE_DIR / name, source / name, work / name]
+        for path, changed, duration in zip(paths, [None, candidate_segment if same_target else 3 - candidate_segment,
+                                                  candidate_segment], [None, durations[0], durations[1]]):
+            doc = json.loads(path.read_text(encoding='utf-8'))
+            for index, row in enumerate(doc[collection], 1):
+                value = duration if index == changed else [4, 6][index - 1]
+                if collection == 'beats':
+                    row['estimated_duration_sec'] = value
+                else:
+                    row['job']['duration_sec'] = value
+            doc['total_duration_sec'] = sum(
+                row['estimated_duration_sec'] if collection == 'beats' else row['job']['duration_sec']
+                for row in doc[collection])
+            path.write_text(json.dumps(doc), encoding='utf-8')
+        item['baseline'][name] = text_jobs.digest(paths[0])
+    text_jobs.update(identifier, baseline=item['baseline'])
+    return identifier, source
+
+
+@pytest.mark.parametrize('candidate_segment', [1, 2])
+@pytest.mark.parametrize('durations', [(8, 12), (8, 10)])
+def test_concurrent_duration_apply_recomputes_totals_and_preserves_render_history(
+        tmp_path, monkeypatch, candidate_segment, durations):
+    identifier, source = _seed_duration_task(
+        tmp_path, monkeypatch, candidate_segment=candidate_segment, durations=durations)
+    jobs_path = source / 'video_jobs.json'
+    jobs = json.loads(jobs_path.read_text(encoding='utf-8'))
+    jobs['segments'][0]['renders'].append({'render_id': 'completed-in-parallel', 'status': 'success'})
+    jobs_path.write_text(json.dumps(jobs), encoding='utf-8')
+
+    assert text_jobs.apply(identifier, {})['state'] == 'applied'
+
+    beats = json.loads((source / 'beats.json').read_text(encoding='utf-8'))
+    jobs = json.loads(jobs_path.read_text(encoding='utf-8'))
+    expected = list(durations) if candidate_segment == 2 else list(reversed(durations))
+    assert [row['estimated_duration_sec'] for row in beats['beats']] == expected
+    assert [row['job']['duration_sec'] for row in jobs['segments']] == expected
+    assert beats['total_duration_sec'] == jobs['total_duration_sec'] == sum(expected)
+    assert jobs['segments'][0]['renders'] == [{'render_id': 'completed-in-parallel', 'status': 'success'}]
+
+
+def test_concurrent_duration_apply_still_rejects_same_segment_changes(tmp_path, monkeypatch):
+    identifier, source = _seed_duration_task(tmp_path, monkeypatch, same_target=True)
+    before = {name: (source / name).read_bytes() for name in text_jobs.SEGMENT_MERGE_FILES}
+    with pytest.raises(ValueError, match='estimated_duration_sec'):
+        text_jobs.apply(identifier, {})
+    assert all((source / name).read_bytes() == value for name, value in before.items())
 
 
 def test_segment_apply_ignores_only_other_segment_prompt_updates_in_editor():

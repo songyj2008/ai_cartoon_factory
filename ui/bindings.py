@@ -226,6 +226,16 @@ def _runtime_refresh_with_beats(page=0):
     return story_text, beats_json_to_display(load_json_file_silent("beats.json") or ""), video_jobs_text, logs, panel, progress
 
 
+def _runtime_segment_refresh(page=0):
+    """Publish completed segment cards without replacing the story/Beats editors."""
+    text = _load_video_jobs_text()
+    return text, render_groups_panel(text, page=max(0, int(page or 0))), _progress_html()
+
+
+def _runtime_batch_beats_refresh(page=0):
+    return (beats_json_to_display(load_json_file_silent('beats.json') or ''), *_runtime_segment_refresh(page))
+
+
 def _runtime_status_refresh(group_page=0):
     """Refresh remote task state without discarding the selected segment page."""
     page = max(0, int(group_page or 0))
@@ -1230,6 +1240,15 @@ def _restore_direct_state():
     )
 
 
+def _restore_page_state():
+    from services.context import get_current_project_name
+    from ui.project_handlers import _project_choices
+    restored = _restore_direct_state()
+    return (*restored,
+            gr.update(choices=_project_choices(), value=get_current_project_name()),
+            gr.update(choices=_episode_choices(get_current_project_name()), value=get_current_episode_name()))
+
+
 def _project_change(project_name, outgoing_topic=None):
     if _brand_blocked("change project"):
         return (
@@ -1410,6 +1429,14 @@ def _apply_video_feedback_rules_guarded(feedback_analysis):
 
 
 def bind_events(demo, components):
+    invalidate_runtime_js = """(...args) => {
+        if (window.AICF) {
+            window.AICF.promptRuntimeRevision = Number(window.AICF.promptRuntimeRevision || 0) + 1;
+            if (window.AICF.closePromptModal) window.AICF.closePromptModal();
+            window.AICF.segmentPromptDrafts = {};
+        }
+        return args;
+    }"""
     refresh_episode_picker_js = """() => { setTimeout(() => {
         if (!window.AICF) return;
         window.AICF.promptRuntimeRevision = Number(window.AICF.promptRuntimeRevision || 0) + 1;
@@ -1495,6 +1522,19 @@ def bind_events(demo, components):
     project_assets_selected_key = components["project_assets_selected_key"]
     project_assets_selected_name = components["project_assets_selected_name"]
     project_assets_owner_select = components["project_assets_owner_select"]
+    from ui.project_bible_panel import project_character_name_form, project_character_name_fields, save_project_character_name_form
+    name_outputs = [components['project_character_names'], components['project_character_local_name'], components['project_character_local_aliases']]
+    components['project_character_names_panel'].expand(project_character_name_form,
+        inputs=[project_assets_project], outputs=name_outputs, queue=False)
+    components['project_character_names_refresh'].click(project_character_name_form,
+        inputs=[project_assets_project], outputs=name_outputs, queue=False)
+    project_assets_project.change(project_character_name_form,
+        inputs=[project_assets_project], outputs=name_outputs, queue=False)
+    components['project_character_names'].change(project_character_name_fields,
+        inputs=[project_assets_project, components['project_character_names']], outputs=name_outputs[1:], queue=False)
+    save_character_name_event = components['project_character_names_save'].click(save_project_character_name_form,
+        inputs=[project_assets_project, *name_outputs],
+        outputs=[components['project_character_names_status'], *name_outputs], queue=False)
     project_assets_save_owners_btn = components["project_assets_save_owners_btn"]
     project_assets_unbind_btn = components["project_assets_unbind_btn"]
     project_assets_status = components["project_assets_status"]
@@ -1530,6 +1570,8 @@ def bind_events(demo, components):
     episode_select_btn = components["episode_select_btn"]
     episode_select_payload = components["episode_select_payload"]
     operation_refresh_btn = components["operation_refresh_btn"]
+    operation_segment_refresh_btn = components["operation_segment_refresh_btn"]
+    operation_beats_refresh_btn = components["operation_beats_refresh_btn"]
     open_videos_dir_btn = components["open_videos_dir_btn"]
     save_beats_btn = components["save_beats_btn"]
     split_beats_btn = components["split_beats_btn"]
@@ -1602,6 +1644,10 @@ def bind_events(demo, components):
         project_assets_selected_name,
         project_assets_owner_select,
     ]
+    save_character_name_event.success(
+        fn=project_asset_management_state,
+        inputs=[project_assets_project], outputs=project_assets_state_outputs, queue=False,
+    )
     project_assets_open_btn.click(
         fn=open_project_asset_manager,
         outputs=[project_assets_page, project_assets_project, *project_assets_state_outputs],
@@ -1931,6 +1977,7 @@ def bind_events(demo, components):
 
     project_change_event = project_name.change(
         fn=_project_change,
+        js=invalidate_runtime_js,
         inputs=[project_name, topic],
         outputs=[
             output_dir,
@@ -1968,6 +2015,7 @@ def bind_events(demo, components):
     )
     project_episode_change_event = project_episode.change(
         fn=_set_current_project_episode_guarded,
+        js=invalidate_runtime_js,
         inputs=project_episode,
         outputs=[
             output_dir,
@@ -1997,6 +2045,7 @@ def bind_events(demo, components):
     )
     episode_select_event = episode_select_btn.click(
         fn=_set_current_project_episode_from_picker_guarded,
+        js=invalidate_runtime_js,
         inputs=episode_select_payload,
         outputs=[
             output_dir,
@@ -2403,6 +2452,20 @@ def bind_events(demo, components):
         queue=False,
         show_progress="hidden",
     )
+    operation_segment_refresh_btn.click(
+        fn=_runtime_segment_refresh,
+        inputs=[group_page_state],
+        outputs=[video_jobs_json, groups_panel, workflow_progress_panel],
+        queue=False,
+        show_progress="hidden",
+    )
+    operation_beats_refresh_btn.click(
+        fn=_runtime_batch_beats_refresh,
+        inputs=[group_page_state],
+        outputs=[beats_json, video_jobs_json, groups_panel, workflow_progress_panel],
+        queue=False,
+        show_progress="hidden",
+    )
 
     clear_log_btn.click(fn=clear_logs, outputs=status)
     final_video_refresh_btn.click(fn=latest_final_video_preview_payload, outputs=[final_video_path_display, final_video_preview_payload], queue=False)
@@ -2415,14 +2478,13 @@ def bind_events(demo, components):
             comfyui_backend_url_box,
             deepseek_model_box,
             fps_box,
-            output_dir,
         ],
         outputs=[deepseek_api_key_box, runninghub_api_key_box, comfyui_backend_url_box, status],
         queue=False,
     )
 
     demo.load(
-        fn=_restore_direct_state,
+        fn=_restore_page_state,
         outputs=[
             topic,
             duration_select,
@@ -2449,6 +2511,8 @@ def bind_events(demo, components):
             novel_text,
             novel_segment_count,
             target_beat_count_box,
+            project_name,
+            project_episode,
         ],
     )
 

@@ -7,6 +7,39 @@ import pytest
 from ui.scripts import APP_JS
 
 
+def test_regenerate_lock_survives_a_replaced_button_and_releases_after_cancel():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the browser-state regression")
+    action = APP_JS.split("    window.AICF.regenerateH3Segment = async function", 1)[1].split(
+        "    window.__AICF_READY__", 1
+    )[0]
+    program = r"""
+const assert = require('node:assert/strict');
+const window = {AICF: {}};
+const card = {querySelector() {return null;}};
+const _segmentCardForIndex = () => card;
+const _h3ConfigRoot = () => card;
+let saves = 0, unlock;
+window.AICF.saveH3GenerationConfig = () => {saves++; return new Promise(resolve => {unlock = resolve;});};
+window.AICF.chooseVideoChannel = async () => null;
+window.AICF.regenerateH3Segment = async function
+""" + action + r"""
+(async () => {
+    const first = window.AICF.regenerateH3Segment('12', {textContent:'regenerate'});
+    await window.AICF.regenerateH3Segment('12', {textContent:'replacement button'});
+    assert.equal(saves, 1);
+    unlock(); await first;
+    const retry = window.AICF.regenerateH3Segment('12', {textContent:'retry'});
+    assert.equal(saves, 2);
+    unlock(); await retry;
+    assert.equal(window.AICF._h3VideoRegenPending['12'], undefined);
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+    result = subprocess.run([node, "-e", program], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("force_save", [True, False])
 def test_h3_pagination_and_save_state_in_javascript(force_save):
     node = shutil.which("node")
@@ -28,7 +61,8 @@ const target = {dataset: {segmentIndex: '11', manifest: JSON.stringify(oldImages
 const regenerate = {removeAttribute() {}};
 const promptSource = {textContent: 'old prompt'};
 const cardPrompt = {value: 'old prompt'};
-let card = {querySelector(selector) {
+const projectRuntime='F:\\work\\outputs\\六千万订单 第04集%20🚚';
+let card = {dataset:{runtime:projectRuntime},querySelector(selector) {
     if (selector === '.h3-card-config-source' || selector === '.h3-asset-list') return source;
     if (selector === '.h3-prompt-override') return cardPrompt;
     if (selector === '.prompt-modal-source') return promptSource;
@@ -38,6 +72,13 @@ const panel = {querySelector(selector) {return selector === '.h3-asset-list' ? t
 """ + "function _h3Manifest(root)" + manifest + r"""
 window.AICF.hydrateH3ModalConfig(panel, card, '7');
 assert.deepEqual(JSON.parse(target.dataset.manifest), currentImages);
+assert.throws(()=>_h3Manifest({querySelector:()=>null}), /未提交保存/);
+assert.throws(()=>_h3Manifest({querySelector:()=>({dataset:{manifest:'broken'}})}), /读取失败/);
+assert.throws(()=>_h3Manifest({querySelector:()=>({dataset:{manifest:'{}'}})}), /读取失败/);
+const first={asset_id:'a',type:'image',path:'a.png',metadata:{role_id:'actor',identity_id:'identity'}};
+const reordered={type:'image',path:'a.png',id:'a',metadata:{identity_id:'identity',role_id:'actor',description_cn:'display'}};
+assert.equal(window.AICF.h3ManifestSignature([first]),window.AICF.h3ManifestSignature([reordered]));
+assert.notEqual(window.AICF.h3ManifestSignature([first,{id:'b'}]),window.AICF.h3ManifestSignature([{id:'b'},first]));
 assert.equal(target.dataset.segmentIndex, '7');
 let regenerated;
 window.AICF.regenerateH3Segment = index => {regenerated = index;};
@@ -60,9 +101,14 @@ function _segmentCardForIndex() {return card;}
 function _h3Status() {}
 window.AICF.updateSegmentCardState = () => {};
 window.AICF.refreshH3AssetCount = () => {};
+window.AICF.mountVideoChannels = () => {};
 let release;
 const requests = [];
 function _requestJson(url, options) {
+    // Exercise the same ByteString conversion as browser fetch headers.
+    const headers=new Headers(options.headers);
+    assert.equal(headers.get('X-AICF-Runtime-Encoding'),'uri');
+    assert.equal(decodeURIComponent(headers.get('X-AICF-Runtime')),projectRuntime);
     requests.push(JSON.parse(options.body));
     return new Promise(resolve => {release = resolve;});
 }
@@ -83,6 +129,14 @@ function _requestJson(url, options) {
     assert.deepEqual(JSON.parse(source.dataset.manifest), currentImages);
     assert.deepEqual(JSON.parse(recycledSource.dataset.manifest), oldImages);
     assert.equal(root._h3SavePending, null);
+    // An older response must never overwrite references selected while saving.
+    const racing = window.AICF.saveH3GenerationConfig('7', null, root);
+    const latestImages = [...currentImages, {id:'new-choice',type:'image'}];
+    target.dataset.manifest = JSON.stringify(latestImages);
+    release({generation_config:{asset_manifest:currentImages},canonical_prompt:'older response'});
+    await assert.rejects(racing, /新修改仍保留/);
+    assert.deepEqual(JSON.parse(target.dataset.manifest), latestImages);
+    assert.equal(field.value, 'canonical prompt');
     assert.equal(requests[0].segment_index, 7);
     assert.equal(requests[0].force_save, true);
     assert.deepEqual(requests[0].asset_manifest, currentImages.map((item, index) => ({...item, order: index + 1})));
@@ -97,7 +151,7 @@ function _requestJson(url, options) {
     root._h3SavePending = null;
     unlock();
     await assert.rejects(queued, /编辑会话已切换/);
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 2);
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """
     if not force_save:

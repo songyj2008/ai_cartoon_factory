@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
 import uuid
 from functools import wraps
 from pathlib import Path
@@ -27,8 +28,24 @@ def _pinned_segment_route(handler):
     @wraps(handler)
     async def wrapped(*args, **kwargs):
         from services.context import pin_runtime
-        with pin_runtime():
-            return await handler(*args, **kwargs)
+        request = kwargs.get('request') or next((arg for arg in args if isinstance(arg, Request)), None)
+        try:
+            with pin_runtime():
+                expected = request.headers.get('X-AICF-Runtime') if request is not None else None
+                if expected and request.headers.get('X-AICF-Runtime-Encoding') == 'uri':
+                    from urllib.parse import unquote
+                    try:
+                        expected = unquote(expected, encoding='utf-8', errors='strict')
+                    except UnicodeError:
+                        return JSONResponse({'ok': False, 'message': '项目路径编码无效，请刷新页面后重试。'}, status_code=400)
+                if expected and Path(expected).resolve() != get_project_dir().resolve():
+                    return JSONResponse({'ok': False, 'message': '项目或集数已切换，已拒绝旧页面请求；原任务继续在原项目运行。'}, status_code=409)
+                return await handler(*args, **kwargs)
+        except Exception as exc:
+            path = request.scope.get('path', handler.__name__) if request is not None else handler.__name__
+            log(f'[api][error] {path}\n{traceback.format_exc()}', 'ERROR')
+            return JSONResponse({'ok': False, 'code': 'API_INTERNAL_ERROR',
+                                 'message': f'后台处理失败（{path}）：{exc}'}, status_code=500)
     return wrapped
 
 
@@ -104,6 +121,8 @@ def register_api_routes(demo):
         app = App()
         demo.app = app
     ensure_gradio_app_runtime(demo)
+    from services.browser_runtime import bind_api
+    bind_api(app)
 
     if getattr(app.state, "aicf_api_routes_registered", False):
         return demo
@@ -214,17 +233,9 @@ def register_api_routes(demo):
                                 for item in validation["errors"]
                             )
                         )
-                    beats_text = load_json_file_silent("beats.json")
-                    try:
-                        beats_data = json.loads(beats_text or "{}")
-                    except json.JSONDecodeError as exc:
-                        raise ValueError("beats.json is invalid; regenerate or save Beats before rendering this segment") from exc
-                    if not isinstance(beats_data, dict) or not isinstance(beats_data.get("beats"), list):
-                        raise ValueError("beats.json is missing; generate or save Beats before rendering this segment")
-                    # H3 owns a different prompt compiler, asset binder and
-                    # graph.  Always rebuild its selected segment before a
-                    # retry; an LTX workflow must never be submitted as H3.
-                    await run_in_threadpool(service.prepare_segments, beats_data, segment_indices={segment_index})
+                    # Saved submission locally rebuilds the model's workflow
+                    # when needed. Regenerating a video must never replan its
+                    # screenplay or extract scene state through an LLM.
                 log(f"[generation] API regenerate video part_{segment_index:03d} channel={channel_id} model={model_id}", "STEP")
                 result = await run_in_threadpool(service.submit_saved_segments, {segment_index}, wait=False, channel_id=channel_id)
                 from ui.group_panel import render_segment_panel
@@ -325,9 +336,38 @@ def register_api_routes(demo):
                         if not isinstance(beat, dict):
                             raise ValueError("找不到分段对应的 Beat")
                     from services.text_jobs import submit
-                    task = submit('source_replan', [index, excerpt], (payload or {}).get('editors') or {})
+                    from services.web_llm_bridge import validate_routes
+                    from generation.pipelines.minimax_h3.planner import H3SegmentPlanner
+                    requested_duration = payload.get('duration_sec')
+                    if requested_duration is None:
+                        raise ValueError('页面未提交本段时长，请保留编辑内容后强制刷新页面（Ctrl+F5），重新打开本段再试')
+                    if isinstance(requested_duration, bool):
+                        raise ValueError('本段参考时长请输入正数')
+                    try:
+                        from generation.pipelines.minimax_h3.planning_drafts import positive_duration
+                        positive_duration(requested_duration)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError('本段参考时长请输入正数') from exc
+                    if 'providers' not in payload:
+                        raise ValueError('请先勾选本页面使用的 LLM')
+                    timing_api = payload.get('timing_api', False)
+                    if type(timing_api) is not bool:
+                        raise ValueError('规划时长 API 选项必须为布尔值')
+                    providers = validate_routes(payload['providers'], inherit=True, allow_empty=timing_api)
+                    if 'api' in providers:
+                        raise ValueError('API 请使用“仅规划时长”复选框，不要加入网页 LLM 列表')
+                    editor_prompt = str(payload.get('editor_prompt') or '')
+                    if not editor_prompt.strip():
+                        raise ValueError('页面未提交编辑区提示词，请保留编辑内容并刷新页面后重试')
+                    options = {'duration_sec': positive_duration(requested_duration), 'providers': providers,
+                               'timing_only': True, 'timing_api': timing_api, 'editor_prompt': editor_prompt}
+                    if 'asset_manifest' in payload:
+                        if not isinstance(payload['asset_manifest'], list):
+                            raise ValueError('页面参考素材格式不正确')
+                        options['asset_manifest'] = payload['asset_manifest']
+                    task = submit('source_replan', [index, excerpt, options], (payload or {}).get('editors') or {})
                     return JSONResponse({'ok': True, 'source_excerpt': excerpt,
-                                         'operation_id': task['id'], 'message': '重新规划已加入后台任务，原项目内容会在应用结果时更新。'})
+                                         'operation_id': task['id'], 'message': f'已提交重新规划时长（页面参考 {options["duration_sec"]} 秒）；仅调整现有提示词中的时间，完成后同步对应 Beat。'})
                 with video_jobs_lock():
                     jobs = load_video_jobs()
                     segment = next((item for item in jobs.get("segments") or []
@@ -386,6 +426,234 @@ def register_api_routes(demo):
                 log(f"[generation][api_model][error] {exc}", "ERROR")
                 return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=400)
 
+        @app.post('/api/scene-batches/{action}')
+        @_pinned_segment_route
+        async def api_scene_batches(action: str, request: Request):
+            from services import scene_video_batches as batches
+            try:
+                payload = await request.json()
+                if action == 'catalog': result = await run_in_threadpool(batches.catalog)
+                elif action == 'start': result = await run_in_threadpool(batches.start, payload)
+                elif action == 'status': result = await run_in_threadpool(batches.status, payload['id'])
+                elif action == 'resume': result = await run_in_threadpool(batches.resume, payload['id'], payload.get('modes'))
+                else: raise ValueError('未知场景批次操作')
+                return JSONResponse({'ok': True, **result})
+            except Exception as exc:
+                return JSONResponse({'ok': False, 'message': str(exc)}, status_code=400)
+
+        @app.post('/api/segment/editor/{action}')
+        @_pinned_segment_route
+        async def api_editor_operation(action: str, request: Request):
+            try:
+                from generation.pipelines.minimax_h3 import editor_draft as edits
+                from generation.pipelines.minimax_h3.continuity import resolve_source_snapshot
+                from workflow.video_merge import load_video_jobs
+                payload=await request.json()
+                if action=='snapshot':
+                    jobs=load_video_jobs();target=edits.locate(jobs,payload['segment_uid'])
+                    index=jobs['segments'].index(target)
+                    prior=jobs['segments'][index-1] if index else {}
+                    result={**edits.saved_baseline(jobs,target),
+                        'source_title':prior.get('title') or '无上一段',
+                        'source_options':[{'render_id':r['render_id'],'label':str(r.get('created_at') or '')+' · '+r['render_id'][-8:]} for r in prior.get('renders',[]) if r.get('prompt_snapshot')]}
+                    from generation.pipelines.minimax_h3.continuity.display import scene_display_contexts
+                    result['scene_contexts']=scene_display_contexts(jobs)
+                    from generation.pipelines.minimax_h3.continuity.constraints import DEFAULT
+                    result['default_spatial_constraints']=DEFAULT
+                    result['context_id']=target.get('scene_context_id')
+                    first_scene_segment=next((s for s in jobs['segments']
+                        if target.get('scene_context_id') and s.get('scene_context_id')==target['scene_context_id']),None)
+                    result['scene_first_segment']=({k:first_scene_segment.get(k) for k in
+                        ('segment_uid','segment_index','part_id','title')} if first_scene_segment else None)
+                    result['scene_has_predecessor']=bool(target.get('scene_context_id') and any(
+                        s.get('scene_context_id')==target['scene_context_id'] for s in jobs['segments'][:index]))
+                    result['scene_initial_pending']=bool((result['scene_contexts'].get(target.get('scene_context_id')) or {}).get('initial_pending'))
+                    result['scene_record']=target.get('h3_continuity') or {}
+                    from generation.pipelines.minimax_h3.continuity.display import framing_display_snapshot
+                    result.update(framing_display_snapshot(jobs,target))
+                    start_uid=((result['scene_record'].get('config') or {}).get('start_segment_uid'))
+                    result['scene_start_index']=next((i+1 for i,s in enumerate(jobs['segments']) if s['segment_uid']==start_uid),1)
+                    from generation.pipelines.minimax_h3.continuity.calibration import calibration_snapshot, scene_members
+                    result.update(calibration_snapshot(jobs,target))
+                    result['scene_members']=scene_members(jobs)
+                    from generation.pipelines.minimax_h3.continuity.state import initial_from_beat
+                    beats_data=json.loads((get_project_dir()/'beats.json').read_text(encoding='utf-8-sig'))
+                    beat=next((b for b in beats_data.get('beats',[]) if b.get('beat_uid')==target.get('beat_uid')),{})
+                    result['initial_suggestion']=initial_from_beat(beat,target)
+                    manifest=(target.get('generation_config') or {}).get('asset_manifest',[])
+                    result['suggested_scene_name']=(result['scene_contexts'].get(target.get('scene_context_id')) or {}).get('display_name') or next((a.get('role') or a.get('label') for a in manifest
+                        if (a.get('metadata') or {}).get('asset_kind')=='background'),None) or beat.get('title') or '新场景'
+                elif action=='optimization-event':
+                    from generation.pipelines.minimax_h3.optimization_history import event
+                    result={'optimization_status':await run_in_threadpool(event,payload['segment_uid'],payload['stage'],
+                        attempt_id=payload.get('attempt_id'),message=payload.get('message'))}
+                elif action=='restore-baseline':
+                    from generation.pipelines.minimax_h3.prompt_baseline import restore
+                    result=await run_in_threadpool(restore,payload)
+                elif action=='preview': result=await run_in_threadpool(edits.preview,payload)
+                elif action=='commit':
+                    result=await run_in_threadpool(edits.commit,payload)
+                    from ui.group_panel import render_segment_panel
+                    jobs=load_video_jobs();segment=edits.locate(jobs,payload['segment_uid'])
+                    from generation.pipelines.minimax_h3.continuity.inheritance import state_status
+                    result['state_status']=state_status(jobs,payload['segment_uid'])
+                    from generation.pipelines.minimax_h3.optimization_history import status
+                    result['optimization_status']=status(segment)
+                    from generation.pipelines.minimax_h3.continuity.display import framing_display_snapshot
+                    result.update(framing_display_snapshot(jobs,segment))
+                    result['groups_html']=render_segment_panel(jobs,segment['segment_index'])
+                elif action=='scene-config':
+                    import uuid
+                    from workflow.video_merge import video_jobs_lock,save_video_jobs
+                    from generation.pipelines.minimax_h3.continuity.ledger import state_before
+                    # Manual calibration is a declaration, not an unconfirmed
+                    # automatic suggestion awaiting an explicit extraction.
+                    if isinstance(payload.get('initial_state'),dict) and payload.get('automatic') is not True:
+                        for role,facts in payload['initial_state'].items():
+                            present=(facts.get('present') or {}).get('value') if isinstance(facts,dict) else None
+                            if type(present) is not bool:
+                                raise ValueError('请明确选择人物 '+str(role)+' 在场或不在场')
+                    with video_jobs_lock():
+                        jobs=load_video_jobs();target=edits.locate(jobs,payload['segment_uid'])
+                        old_key=target.get('scene_context_id')
+                        key=payload.get('context_id') or None
+                        contexts=jobs.setdefault('h3_scene_continuity',{'schema_version':3,'contexts':{}})['contexts']
+                        if payload.get('name'):
+                            key='scene_'+uuid.uuid4().hex
+                            state=payload.get('initial_state')
+                            if not isinstance(state,dict) or not state:raise ValueError('请选择初始人物并填写状态')
+                            from generation.pipelines.minimax_h3.continuity.reducer import reduce_plan
+                            state=reduce_plan({role:{} for role in state},{'shots':[{'shot_uid':'initial','world_events':[{'role_id':role,'facts':facts} for role,facts in state.items()]}]},'initial',list(state))
+                            contexts[key]={'name':payload['name'],'initial_state':state,'initial_pending':bool(payload.get('automatic',False)),
+                                           'config_revision':uuid.uuid4().hex}
+                        if key and (key not in contexts or 'initial_state' not in contexts[key]):raise ValueError('场景未初始化')
+                        if key and not payload.get('name') and 'initial_state' in payload:
+                            from generation.pipelines.minimax_h3.continuity.calibration import save_initial_calibration
+                            save_initial_calibration(contexts[key],payload['initial_state'],payload)
+                        if key:
+                            from generation.pipelines.minimax_h3.continuity.constraints import save_constraints, save_scene_layout
+                            save_constraints(contexts[key],payload)
+                            save_scene_layout(contexts[key],payload,(target.get('generation_config') or {}).get('asset_manifest',[]))
+                        if target.get('scene_context_id')!=key:
+                            target.pop('h3_continuity',None)
+                            target['h3_state_mode']='unset'
+                        target['scene_context_id']=key
+                        save_video_jobs(jobs)
+                    from generation.pipelines.minimax_h3.continuity.inheritance import state_status
+                    result={'context_id':key, 'state_task':None, 'state_status':state_status(jobs,payload['segment_uid'])}
+                elif action=='delete-scene':
+                    from generation.pipelines.minimax_h3.continuity.calibration import delete_unused_scene
+                    result=await run_in_threadpool(delete_unused_scene,payload)
+                elif action=='inherit-state':
+                    from generation.pipelines.minimax_h3.continuity.inheritance import inherit_segment_state
+                    status=await run_in_threadpool(inherit_segment_state,payload['segment_uid'])
+                    result={'state_status':status}
+                elif action=='extract-state':
+                    from services.scene_state_jobs import request_scene_state_refresh
+                    task=await run_in_threadpool(request_scene_state_refresh,payload['segment_uid'],reason='extract',source_kind='draft',providers=payload.get('providers'))
+                    result={'state_task':task}
+                elif action=='scene-state':
+                    from services.scene_state_jobs import active_scene_state_task
+                    # Legacy page start flags are read-only; only extract-state
+                    # authorizes a new LLM request.
+                    result={'state_task':active_scene_state_task(payload['segment_uid'],source_kind='draft')}
+                elif action=='state-result':
+                    from services.text_jobs import get
+                    try:
+                        task=get(payload['operation_id'])
+                    except ValueError as exc:
+                        if str(exc)!='任务不存在':raise
+                        return JSONResponse({'ok':False,'code':'OPERATION_NOT_FOUND',
+                            'message':'原状态提取任务已清空或删除，请重新提取本段状态。'},status_code=404)
+                    if task['kind']!='scene_state' or Path(task['source']).resolve()!=get_project_dir().resolve():
+                        raise ValueError('状态任务不属于当前项目')
+                    result={'state':task['state'],'message':task.get('message') or task.get('phase')}
+                    if task.get('children'):
+                        from services.web_llm_bridge import task_status
+                        try:
+                            child=task_status(task['children'][-1],current_runtime=False)
+                            result['web_task']={k:child.get(k) for k in ('provider','status','message')}
+                        except ValueError:
+                            pass
+                elif action=='continuity':
+                    from services.text_jobs import submit
+                    if payload.get('operation_contract')!='scene_state_v3':raise ValueError('旧承接入口已停用，请刷新页面')
+                    from workflow.video_merge import video_jobs_lock
+                    with video_jobs_lock():
+                        payload['jobs']=load_video_jobs()
+                    from generation.pipelines.minimax_h3.continuity.readiness import read_ready_context
+                    read_ready_context(payload['jobs'],payload['segment_uid'],target_source='draft')
+                    task=await run_in_threadpool(submit,'opening_continuity',[payload],page_providers=payload.get('providers'))
+                    if payload.get('optimization_attempt_id'):
+                        from generation.pipelines.minimax_h3.optimization_history import event
+                        await run_in_threadpool(event,payload['segment_uid'],'submitted',
+                            attempt_id=payload['optimization_attempt_id'],operation_id=task['id'])
+                    result={'operation_id':task['id']}
+                elif action=='result':
+                    from services.text_jobs import get
+                    task=get(payload['operation_id'])
+                    if task['kind']!='opening_continuity' or Path(task['source']).resolve()!=get_project_dir().resolve(): raise ValueError('任务不属于当前项目')
+                    message = task.get('phase') or task.get('message')
+                    if task['state'] in ('error','needs_attention','cancelled'):
+                        message = task.get('message') or message
+                    result={'state':task['state'],'candidate':task.get('result'),'message':message}
+                else: raise ValueError('未知编辑操作')
+                return JSONResponse({'ok':True,**result})
+            except Exception as exc:
+                code = getattr(exc, 'code', None)
+                details = getattr(exc, 'details', {})
+                if callable(details):
+                    details = details()
+                if not isinstance(details, dict):
+                    details = {}
+                if code:
+                    log(f'[editor][conflict] action={action} code={code} details={details}', 'WARNING')
+                else:
+                    log(f'[editor][error] action={action}\n{traceback.format_exc()}', 'ERROR')
+                return JSONResponse({'ok':False,'message':str(exc),'code':code,'details':details},status_code=409 if code else 400)
+
+        @app.post("/api/segment/prompt-preview")
+        @_pinned_segment_route
+        async def api_preview_segment_prompt(request: Request):
+            try:
+                from generation.service import get_generation_service
+                payload = await request.json()
+                result = await run_in_threadpool(get_generation_service().preview_segment_prompt,
+                    int(payload.get("segment_index") or 0), str(payload.get("prompt_override") or ""),
+                    payload.get("asset_manifest"), force_save=payload.get("force_save") is True,
+                    prompt_provenance=payload.get("prompt_provenance"))
+                return JSONResponse({"ok": True, **result})
+            except Exception as exc:
+                return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+        @app.post("/api/segment/shot-editor/preview")
+        @_pinned_segment_route
+        async def api_preview_shot_editor(request: Request):
+            try:
+                from generation.service import get_generation_service
+                payload = await request.json()
+                result = await run_in_threadpool(get_generation_service().preview_shot_edits, payload)
+                return JSONResponse({'ok': True, **result})
+            except Exception as exc:
+                return JSONResponse({'ok': False, 'message': str(exc)}, status_code=400)
+
+        @app.post("/api/segment/shot-editor/commit")
+        @_pinned_segment_route
+        async def api_commit_shot_editor(request: Request):
+            try:
+                from generation.service import get_generation_service
+                from workflow.video_merge import load_video_jobs
+                from ui.group_panel import render_groups_panel
+                assert_current_runtime_writable('保存 Shot 编辑')
+                payload = await request.json()
+                result = await run_in_threadpool(get_generation_service().commit_shot_edits, payload)
+                from ui.project_handlers import beats_json_to_display
+                result['beats_display'] = beats_json_to_display(result['beats_text'])
+                result['groups_html'] = render_groups_panel(load_video_jobs())
+                return JSONResponse({'ok': True, **result})
+            except Exception as exc:
+                return JSONResponse({'ok': False, 'message': str(exc)}, status_code=400)
+
         @app.post("/api/segment/generation-config")
         @_pinned_segment_route
         async def api_save_segment_generation_config(request: Request):
@@ -407,20 +675,33 @@ def register_api_routes(demo):
                     segment_index,
                     generation_mode=str((payload or {}).get("generation_mode") or "ref2va"),
                     asset_manifest=manifest,
-                    prompt_override=str((payload or {}).get("prompt_override") or ""),
+                    prompt_override=str(payload.get("prompt_override") or "") if "prompt_override" in payload else None,
                     prompt_provenance=(payload or {}).get("prompt_provenance") if isinstance((payload or {}).get("prompt_provenance"), dict) else None,
                     force_save=(payload or {}).get("force_save") is True,
+                    base_revision=(payload or {}).get('base_revision'),
+                    segment_uid=(payload or {}).get('segment_uid'),
                 )
                 segment = next(
                     (item for item in result.get("segments") or [] if isinstance(item, dict) and int(item.get("segment_index") or 0) == segment_index),
                     None,
                 )
                 config = segment.get("generation_config") if isinstance(segment, dict) and isinstance(segment.get("generation_config"), dict) else {}
+                scene_operation_id=None
+                from generation.job_schema import resolved_model_id
+                pipeline = get_generation_service()._pipeline_for(resolved_model_id(segment, result))
+                from generation.pipelines.minimax_h3.editor_draft import reference_revision, saved_baseline
+                from generation.pipelines.minimax_h3.continuity.inheritance import state_status
                 return JSONResponse({
                     "ok": True,
                     "video_jobs": result,
                     "generation_config": config,
+                    "editor_snapshot": saved_baseline(result, segment),
+                    "scene_operation_id": scene_operation_id,
+                    "state_status": state_status(result,segment['segment_uid']),
+                    "base_revision": reference_revision(segment),
                     "canonical_prompt": str(config.get("prompt_override") or ""),
+                    "prompt_chars": len(str(config.get("prompt_override") or "")),
+                    "prompt_max_chars": pipeline.spec.capabilities.prompt_max_chars,
                     "log_tail": get_logs(),
                 })
             except Exception as exc:
@@ -561,6 +842,7 @@ def register_api_routes(demo):
                 return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
 
         @app.post("/api/segment/video_ok")
+        @_pinned_segment_route
         async def api_set_segment_video_ok(request: Request):
             try:
                 payload = await request.json()
@@ -570,14 +852,21 @@ def register_api_routes(demo):
                 from workflow.segment_runner import set_segment_video_ok
                 from ui.group_panel import render_segment_panel
 
-                assert_current_runtime_writable("标记分段视频OK")
+                # Approval metadata and learning are allowed for archived episodes.
                 segment_index = int(float((payload or {}).get("segment_index") or 0))
                 if segment_index <= 0:
                     raise ValueError("invalid segment index")
                 result = set_segment_video_ok(segment_index, bool((payload or {}).get("video_ok")))
+                from services.video_experience import on_video_ok
+                try:
+                    learning = await run_in_threadpool(on_video_ok, segment_index, result, bool(payload.get('video_ok')))
+                except Exception as exc:
+                    log(f'[video_learning] OK 标记已保留，分析未启动：{exc}', 'WARN')
+                    learning = {'state':'error', 'message':f'视频 OK 标记已保存；经验分析未启动：{exc}'}
                 return JSONResponse({
                     "ok": True,
                     "video_jobs": result,
+                    "learning": learning,
                     "segment_panel_html": render_segment_panel(result, segment_index),
                     "log_tail": get_logs(),
                 })

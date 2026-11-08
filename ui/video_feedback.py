@@ -97,9 +97,6 @@ def _feedback_payload(segments: list[dict[str, Any]], issue_types: list[str] | s
                 "offscreen_speakers": item.get("offscreen_speakers") or [],
                 "mentioned_roles": item.get("mentioned_roles") or [],
                 "prompt": job.get("prompt") or "",
-                "reference_images": job.get("reference_images") or [],
-                "background_image": job.get("background_image") or "",
-                "video_path": item.get("video_path") or job.get("video_path") or "",
             }
         )
     return {"issue_types": issues, "issue_note": str(issue_note or "").strip(), "segments": compact_segments}
@@ -119,19 +116,16 @@ def analyze_video_feedback(selected_parts, issue_types, issue_note):
 你是通用 AI 视频生成质检分析器。
 任务：根据用户反馈的视频问题、对应 part 的视频提示词和角色/背景绑定信息，分析问题可能来自哪些提示词表达。
 要求：
-- 不要绑定任何具体剧情、行业、角色名；把原因提炼成通用规则。
+- 仅分析本次反馈，区分原因假设与已知事实，不推广为全局运行规则。
 - 只输出 JSON object。
-- candidate_rules 用于加入确定性质检函数，必须是通用、可复用、保守的 regex，不要过度拦截正常剧情。
-- regex 使用 Python re 可用语法，尽量匹配中文风险表达。
+- candidate_rules 固定返回空数组；仅提供当前提示词的局部改写建议。
 - reason 是给用户看的风险原因。
 输出格式：
 {
   "summary": "一句话概括问题根因",
   "causes": ["原因1", "原因2"],
   "rewrite_advice": ["提示词改写建议1"],
-  "candidate_rules": [
-    {"regex": "风险表达", "reason": "为什么风险", "category": "stable_initial_state|identity|speaker|extra_person|space|other"}
-  ]
+  "candidate_rules": []
 }
 """
     user_prompt = "视频问题反馈和对应分段信息：\n" + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -162,34 +156,5 @@ def _valid_rule(rule: dict[str, Any]) -> dict[str, str] | None:
 
 
 def apply_video_feedback_rules(analysis_text: str):
-    text = str(analysis_text or "").strip()
-    if not text:
-        analysis = _load_json(get_project_dir() / FEEDBACK_ANALYSIS_FILE, {})
-    else:
-        try:
-            analysis = json.loads(text)
-        except Exception as exc:
-            log(f"[video_feedback][error] 候选规则 JSON 解析失败: {exc}", "ERROR")
-            return get_logs()
-    rules = analysis.get("candidate_rules") if isinstance(analysis, dict) else []
-    if not isinstance(rules, list) or not rules:
-        log("[video_feedback] 没有可加入的候选规则", "WARN")
-        return get_logs()
-
-    existing = _load_json(CUSTOM_RULES_PATH, [])
-    if not isinstance(existing, list):
-        existing = []
-    existing_keys = {str(item.get("regex") or "") for item in existing if isinstance(item, dict)}
-    added = 0
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        normalized = _valid_rule(rule)
-        if not normalized or normalized["regex"] in existing_keys:
-            continue
-        existing.append(normalized)
-        existing_keys.add(normalized["regex"])
-        added += 1
-    _save_json(CUSTOM_RULES_PATH, existing)
-    log(f"[video_feedback] 已加入自定义质检规则 {added} 条: {CUSTOM_RULES_PATH}", "STEP")
+    log("[video_feedback] 单次反馈不再写入全局质检规则，请使用局部提示词修正", "WARN")
     return get_logs()

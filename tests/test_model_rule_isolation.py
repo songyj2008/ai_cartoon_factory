@@ -154,7 +154,7 @@ def test_h3_prompt_compiler_owns_local_reference_tags_and_manual_sections():
                 "shots": [
                     {
                         "start_sec": 0,
-                        "end_sec": 4,
+                        "end_sec": 8,
                         "shot_size": "中景",
                         "action": "角色站起",
                         "camera": "镜头轻微跟随",
@@ -175,7 +175,7 @@ def test_h3_prompt_compiler_owns_local_reference_tags_and_manual_sections():
     assert "【任务概述】" in prompt
     assert "【参考保留关系】" in prompt
     assert "【详细镜头描述】" in prompt
-    assert "必须准确显示的文字：PROJECT H3" in prompt
+    assert "必须准确显示的文字：PROJECT H3" not in prompt
     assert "角色 (S1)说：<d>[Chinese]我已经决定了。</d>" in prompt
     assert "【整体声音环境】" in prompt
     assert "【非叙事性音乐】" in prompt
@@ -236,7 +236,7 @@ def test_h3_prompt_compiler_keeps_cached_dialogue_for_legacy_beat_without_units(
     assert "旧结构里唯一保存的台词。" in prompt
 
 
-def test_h3_prompt_compiler_adds_character_asset_description_to_subject_definition():
+def test_h3_prompt_compiler_keeps_character_appearance_in_reference_only():
     config = H3GenerationConfig.from_mapping(
         {
             "asset_manifest": [
@@ -247,7 +247,7 @@ def test_h3_prompt_compiler_adds_character_asset_description_to_subject_definiti
                     "role": "8号禾宝宝",
                     "metadata": {
                         "asset_kind": "character",
-                        "subject_description": "较小圆脸、明显大眼睛，绿色发圈双低马尾，身穿黄衣红裤。",
+                        "appearance_summary": "较小圆脸、明显大眼睛，绿色发圈双低马尾，身穿黄衣红裤。",
                     },
                 },
                 {
@@ -262,11 +262,17 @@ def test_h3_prompt_compiler_adds_character_asset_description_to_subject_definiti
     )
     bindings = H3AssetBinder().bind(config)
 
-    prompt = H3PromptCompiler().compile({"plot": "禾宝宝看向飞船。"}, config, bindings, duration_sec=9).text
+    prompt = H3PromptCompiler().compile({
+        "plot": "禾宝宝看向飞船。",
+        "model_hints": {H3: {"shots": [
+            {"start_sec": 0, "end_sec": 9, "subject": "8号禾宝宝", "action": "禾宝宝看向飞船。"},
+        ]}},
+    }, config, bindings, duration_sec=9).text
 
     assert "【主体定义】" in prompt
     assert "<Subject 1>：8号禾宝宝；可见内容来自 <Picture 1>。" in prompt
-    assert "较小圆脸、明显大眼睛，绿色发圈双低马尾，身穿黄衣红裤。" in prompt
+    assert "较小圆脸、明显大眼睛，绿色发圈双低马尾，身穿黄衣红裤。" not in prompt
+    assert config.asset_manifest[0].metadata['appearance_summary']
     assert "<Subject 2>：航天基地；可见内容来自 <Picture 2>。" in prompt
 
 
@@ -289,3 +295,13 @@ def test_beats_rule_revision_prevents_cross_model_reuse():
     assert_beats_compatible(beats, H3)
     with pytest.raises(ValueError, match="重新拆分 Beats"):
         assert_beats_compatible(beats, LTX)
+
+
+def test_h3_performance_prompt_update_accepts_previous_structural_contract():
+    beats = {"generation_policy": {"model_id": H3, "rules_revision": "h3-manual-2026-08-v3"}, "beats": []}
+    assert_beats_compatible(beats, H3)
+    with pytest.raises(ValueError, match="重新拆分 Beats"):
+        assert_beats_compatible(beats, LTX)
+    beats["generation_policy"]["rules_revision"] = "unknown-contract"
+    with pytest.raises(ValueError, match="重新拆分 Beats"):
+        assert_beats_compatible(beats, H3)

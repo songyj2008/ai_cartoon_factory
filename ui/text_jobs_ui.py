@@ -20,7 +20,11 @@ def submit_operation(kind, output_count, status_index, *, editor_tail=False):
                 editors['novel_text_editor'] = args[0]
             with pin_runtime():
                 task = submit(kind,args,editors)
-            if task.get('duplicate'):
+            if task.get('already_complete'):
+                updates[status_index] = 'Beats 与全部 Segments 已完成，已保留现有结果。'
+            elif task.get('resumed'):
+                updates[status_index] = f"继续原批次：已保存 {task.get('segment_completed',0)}/{task.get('segment_total',0)} 个 Segment，只生成未完成部分。"
+            elif task.get('duplicate'):
                 updates[status_index] = f"相同输入已有任务：{task['id'][:8]}。请在后台任务列表查看进度。"
             else:
                 updates[status_index] = f"已加入后台任务：{task['title']} · {task['id'][:8]}。可继续操作，在上方任务列表查看进度。"
@@ -32,7 +36,8 @@ def submit_operation(kind, output_count, status_index, *, editor_tail=False):
 
 PANEL_HTML = '''<div id="text-operations-toast" role="status" aria-live="polite" hidden></div><details id="text-operations" class="web-llm-box">
 <summary class="text-operations-summary" aria-label="展开或收起后台任务">
-  <span class="text-operations-summary-top"><span class="text-operations-brand"><span class="text-operations-mark">✦</span><span><strong>任务中心</strong><small>文字与网页视频任务</small></span></span><span class="text-operations-count"></span></span>
+  <span class="text-operations-summary-top"><span class="text-operations-brand"><span class="text-operations-mark">✦</span><span><strong>任务中心</strong><small>文字与网页视频任务</small></span></span><span class="text-operations-opacity"><output id="text-operations-opacity-value" hidden>0%</output><input id="text-operations-opacity" type="range" min="0" max="80" step="1" value="0" aria-label="任务中心透明度" aria-describedby="text-operations-opacity-value"></span></span>
+  <span class="text-operations-queue-controls"><span class="text-operations-count"></span><button type="button" class="text-operations-clear-all" aria-label="停止并清空所有项目任务及扩展排队任务">一键清空</button></span>
   <span class="text-operations-current"><span class="text-operations-current-dot"></span><span class="text-operations-current-title">正在读取任务…</span><span class="text-operations-current-percent">—</span></span>
   <progress class="text-operations-current-progress" max="100" value="0" aria-label="当前任务完成进度"></progress>
   <span class="text-operations-stats" aria-label="任务状态数量"><span data-count="running">执行中 <b>0</b></span><span data-count="queued">排队 <b>0</b></span><span data-count="ready">待应用 <b>0</b></span><span data-count="applied">已应用 <b>0</b></span><span data-count="cancelled">已取消 <b>0</b></span><span data-count="error">异常 <b>0</b></span></span>
@@ -50,6 +55,11 @@ PANEL_HTML = '''<div id="text-operations-toast" role="status" aria-live="polite"
   </nav>
   <div class="text-operations-message" role="status" aria-live="polite"></div>
   <div class="text-operations-list"></div>
+  <nav class="text-operations-pagination text-operation-actions" aria-label="后台任务历史分页">
+    <button type="button" class="text-history-previous" disabled>上一页历史</button>
+    <span class="text-history-page" role="status" aria-live="polite"></span>
+    <button type="button" class="text-history-next" disabled>下一页历史</button>
+  </nav>
   <details class="text-operations-result" hidden><summary>任务进度详情</summary>
   <div class="text-operations-result-content" role="status" aria-live="polite"></div></details>
 </div>
@@ -59,10 +69,36 @@ PANEL_JS = r'''
 (() => {
   if(window.__AICF_TEXT_OPERATIONS_INIT__) return;
   window.__AICF_TEXT_OPERATIONS_INIT__=true;
+  const opacityKey='aicf_task_panel_transparency_v1';
+  let transparency=0;
+  try {transparency=Number(localStorage.getItem(opacityKey)||0);}catch{}
+  function applyTransparency(value){
+    transparency=Number.isFinite(Number(value))?Math.min(80,Math.max(0,Number(value))):0;
+    const panel=document.getElementById('text-operations');
+    const slider=document.getElementById('text-operations-opacity');
+    const output=document.getElementById('text-operations-opacity-value');
+    if(panel)panel.style.opacity=String(1-transparency/100);
+    if(slider){slider.value=String(transparency);slider.setAttribute('aria-valuetext',transparency+'% 透明');}
+    if(output)output.textContent=transparency+'%';
+  }
+  document.addEventListener('input',event=>{
+    if(event.target?.id!=='text-operations-opacity')return;
+    applyTransparency(event.target.value);
+    try{localStorage.setItem(opacityKey,String(transparency));}catch{}
+  });
+  document.addEventListener('click',event=>{
+    if(event.target?.closest?.('.text-operations-opacity'))event.preventDefault();
+  });
+  new MutationObserver(()=>{
+    const slider=document.getElementById('text-operations-opacity');
+    if(slider&&!slider.dataset.opacityReady){slider.dataset.opacityReady='true';applyTransparency(transparency);}
+  }).observe(document.documentElement,{childList:true,subtree:true});
+  applyTransparency(transparency);
   let busy=false, signature='', lastSummary='', entrySignature='', tasksCache=[], taskFilter='all', editorBaselines=new Map(), toastTimer=null;
+  let historyOffset=0;
   let seenStates={};try{seenStates=JSON.parse(localStorage.getItem('aicf_text_job_states_v1')||'{}')||{};}catch{}
   const labels={preparing:'准备中',queued:'排队中',running:'执行中',ready:'待应用',applied:'已应用',
-    cancelled:'已取消',error:'失败',needs_attention:'需要处理',applying:'保存中'};
+    cancelled:'已取消',error:'失败',needs_attention:'需要处理',applying:'保存中',waiting_children:'分步执行中'};
   const webLabels={queued:'网页任务排队中',claimed:'扩展已领取',waiting:'等待网页回复',complete:'网页回复完成',error:'网页任务失败',timeout:'网页任务超时',cancelled:'网页任务已取消',unknown:'网页任务状态未知'};
   const providerLabels={deepseek:'DeepSeek',chatgpt:'ChatGPT',doubao:'豆包',qianwen:'千问',api:'DeepSeek API'};
   const videoPhases={queued:'等待扩展领取',claimed:'准备网页提交',submitted:'豆包生成中',complete:'视频已保存',uncertain:'请检查原网页',error:'生成失败'};
@@ -76,16 +112,20 @@ PANEL_JS = r'''
       queued_seconds:Math.max(0,Math.floor(Date.now()/1000-row.created_at)),message:row.error||'',output_path:row.output_path||''};
   }
   const taskKinds={
+    opening_continuity:{category:'prompt',label:'承接',purpose:'提取上一段结束状态并生成开场候选',destination:'只生成候选；到目标段全屏编辑器读取并应用，再保存'},
     story:{category:'creation',label:'创作',purpose:'生成或更新本集剧情稿',destination:'校验后自动写回；检测到冲突时保留候选'},
     beats:{category:'creation',label:'创作',purpose:'把剧情拆分为 Beats',destination:'校验后更新 Beats 与分段结构；冲突时保留候选'},
     novel:{category:'creation',label:'创作',purpose:'从小说生成 Beats 与视频分段',destination:'校验后写回本集；冲突时保留候选'},
+    novel_beats:{category:'creation',label:'Beats',purpose:'从小说生成并保存 Beats',destination:'完成后立即显示 Beats，再开始逐段生成'},
+    novel_segment:{category:'prompt',label:'分段',purpose:'生成一个 Beat 对应的 Segment',destination:'只更新目标分段，成功后立即显示'},
     pipeline:{category:'creation',label:'创作',purpose:'一键准备剧情、Beats 和分段提示词',destination:'校验后写回本集；冲突时保留候选'},
     prompts:{category:'prompt',label:'提示词',purpose:'按当前 Beats 生成全部分段提示词',destination:'校验后更新本集；冲突时保留候选'},
     segment:{category:'prompt',label:'提示词',purpose:'只重新生成指定分段的提示词',destination:'目标分段提示词候选 · 不改其他分段'},
-    source_replan:{category:'prompt',label:'提示词',purpose:'结合补充剧情上下文，重新规划指定分段',destination:'目标分段提示词候选 · 保留其他分段'},
+    source_replan:{category:'prompt',label:'提示词',purpose:'按当前提示词的台词、动作和情绪重新规划时长',destination:'目标分段提示词与 Beat 时长候选 · 保留其他分段'},
     revision_wait:{category:'prompt',label:'提示词',purpose:'等待网页助手完成提示词修正',destination:'修正后的目标分段提示词候选'},
     split:{category:'structure',label:'结构',purpose:'拆分一个复杂 Beat 并调整关联分段',destination:'结构调整候选 · 应用后更新 Beats 与分段'},
     feedback:{category:'analysis',label:'分析',purpose:'分析所选视频的问题并生成改进建议',destination:'问题分析报告与候选规则 · 可单独查看'},
+    video_learning:{category:'analysis',label:'经验',purpose:'分析人工认可的台词节奏、时长安排及镜头衔接',destination:'持久经验库 · 台词节奏与镜头规划参考'},
     metadata:{category:'asset',label:'素材',purpose:'为当前素材补全描述、标签等字段',destination:'素材字段候选 · 填入后可检查再保存'},
     web_video:{category:'video',label:'视频',purpose:'网页视频生成',destination:'完成后保存到所属分段'}
   };
@@ -105,6 +145,9 @@ PANEL_JS = r'''
   }
   function hasUnsavedEditors(){
     for(const [id,value] of editorBaselines){const el=field(id);if(el&&el.value!==value)return true;}
+    return hasUnsavedSegmentEditors();
+  }
+  function hasUnsavedSegmentEditors(){
     for(const el of document.querySelectorAll('.segment-director-editor')){
       const value=el._aicfCmState?.cm?.getValue?.() ?? el.value;
       if(value!==el.defaultValue)return true;
@@ -155,8 +198,8 @@ PANEL_JS = r'''
       if(!(await chooseEpisode(task.episode||'')))throw new Error('集数切换未完成，请手动切换后重试');
       await delay(500);resetEditorBaselines();}
     switchMainPage('workbench');await delay(150);
-    const anchorByKind={story:'story_editor',pipeline:'story_editor',beats:'beats_editor',novel:'novel_text_editor',split:'beats_editor',feedback:'feedback_analyze_btn'};
-    if(['segment','source_replan','revision_wait','web_video'].includes(task.kind)&&task.segment&&task.segment.segment_index){
+    const anchorByKind={story:'story_editor',pipeline:'story_editor',beats:'beats_editor',novel:'novel_text_editor',novel_beats:'beats_editor',split:'beats_editor',feedback:'feedback_analyze_btn'};
+    if(['segment','source_replan','revision_wait','web_video','novel_segment'].includes(task.kind)&&task.segment&&task.segment.segment_index){
       const current=await fetch('/api/project/current_state',{cache:'no-store'}).then(r=>r.json());
       let index=Number(task.segment.segment_index);
       try{const jobs=typeof current.video_jobs_text==='string'?JSON.parse(current.video_jobs_text):current.video_jobs_text;
@@ -197,11 +240,28 @@ PANEL_JS = r'''
     metadataAutoAttempts.add(latest.id);requestMetadataApply(latest);
   }
   async function maybeRefreshTask(task){
-    if(!task||task.state!=='applied'||['metadata','feedback'].includes(task.kind))return false;
+    if(!task||task.state!=='applied'||['metadata','feedback','video_learning'].includes(task.kind))return false;
     const activeProject=field('project_name')?.value||'',activeEpisode=field('project_episode')?.value||'';
     const workbench=document.getElementById('workbench_page');
     if(activeProject!==task.project||String(activeEpisode||'')!==String(task.episode||'')||
-       !workbench||workbench.getBoundingClientRect().width===0||document.querySelector('#aicf-prompt-modal.open')||hasUnsavedEditors())return false;
+       !workbench||workbench.getBoundingClientRect().width===0||document.querySelector('#aicf-prompt-modal.open'))return false;
+    if(task.kind==='novel_segment'||task.batch_version===1){
+      if(hasUnsavedSegmentEditors())return false;
+      const button=document.querySelector('button#operation_segment_refresh_btn, #operation_segment_refresh_btn button');
+      if(!button)return false;button.click();return true;
+    }
+    if(task.kind==='novel_beats'){
+      if(hasUnsavedSegmentEditors())return false;
+      const data=(await api('/'+task.id)).result;
+      const beats=field('beats_editor');
+      const expected=data.editors?.beats_editor??editorBaselines.get('beats_editor');
+      if(beats&&beats.value!==expected)return false;
+      const button=document.querySelector('button#operation_beats_refresh_btn, #operation_beats_refresh_btn button');
+      if(!button)return false;button.click();
+      setTimeout(()=>{const current=field('beats_editor');if(current&&current.value===data.published_beats_text)editorBaselines.set('beats_editor',current.value);},900);
+      return true;
+    }
+    if(hasUnsavedEditors())return false;
     const data=(await api('/'+task.id)).result;
     for(const [key,value] of Object.entries(data.editors||{})){const el=field(key);if(el&&el.value!==value)return false;}
     if(hasUnsavedEditors())return false;
@@ -219,15 +279,15 @@ PANEL_JS = r'''
       pipeline:'one_click_full_btn',prompts:'generate_segment_prompts_btn',split:'split_complex_beat_btn',
       feedback:'feedback_analyze_btn',metadata:'asset_metadata_parse_btn'};
     const statusText={preparing:'准备中',queued:'排队中',running:'执行中',applying:'保存中',ready:'待应用',
-      applied:'已完成',cancelled:'已取消',error:'失败',needs_attention:'需要处理'};
+      applied:'已完成',cancelled:'已取消',error:'失败',needs_attention:'需要处理',waiting_children:'分步执行中'};
     const shown=tasks.filter(task=>{
       if(task.project!==activeProject||String(task.episode||'')!==String(activeEpisode||''))return false;
-      if(['preparing','queued','running','applying','ready','needs_attention'].includes(task.state))return true;
+      if(['preparing','queued','running','applying','ready','needs_attention','waiting_children'].includes(task.state))return true;
       return ['applied','cancelled','error'].includes(task.state)&&Date.now()/1000-Number(task.updated||task.created||0)<3600;
     });
     const groups=new Map();
     for(const task of shown){
-      const segmentTask=['segment','source_replan','revision_wait'].includes(task.kind)&&task.segment?.segment_index;
+      const segmentTask=['segment','source_replan','revision_wait','novel_segment'].includes(task.kind)&&task.segment?.segment_index;
       const target=segmentTask?(task.segment.segment_uid?'segmentUid:'+task.segment.segment_uid:
         task.segment.beat_uid?'beatUid:'+task.segment.beat_uid:'segment:'+Number(task.segment.segment_index)):entryIds[task.kind];if(!target)continue;
       if(!groups.has(target))groups.set(target,[]);groups.get(target).push(task);
@@ -265,9 +325,9 @@ PANEL_JS = r'''
   function updateSummary(tasks){
     const r=root();if(!r)return;
     const counts={running:0,queued:0,ready:0,applied:0,cancelled:0,error:0};
-    for(const t of tasks){if(t.state==='running'||t.state==='applying')counts.running++;else if(t.state==='queued')counts.queued++;else if(t.state==='ready')counts.ready++;else if(t.state==='applied')counts.applied++;else if(t.state==='cancelled')counts.cancelled++;else if(['error','needs_attention'].includes(t.state))counts.error++;}
+    for(const t of tasks){if(t.batch_version===1)continue;if(t.state==='running'||t.state==='applying')counts.running++;else if(t.state==='queued')counts.queued++;else if(t.state==='ready')counts.ready++;else if(t.state==='applied')counts.applied++;else if(t.state==='cancelled')counts.cancelled++;else if(['error','needs_attention'].includes(t.state))counts.error++;}
     for(const [state,count] of Object.entries(counts)){const node=r.querySelector(`[data-count="${state}"] b`);if(node)node.textContent=String(count);}
-    const active=tasks.find(t=>t.state==='running'||t.state==='applying')||tasks.find(t=>t.state==='queued');
+    const active=tasks.find(t=>t.state==='running'||t.state==='applying')||tasks.find(t=>t.state==='queued')||tasks.find(t=>t.state==='waiting_children');
     const title=r.querySelector('.text-operations-current-title'), percent=r.querySelector('.text-operations-current-percent'), bar=r.querySelector('.text-operations-current-progress'), dot=r.querySelector('.text-operations-current-dot');
     const value=Math.max(0,Math.min(100,Number(active?.progress?.percent)||0));
     const liveCount=counts.running+counts.queued;
@@ -327,12 +387,13 @@ PANEL_JS = r'''
         const timeline=document.createElement('ol');timeline.className='text-operation-timeline';
         for(const stage of data.history||[]){const li=document.createElement('li');li.textContent=stage.node+(stage.at?' · '+new Date(stage.at*1000).toLocaleTimeString():'');timeline.append(li);}
         if(timeline.children.length)fragment.append(timeline);
+        for(const child of data.stage_tasks||[]){const line=document.createElement('p');line.textContent=child.title+'：'+(labels[child.state]||child.state);fragment.append(line);}
         for(const child of data.web_tasks||[]){const p=document.createElement('p');p.textContent=(child.provider||'网页服务')+'（'+String(child.id||'').slice(0,8)+'）：'+(webLabels[child.status]||child.status)+'。'+(child.message||'');fragment.append(p);
           for(const late of child.late_results||[]){const lateNote=document.createElement('p');lateNote.className='text-operations-error';lateNote.textContent='迟到回复已保留（'+new Date(Number(late.received_at||0)*1000).toLocaleString()+'），不会自动应用。';fragment.append(lateNote);appendPreview(fragment,'迟到回复内容',late.result||late.raw||late.message);}}
         if(data.failure_reason){const error=document.createElement('p');error.className='text-operations-error';error.textContent='失败原因：'+data.failure_reason;fragment.append(error);}
         else if(data.message){const note=document.createElement('p');note.textContent=data.message;fragment.append(note);}
         appendPreview(fragment,'候选结果',data.candidate);
-        for(const [name,value] of Object.entries(data.preview||{}))appendPreview(fragment,'候选文件：'+name,value);
+        for(const [name,value] of Object.entries(data.preview||{}))appendPreview(fragment,(data.batch_version===1?'已保存文件：':'候选文件：')+name,value);
         content.replaceChildren(fragment);return;
       }
       if(verb==='locate'){
@@ -363,19 +424,31 @@ PANEL_JS = r'''
   async function refresh(){
     if(!root())return;
     if(busy){refreshPending=true;return;}busy=true;
+    const requestedOffset=historyOffset;
     try{
-      const {tasks:textTasks}=await api('');
+      const {tasks:textTasks,pagination}=await api('?limit=50&offset='+requestedOffset);
+      if(requestedOffset!==historyOffset){refreshPending=true;return;}
       const tasks=[...textTasks,...videoTasks].sort((a,b)=>b.created-a.created);
       const r=root();if(!r)return;tasksCache=textTasks;bindClearButton();autoApplyMetadata(textTasks);observeTaskChanges(tasks);updateEntryStatuses(textTasks);
       updateSummary(tasks);
       updateFilters(tasks);
+      if(pagination){
+        historyOffset=pagination.offset;
+        const previous=r.querySelector('.text-history-previous'),nextPage=r.querySelector('.text-history-next');
+        const pageLabel=r.querySelector('.text-history-page');
+        if(pageLabel)pageLabel.textContent=`进行中 ${pagination.active} 条 · 历史第 ${Math.floor(historyOffset/50)+1}/${Math.max(1,Math.ceil(pagination.total/50))} 页，共 ${pagination.total} 条；分类筛选当前页`;
+        for(const [button,step,disabled] of [[previous,-50,historyOffset===0],[nextPage,50,!pagination.has_more]]){
+          if(!button)continue;button.disabled=disabled;
+          button.onclick=()=>{historyOffset=Math.max(0,historyOffset+step);signature='';button.disabled=true;refresh();};
+        }
+      }
       const clearButton=r.querySelector('.text-operations-clear');
       clearButton.disabled=!textTasks.some(t=>['ready','applied','cancelled','error'].includes(t.state));
       const videoClear=r.querySelector('.text-operations-clear-video');
       if(videoClear){videoClear.disabled=!tasks.some(t=>t.isVideo&&['applied','error','needs_attention','cancelled'].includes(t.state));
         videoClear.onclick=async()=>{try{videoClear.disabled=true;const body=await videoCleanup('/clear','POST');message('已移除 '+body.dismissed+' 条视频任务，视频文件和生成历史保留');signature='';await refresh();}catch(e){message(e.message);videoClear.disabled=false;}};}
       const list=r.querySelector('.text-operations-list');
-      const next=JSON.stringify(tasks.map(t=>[t.id,t.updated,t.state]));
+      const next=JSON.stringify([historyOffset,taskFilter,tasks.map(t=>[t.id,t.updated,t.state])]);
       if(next===signature&&list.childElementCount)return;
       signature=next;const fragment=document.createDocumentFragment();
       const visibleTasks=taskFilter==='all'?tasks:tasks.filter(task=>taskMeta(task).category===taskFilter);
@@ -403,25 +476,32 @@ PANEL_JS = r'''
         const resultTarget=document.createElement('p');resultTarget.textContent='结果：'+meta.destination;
         destination.append(purpose,resultTarget);row.append(destination);
         const contextLine=document.createElement('p');contextLine.className='text-operation-context';
-        const providers=(task.provider_candidates?.length?task.provider_candidates:[task.provider]).filter(value=>value&&value!=='inherit');
+        const timingSource=task.timing_result;
+        const providers=(timingSource?.provider?[timingSource.provider]:task.provider_candidates?.length?task.provider_candidates:[task.provider]).filter(value=>value&&value!=='inherit');
         const providerText=providers.length>1?'混合 LLM：'+providers.map(value=>providerLabels[value]||value).join('、'):
           providers.length===1?'LLM：'+(providerLabels[providers[0]]||providers[0]):'';
-        contextLine.textContent=[task.project,task.episode,task.segment&&task.segment.segment_index?'分段 '+task.segment.segment_index:'',providerText].filter(Boolean).join(' · ');
+        contextLine.textContent=[task.project,task.episode,task.segment&&task.segment.segment_index?'分段 '+task.segment.segment_index:'',providerText,timingSource?.model||''].filter(Boolean).join(' · ');
         row.append(contextLine);
-        const duration=task.state==='queued'?'排队 '+task.queued_seconds+' 秒':task.state==='needs_attention'?'等待处理 '+task.attention_seconds+' 秒':'执行 '+task.elapsed_seconds+' 秒';
+        const duration=task.batch_version===1?'批次累计 '+task.elapsed_seconds+' 秒':task.state==='queued'?'排队 '+task.queued_seconds+' 秒':task.state==='needs_attention'?'等待处理 '+task.attention_seconds+' 秒':'执行 '+task.elapsed_seconds+' 秒';
         const status=document.createElement('p');status.textContent=[labels[task.state]||task.state,'当前节点：'+(task.progress?.node||task.phase||'处理中'),duration,new Date(task.created*1000).toLocaleString()].filter(Boolean).join(' · ');row.append(status);
         const progress=document.createElement('progress');progress.max=100;progress.value=task.progress?.percent||0;progress.setAttribute('aria-label',task.title+'完成进度');row.append(progress);
+        if(task.batch_version===1){
+          const detail=document.createElement('p');detail.setAttribute('role','status');detail.setAttribute('aria-live','polite');
+          detail.textContent=`Beats：${task.beats_task_applied?'已保存':'等待完成'} · 已处理 ${task.segment_processed??task.segment_completed??0}/${task.segment_total||'?'} 段 · 有效 ${task.segment_completed||0} · 有提示 ${task.segment_warnings||0} · 待重试 ${task.segment_failed||0}；单段问题不阻止后续规划`;
+          row.append(detail);
+        }
         if(task.state==='error'){const error=document.createElement('p');error.className='text-operations-error';error.textContent='失败原因：'+(task.message||'未提供原因');row.append(error);}
         if(task.state==='needs_attention'){const attention=document.createElement('p');attention.className='text-operations-error';attention.textContent=task.message||'后台状态无法确认，请检查原网页任务后再处理。';row.append(attention);}
         if(task.apply_error){const error=document.createElement('p');error.className='text-operations-error text-operation-apply-error';error.textContent='应用失败：'+task.apply_error+'。候选结果仍保留，可查看后手动合并，或基于最新原稿重新提交。';row.append(error);}
         const actions=document.createElement('div');actions.className='text-operation-actions';
         const choices=[['result','查看结果 / 进度'],['locate','定位原入口']];
-        if(task.state==='ready')choices.push(['apply',task.kind==='metadata'?'填入素材字段':(applyLabels[task.kind]||'应用候选结果')]);
-        if(['preparing','queued','running','needs_attention'].includes(task.state))choices.push(['cancel','取消']);
+        if(task.state==='ready'&&task.kind!=='opening_continuity')choices.push(['apply',task.kind==='metadata'?'填入素材字段':(applyLabels[task.kind]||'应用候选结果')]);
+        if(['preparing','queued','running','needs_attention','waiting_children'].includes(task.state))choices.push(['cancel','取消']);
         if(task.state==='needs_attention'&&task.recovery_safe&&task.attention_reason!=='web_timeout')choices.push(['inspect','检查原网页任务']);
-        if(['error','cancelled'].includes(task.state)&&task.kind!=='revision_wait')choices.push(['retry','重新提交']);
+        if(['error','cancelled'].includes(task.state)&&task.kind!=='revision_wait')choices.push(['retry',task.batch_version===1?'继续未完成分段':task.batch_id?'重试本步骤':'重新提交']);
+        if(task.kind==='novel_segment'&&task.state==='applied')choices.push(['retry','重新生成本段']);
         if(['error','cancelled'].includes(task.state)&&task.kind==='revision_wait'){const hint=document.createElement('small');hint.textContent='请回到对应分段重新提交修正，避免重复发送旧请求。';actions.append(hint);}
-        if(['ready','applied','cancelled','error'].includes(task.state))choices.push(['delete','删除任务']);
+        if(['ready','applied','cancelled','error'].includes(task.state)&&!task.batch_id)choices.push(['delete','删除任务']);
         for(const [verb,label]of choices){const button=document.createElement('button');button.type='button';button.dataset.action=verb;button.textContent=label;button.onclick=async()=>{button.disabled=true;try{await action(task,verb);}finally{button.disabled=false;}};actions.append(button);}
         row.append(actions);fragment.append(row);
       }
@@ -447,7 +527,25 @@ PANEL_JS = r'''
     try{const body=await api('/clear',{confirm:true});message(`已清空 ${body.deleted} 条已结束任务`);signature='';const box=root().querySelector('.text-operations-result');box.hidden=true;box.open=false;await refresh();}
     catch(error){message(error.message);clearButton.disabled=false;}
   }
+  async function clearAllTasks(button,propagate=false){
+    if(button.disabled){if(propagate)throw Error('任务清空正在执行，请稍候');return;}
+    button.disabled=true;button.textContent='清空中…';
+    const modal=document.getElementById('aicf-prompt-modal'),pendingReplan=modal?._sourceReplanPending;
+    try{
+      const body=await api('/clear-all',{confirm:true});
+      if(pendingReplan && modal._sourceReplanPending===pendingReplan)delete modal._sourceReplanPending;
+      tasksCache=[];videoTasks=[];signature='';seenStates={};
+      try{localStorage.removeItem('aicf_text_job_states_v1');}catch{}
+      const box=root().querySelector('.text-operations-result');box.hidden=true;box.open=false;
+      const notice=`已清空 ${body.deleted} 条文字任务、${body.video_tasks} 条视频任务。扩展连接后自动清空等待队列；网页已发送请求可能继续生成，结果不再回填。`;
+      message(notice);toast('所有任务已清空，扩展队列正在同步释放');
+      await refreshVideos();await refresh();
+    }catch(error){message(error.message);toast('清空失败：'+error.message);if(propagate)throw error;}
+    finally{button.disabled=false;button.textContent='一键清空';}
+  }
   function bindClearButton(){
+    const all=root()?.querySelector('.text-operations-clear-all');
+    if(all&&all.dataset.bound!=='true'){all.dataset.bound='true';all.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();clearAllTasks(all);});}
     const clearButton=root()?.querySelector('.text-operations-clear');
     if(!clearButton||clearButton.dataset.bound==='true')return;
     clearButton.dataset.bound='true';
@@ -489,9 +587,20 @@ PANEL_JS = r'''
 '''
 
 PANEL_CSS = '''
-#text-operations{--ops-accent:var(--theme-accent,#2563eb);--ops-success:var(--theme-success-text,#15803d);--ops-warning:var(--theme-warning-text,#b45309);--ops-danger:var(--theme-danger-text,#b91c1c);position:fixed;right:16px;bottom:16px;z-index:1000;width:min(420px,calc(100vw - 24px));margin:0;padding:0;border:1px solid var(--theme-border-strong,var(--border,#e5e7eb));border-radius:16px;background:var(--theme-surface,#fff);color:var(--theme-text-body,var(--text-body,#374151));box-shadow:var(--theme-shadow-overlay,0 18px 44px rgba(15,23,42,.16));overflow:hidden;transition:box-shadow var(--theme-motion,170ms ease),border-color var(--theme-motion,170ms ease)}
+/* Persistent task controls sit above full-text editing (9999), previews
+   (10000), and the asset library (12000); notifications sit above controls. */
+.text-operations-queue-controls{display:flex;align-items:center;justify-content:space-between;gap:8px}.text-operations-queue-controls .text-operations-count{min-width:0;flex:1}.text-operations-clear-all{flex:none;min-height:32px;padding:4px 10px;border:1px solid var(--theme-danger-border,#fecaca);border-radius:6px;background:var(--theme-danger-soft,#fef2f2);color:var(--theme-danger,#b91c1c);cursor:pointer;font-size:11px}.text-operations-clear-all:disabled{opacity:.5;cursor:wait}.text-operations-clear-all:focus-visible{outline:2px solid var(--theme-focus,#2563eb);outline-offset:2px}
+
+.text-operations-opacity{display:flex;flex-direction:column;gap:2px;flex:none;width:106px;text-align:right;font-size:10px;color:var(--theme-text-secondary,#64748b)}
+.text-operations-opacity label{cursor:default}
+.text-operations-opacity output{font-variant-numeric:tabular-nums}
+#text-operations-opacity{width:106px;height:20px;min-height:20px;margin:0;cursor:pointer;accent-color:var(--theme-accent,#2563eb)}
+#text-operations-opacity:focus-visible{outline:2px solid var(--theme-accent,#2563eb);outline-offset:2px;border-radius:4px}
+.text-operations-summary>.text-operations-count{align-self:flex-end;max-width:100%;white-space:normal}
+
+#text-operations{--ops-accent:var(--theme-accent,#2563eb);--ops-success:var(--theme-success-text,#15803d);--ops-warning:var(--theme-warning-text,#b45309);--ops-danger:var(--theme-danger-text,#b91c1c);position:fixed;right:16px;bottom:16px;z-index:20000;width:min(420px,calc(100vw - 24px));margin:0;padding:0;border:1px solid var(--theme-border-strong,var(--border,#e5e7eb));border-radius:16px;background:var(--theme-surface,#fff);color:var(--theme-text-body,var(--text-body,#374151));box-shadow:var(--theme-shadow-overlay,0 18px 44px rgba(15,23,42,.16));overflow:hidden;transition:box-shadow var(--theme-motion,170ms ease),border-color var(--theme-motion,170ms ease)}
 #text-operations:hover{border-color:var(--theme-accent-border-strong,#93c5fd);box-shadow:0 12px 34px rgba(15,23,42,.19)}
-#text-operations>.text-operations-summary{display:block;list-style:none;cursor:pointer;padding:14px 16px 13px;user-select:none}#text-operations>.text-operations-summary::-webkit-details-marker{display:none}#text-operations>.text-operations-summary:focus-visible{outline:3px solid var(--theme-focus,rgba(37,99,235,.2));outline-offset:-3px}
+#text-operations>.text-operations-summary{display:block;list-style:none;cursor:pointer;padding:4px 12px 8px;user-select:none;position:relative}#text-operations>.text-operations-summary::-webkit-details-marker{display:none}#text-operations>.text-operations-summary:focus-visible{outline:3px solid var(--theme-focus,rgba(37,99,235,.2));outline-offset:-3px}
 .text-operations-summary-top,.text-operations-brand{display:flex;align-items:center}.text-operations-summary-top{justify-content:space-between;gap:10px}.text-operations-brand{gap:10px}.text-operations-brand>span:last-child{display:grid;gap:1px}.text-operations-brand strong{font-size:13px;color:var(--theme-text-title,#0f172a);letter-spacing:.01em}.text-operations-brand small{font-size:11px;color:var(--theme-text-secondary,#64748b);font-weight:400}.text-operations-mark{display:grid;place-items:center;width:30px;height:30px;border-radius:10px;background:var(--theme-accent-soft,#eff6ff);color:var(--ops-accent);font-size:17px}.text-operations-count{font-size:10px;line-height:1.5;color:var(--theme-text-secondary,#4b5563);background:var(--theme-surface-muted,#f1f5f9);border:1px solid var(--theme-border,#e5e7eb);padding:4px 8px;border-radius:999px;white-space:nowrap}
 .text-operations-current{display:flex;align-items:center;gap:8px;margin-top:12px;min-width:0;font-size:12px}.text-operations-current-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--theme-success,#22c55e);box-shadow:0 0 0 3px var(--theme-success-soft,#f0fdf4)}.text-operations-current-dot.is-idle{background:var(--theme-text-disabled,#cbd5e1);box-shadow:0 0 0 3px var(--theme-surface-muted,#f1f5f9)}.text-operations-current-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;color:var(--theme-text-card,#1f2937)}.text-operations-current-percent{font-size:11px;font-weight:700;color:var(--ops-accent);font-variant-numeric:tabular-nums}.text-operations-current-progress{display:block;width:100%;height:5px;margin:8px 0 9px;border:0;border-radius:999px;overflow:hidden;accent-color:var(--ops-accent)}.text-operations-current-progress::-webkit-progress-bar{background:var(--theme-surface-muted,#f1f5f9);border-radius:999px}.text-operations-current-progress::-webkit-progress-value{background:var(--ops-accent);border-radius:999px;transition:width .25s ease}.text-operations-stats{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.text-operations-stats span{font-size:9px;white-space:nowrap;padding:3px 6px;border:1px solid var(--theme-border,#e5e7eb);border-radius:999px;color:var(--theme-text-secondary,#64748b);background:var(--theme-surface-subtle,#f9fafb)}.text-operations-stats b{color:var(--theme-text-title,#0f172a);margin-left:2px}.text-operations-stats [data-count=running] b{color:var(--ops-accent)}.text-operations-stats [data-count=ready] b,.text-operations-stats [data-count=applied] b{color:var(--ops-success)}.text-operations-stats [data-count=error] b{color:var(--ops-danger)}
 #text-operations[open]{max-height:min(78vh,800px)}#text-operations[open]>.text-operations-summary{border-bottom:1px solid var(--theme-border,#e5e7eb);background:var(--theme-surface-subtle,#f9fafb)}.text-operations-body{display:flex;flex-direction:column;max-height:calc(min(78vh,800px) - 112px);padding:0 14px 12px}.text-operations-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 2px 8px}.text-operations-toolbar strong{font-size:13px;color:var(--theme-text-title,#0f172a)}.text-operations-toolbar p{margin:2px 0 0;font-size:11px;color:var(--theme-text-secondary,#64748b)}.text-operations-live{font-size:10px;color:var(--ops-success);background:var(--theme-success-soft,#f0fdf4);padding:4px 7px;border-radius:999px;white-space:nowrap}.text-operations-message:empty{display:none}.text-operations-message{font-size:12px;padding:8px 10px;margin:4px 0;border-radius:8px;background:var(--theme-accent-soft,#eff6ff);color:var(--theme-text-body,#374151)}
@@ -501,7 +610,7 @@ PANEL_CSS = '''
 .text-operation-row{opacity:1;transform:translateY(0);transition:opacity 420ms ease,transform 420ms ease}.text-operation-row.is-expiring{opacity:0;transform:translateY(6px);pointer-events:none}.text-operation-apply-error{padding:8px 9px;border:1px solid var(--theme-danger-border,#fecaca);border-radius:8px;background:var(--theme-danger-soft,#fef2f2)}
 @media(max-width:480px){#text-operations{right:8px;bottom:8px;width:calc(100vw - 16px);border-radius:13px}.text-operations-count{font-size:9px;padding:3px 6px}.text-operations-stats{gap:4px}.text-operations-stats span{padding:3px 5px;font-size:9px}.text-operations-body{padding-right:10px;padding-left:10px}}
 @media(prefers-reduced-motion:reduce){.text-operation-row,.text-operation-filters button{transition:none}}
-#text-operations-toast{position:fixed;top:14px;right:16px;z-index:1200;width:min(420px,calc(100vw - 28px));box-sizing:border-box;padding:12px 15px;border:1px solid var(--theme-accent-border-strong,#93c5fd);border-radius:12px;background:var(--theme-surface,#fff);color:var(--theme-text-title,#0f172a);box-shadow:var(--theme-shadow-overlay,0 12px 30px rgba(15,23,42,.18));font-size:14px;line-height:1.5}
+#text-operations-toast{position:fixed;top:14px;left:50%;right:auto;transform:translateX(-50%);pointer-events:none;overflow-wrap:anywhere;z-index:20010;width:min(420px,calc(100vw - 28px));box-sizing:border-box;padding:12px 15px;border:1px solid var(--theme-accent-border-strong,#93c5fd);border-radius:12px;background:var(--theme-surface,#fff);color:var(--theme-text-title,#0f172a);box-shadow:var(--theme-shadow-overlay,0 12px 30px rgba(15,23,42,.18));font-size:14px;line-height:1.5}
 .text-operation-preview{max-height:34vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:10px;border:1px solid var(--theme-border,#e5e7eb);border-radius:8px;background:var(--theme-surface-subtle,#f9fafb);font-size:12px;line-height:1.55}
 .text-operation-target{outline:3px solid var(--theme-accent,#2563eb)!important;outline-offset:2px;border-radius:12px}
 .text-operation-entry-state{display:block;width:max-content;max-width:100%;box-sizing:border-box;margin-top:4px;padding:3px 7px;border:1px solid var(--theme-border,#cbd5e1);border-radius:999px;background:var(--theme-surface,#fff);color:var(--theme-text-secondary,#475569);font-size:10px;line-height:1.35;white-space:normal;overflow-wrap:anywhere;pointer-events:none}

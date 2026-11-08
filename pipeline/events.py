@@ -56,11 +56,23 @@ def _normalise_dialogue_units(
     values: Any,
     registered_roles: set[str],
     visible_roles: set[str],
+    *, h3: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     units: list[dict[str, Any]] = []
     offscreen_speakers: list[str] = []
     for value in values or []:
         if not isinstance(value, dict):
+            continue
+        if h3:
+            from generation.pipelines.minimax_h3.contracts import normalize_h3_scope
+            speaker = _text(value.get('speaker') or value.get('speaker_name'))
+            line = _text(value.get('line') or value.get('text'))
+            if not speaker or not line:
+                continue
+            scope = normalize_h3_scope(value.get('scope') or value.get('speech_type'))
+            units.append({**deepcopy(value), 'speaker': speaker, 'line': line, 'scope': scope})
+            if scope not in {'onscreen', 'diegetic'}:
+                offscreen_speakers.append(speaker)
             continue
         speaker = _text(value.get("speaker_name") or value.get("speaker"))
         line = _text(value.get("line") or value.get("text"))
@@ -134,6 +146,7 @@ def ensure_event_fields_on_beats(beats_data: dict[str, Any] | None) -> dict[str,
 
     model_rules = rules_for_beats_data(data)
     reference_role_limit = model_rules.max_reference_roles
+    is_h3 = model_rules.model_id == 'minimax_h3_local_ref2va'
     beats = data.get("beats") if isinstance(data.get("beats"), list) else []
     normalised: list[dict[str, Any]] = []
 
@@ -146,6 +159,11 @@ def ensure_event_fields_on_beats(beats_data: dict[str, Any] | None) -> dict[str,
         item["node_id"] = _text(item.get("node_id")) or f"beat_{item['id']:03d}"
 
         important_roles = _unique_text(item.get("important_roles"))
+        if is_h3:
+            important_roles = _unique_text(important_roles + _unique_text(item.get('visible_roles'))
+                + _unique_text(item.get('reference_roles')) + _unique_text(item.get('offscreen_speakers'))
+                + [_text(u.get('speaker') or u.get('speaker_name')) for u in item.get('dialogue_units') or []
+                   if isinstance(u, dict)])
         registered_roles = set(important_roles)
         if "visible_roles" in item:
             visible_source = item.get("visible_roles")
@@ -155,7 +173,7 @@ def ensure_event_fields_on_beats(beats_data: dict[str, Any] | None) -> dict[str,
             visible_source = important_roles
         visible_roles = _subset(visible_source, registered_roles)
         reference_source = item.get("reference_roles") if "reference_roles" in item else visible_roles
-        reference_roles = _subset(reference_source, set(visible_roles))
+        reference_roles = _subset(reference_source, registered_roles if is_h3 else set(visible_roles))
         mentioned_roles = _subset(item.get("mentioned_roles"), registered_roles)
         declared_offscreen = _subset(item.get("offscreen_speakers"), registered_roles)
 
@@ -163,13 +181,21 @@ def ensure_event_fields_on_beats(beats_data: dict[str, Any] | None) -> dict[str,
             item.get("dialogue_units"),
             registered_roles,
             set(visible_roles),
+            h3=is_h3,
         )
+        if item.get('dialogue_authoritative') and not is_h3:
+            # Shot edits already resolve ownership against the selected assets.
+            # Do not infer it again from display names or discard stable IDs.
+            dialogue_units = deepcopy(item.get('dialogue_units') or [])
+            dialogue_offscreen = [str(u.get('speaker') or u.get('speaker_name')) for u in dialogue_units
+                                  if u.get('scope') in ('offscreen', 'telephone', 'narration')]
         offscreen_speakers = _unique_text(declared_offscreen + dialogue_offscreen)
         action_units = _normalise_action_units(item.get("action_units"), registered_roles, set(visible_roles))
 
         # Target roles and offscreen speakers are not visible by default.
-        visible_roles = [role for role in visible_roles if role not in offscreen_speakers]
-        reference_roles = [role for role in reference_roles if role in visible_roles and role not in offscreen_speakers]
+        if not is_h3:
+            visible_roles = [role for role in visible_roles if role not in offscreen_speakers]
+            reference_roles = [role for role in reference_roles if role in visible_roles and role not in offscreen_speakers]
         for role in important_roles:
             if role not in visible_roles and role not in offscreen_speakers and role not in mentioned_roles:
                 mentioned_roles.append(role)

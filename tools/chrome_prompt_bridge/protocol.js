@@ -8,6 +8,7 @@
       const host = parsed.hostname.toLowerCase();
       if (host === 'chatgpt.com') return 'ChatGPT';
       if (host === 'chat.deepseek.com') return 'DeepSeek';
+      if (host === 'www.qianwen.com') return '千问';
       if (host === 'doubao.com' || host.endsWith('.doubao.com')) return '豆包';
       return null;
     } catch { return null; }
@@ -39,6 +40,28 @@
     if(from<0)return '';
     const to=text.indexOf(end,from+start.length);
     return to<0?'':text.slice(from,to+end.length);
+  }
+  // Evidence comparisons must survive DOM block boundaries, wrapping and
+  // zero-width layout characters. Never use this form to parse result JSON.
+  function evidenceText(value) {
+    return String(value || '').replace(/[\s\u200B-\u200D\uFEFF]+/gu, '');
+  }
+  function correlatedJsonEnvelope(text, id, kind, envelopeId = id) {
+    let source=String(text || '').trim();
+    // A complete assistant reply may omit START while retaining END. Strip
+    // only this exact task's final marker; JSON and request_id stay mandatory.
+    const expectedEnd=markers(envelopeId).end;
+    if(source.endsWith(expectedEnd))source=source.slice(0,-expectedEnd.length).trim();
+    const body=source.replace(/^```(?:json)?\s*\n?/i, '').replace(/\s*```$/, '').trim();
+    if (!body.startsWith('{') || !body.endsWith('}')) return '';
+    try {
+      const value=JSON.parse(body);
+      if (value.request_id!==id) return '';
+      const {start,end}=markers(envelopeId);
+      const envelope=`${start}\n${body}\n${end}`;
+      parseResult(envelope,id,kind,envelopeId);
+      return envelope;
+    } catch { return ''; }
   }
   function parseResult(text, id, kind = "revision", envelopeId = id) {
     const { start, end } = markers(envelopeId);
@@ -89,6 +112,7 @@
         previous.chars + task.request.length < (config.maxChars || 30000)) return { fresh: false, key };
     return { fresh: true, key };
   }
-  root.PromptBridge = { provider, markers, buildRequest, resultEnvelope, parseResult, buildJsonRepairRequest, conversationPlan };
+  root.PromptBridge = { provider, markers, buildRequest, resultEnvelope, evidenceText, correlatedJsonEnvelope,
+    parseResult, buildJsonRepairRequest, conversationPlan };
   if (typeof module !== "undefined") module.exports = root.PromptBridge;
 })(globalThis);

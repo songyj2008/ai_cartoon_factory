@@ -113,6 +113,7 @@ def test_channel_options_route_reports_web_capability(tmp_path, monkeypatch):
     web_video_routes.register_web_video_routes(app)
     response = TestClient(app).get("/api/video-channels/segments/1")
     assert response.status_code == 200
+    assert response.json()['selected'] == 'runninghub'
     doubao = next(item for item in response.json()["channels"] if item["id"] == "doubao_web")
     assert doubao["available"] is True
     assert doubao["uses_workflow"] is False

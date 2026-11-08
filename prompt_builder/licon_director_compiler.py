@@ -7,6 +7,11 @@ from typing import Any
 
 def compile_ir_to_llm_prompt(prompt_ir: dict[str, Any]) -> str:
     """Compile PromptIR into the current task payload for the LiconMSR prompt LLM."""
+    from services.llm_payloads import prompt_ir_context, INPUT_REFERENCE_RULE
+    wire_ir = prompt_ir_context(prompt_ir)
+    if len(json.dumps(prompt_ir, ensure_ascii=False, indent=2)) - len(json.dumps(wire_ir, ensure_ascii=False, indent=2)) <= len(INPUT_REFERENCE_RULE) + 4:
+        wire_ir = prompt_ir
+    reference_rules = INPUT_REFERENCE_RULE if wire_ir != prompt_ir else ''
     return f"""
 [Current Task]
 把下面的 PromptIR 编译成适合 LTX2.3 / LiconMSR 的导演分镜正文。
@@ -36,6 +41,8 @@ def compile_ir_to_llm_prompt(prompt_ir: dict[str, Any]) -> str:
 不要输出“必须、不得、不允许、保持闭口、不要说话、动嘴、只有某人说话、没有其他人物进入、没有重复人物”等编程式控制句。
 不要把对白单独写成一整行引号；要把对白嵌入说话角色的自然动作和语气中。
 
+{reference_rules}
+
 [PromptIR]
-{json.dumps(prompt_ir, ensure_ascii=False, indent=2)}
+{json.dumps(wire_ir, ensure_ascii=False, indent=2)}
 """.strip()

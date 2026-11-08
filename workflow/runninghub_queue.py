@@ -31,5 +31,24 @@ def active_task_count(segments: list[Mapping[str, Any]]) -> int:
     )
 
 
+def has_active_submission(segment: Mapping[str, Any]) -> bool:
+    """Check accepted tasks even when edits have changed the card status."""
+    active = {"submitted", "running", "pending", "queued", "executing", "processing"}
+    if str(segment.get("status") or "").lower() in active and (
+        segment.get("task_id") or segment.get("prompt_id")
+    ):
+        return True
+    for render in segment.get("renders") or []:
+        submission = render.get("submission") or {}
+        if str(render.get("status") or "").lower() in active and (
+            submission.get("task_id") or submission.get("prompt_id")
+        ):
+            return True
+    for attempt in segment.get("runninghub_attempts") or []:
+        if str(attempt.get("status") or "").lower() in active and attempt.get("task_id"):
+            return True
+    return False
+
+
 def is_queue_full_error(error: Exception | str) -> bool:
     return "TASK_QUEUE_MAXED" in str(error).upper()

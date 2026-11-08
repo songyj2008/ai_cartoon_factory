@@ -81,7 +81,7 @@ def test_saving_h3_config_preserves_the_active_submission(monkeypatch):
     monkeypatch.setattr(video_merge, "save_video_jobs", lambda value: saved.setdefault("payload", value))
     monkeypatch.setattr("generation.service.normalize_video_jobs_payload", lambda value: value)
 
-    service = object.__new__(GenerationService)
+    service = GenerationService()
     result = service.update_segment_generation_config(1, prompt_override="new prompt")
     segment = result["segments"][0]
 

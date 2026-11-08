@@ -236,3 +236,23 @@ def test_generation_persists_topic_even_if_model_fails(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="model timeout"):
         project_handlers.generate_story_with_duration(" new topic ", "60", None)
     assert project_handlers._runtime_topic_value() == "new topic"
+
+
+def test_novel_beats_failure_keeps_existing_beats_and_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr(project_handlers, 'get_project_dir', lambda: tmp_path)
+    monkeypatch.setattr(project_handlers, 'assert_current_runtime_writable', lambda *_: None)
+    monkeypatch.setattr(project_handlers, 'ensure_project_dirs', lambda: None)
+    monkeypatch.setattr(project_handlers, '_save_duration_state', lambda *_: 120)
+    monkeypatch.setattr(project_handlers, 'update_ui_run_config', lambda **_: None)
+    monkeypatch.setattr(project_handlers, 'current_default_video_model', lambda: 'minimax_h3_local_ref2va')
+    def fail(*_):
+        raise ValueError('model failed')
+    monkeypatch.setattr(project_handlers, 'generate_novel_beats', fail)
+    saved = {'beats.json': '{"beats":[{"plot":"old plot"}]}',
+             'video_jobs.json': '{"segments":[{"job":{"prompt":"old prompt"}}]}'}
+    for name, text in saved.items():
+        (tmp_path / name).write_text(text, encoding='utf-8')
+    with pytest.raises(ValueError, match='model failed'):
+        project_handlers.generate_novel_segments_with_duration('new novel', '120s', 120, 10)
+    for name, text in saved.items():
+        assert (tmp_path / name).read_text(encoding='utf-8') == text

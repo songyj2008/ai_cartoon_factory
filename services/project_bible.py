@@ -144,14 +144,16 @@ def ensure_project_bible(topic="", asset_index=None):
     return bible
 
 
-def project_bible_prompt(bible):
-    bible = bible or {}
+def project_bible_prompt(bible, *, allow_text_scenes=False):
+    from services.llm_payloads import project_bible_context
+    bible = project_bible_context(bible)
     return (
         "PROJECT_BIBLE_JSON:\n"
         + json.dumps(bible, ensure_ascii=False, indent=2)
         + "\nRules: Use only character ids from core_characters/supporting_characters. "
-        "Use only background ids from allowed_backgrounds. Anonymous extras are allowed only by extras_policy. "
-        "Do not invent named main characters or new primary scenes."
+        + ("Reuse allowed_backgrounds only when they match. Other story locations may be described in text for the video model to create, without background reference images. "
+           if allow_text_scenes else "Use only background ids from allowed_backgrounds. Do not invent new primary scenes. ")
+        + "Anonymous extras are allowed only by extras_policy. Do not invent named main characters."
     )
 
 
@@ -167,30 +169,31 @@ def background_by_id(bible):
     return {str(item.get("id")): item for item in ((bible or {}).get("allowed_backgrounds") or []) if item.get("id")}
 
 
+class ProjectBindingError(ValueError):
+    @property
+    def feedback(self):
+        return {"code": "INVALID_BINDING", "message": str(self), "expected": "已登记且完整的镜头绑定", "actual": str(self)}
+
+
+def resolve_project_reference(value, entries, *, location):
+    text = str(value or "").strip()
+    exact = [e for e in entries if str(e.get("id")) == text]
+    if exact:
+        return text
+    matches = {str(e["id"]) for e in entries if text and text in
+               [str(e.get("display_name") or ""), str(e.get("asset_identity_id") or ""),
+                str(e.get("asset_background_id") or ""), *map(str, e.get("aliases") or [])]}
+    if len(matches) != 1:
+        raise ProjectBindingError(f"{location}: {'名称有歧义' if matches else '未登记名称'}「{text}」")
+    return next(iter(matches))
+
+
 def normalize_character_id(name, bible):
-    text = str(name or "").strip()
-    if not text:
-        return ""
-    for item in character_entries(bible):
-        if text == str(item.get("id")):
-            return str(item.get("id"))
-        aliases = set(_as_list(item.get("aliases")) + [str(item.get("display_name") or ""), str(item.get("asset_identity_id") or "")])
-        if text in aliases:
-            return str(item.get("id"))
-    return ""
+    return resolve_project_reference(name, character_entries(bible), location="人物") if str(name or "").strip() else ""
 
 
 def normalize_background_id(name, bible):
-    text = str(name or "").strip()
-    if not text:
-        return ""
-    for item in (bible or {}).get("allowed_backgrounds") or []:
-        if text == str(item.get("id")):
-            return str(item.get("id"))
-        aliases = set(_as_list(item.get("aliases")) + [str(item.get("display_name") or ""), str(item.get("asset_background_id") or "")])
-        if text in aliases:
-            return str(item.get("id"))
-    return ""
+    return resolve_project_reference(name, (bible or {}).get("allowed_backgrounds", []), location="场景") if str(name or "").strip() else ""
 
 
 def default_character_ids(bible):

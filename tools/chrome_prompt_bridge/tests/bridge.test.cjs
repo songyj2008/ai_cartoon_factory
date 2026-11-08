@@ -5,12 +5,16 @@ const path = require('node:path');
 const vm = require('node:vm');
 const P = require('../protocol.js');
 const TextProviderPolicy=require('../text_provider_policy.js');
+const QianwenPage=require('../qianwen.js');
 
 test('only exact supported HTTPS hosts are accepted', () => {
   assert.equal(P.provider('https://chatgpt.com/c/example'), 'ChatGPT');
   assert.equal(P.provider('https://chat.deepseek.com/'), 'DeepSeek');
   assert.equal(P.provider('https://www.doubao.com/chat'), '豆包');
   assert.equal(P.provider('https://doubao.com/chat'), '豆包');
+  assert.equal(P.provider('https://www.qianwen.com/'), '千问');
+  assert.equal(P.provider('https://www.qianwen.com.evil.test/'), null);
+  assert.equal(P.provider('http://www.qianwen.com/'), null);
   for (const url of ['http://chatgpt.com/', 'https://chatgpt.com.evil.org', 'https://evil.org/?chatgpt.com', 'invalid']) assert.equal(P.provider(url), null);
 });
 
@@ -42,7 +46,7 @@ function page(initial = '', options = {}) {
   const notifications = [];
   let pageReads = 0;
   let listener, state = {}, now = Date.now(), clicks = 0, newChats = 0, sentText = '';
-  const location = {href: options.url || (options.doubao ? 'https://www.doubao.com/chat' : options.deepseek ? 'https://chat.deepseek.com/' : 'https://chatgpt.com/')};
+  const location = {href: options.url || (options.qianwen ? 'https://www.qianwen.com/' : options.doubao ? 'https://www.doubao.com/chat' : options.deepseek ? 'https://chat.deepseek.com/' : 'https://chatgpt.com/')};
   const timers = new Map(); let timerId = 0;
   let mutation = null;
   class Input {
@@ -79,8 +83,13 @@ function page(initial = '', options = {}) {
   renameLink.parentElement=renameRow;
   const button = { getClientRects: () => [1], getAttribute: k => k === 'data-testid' ? (options.doubaoIconSend ? null : 'send-button') : k === 'class' && options.doubaoIconSend ? 'send-control' : null, click: () => { clicks++; if (options.accept !== false) {sentText = editor.value; editor.value = ''; if(options.conversationAfterSend) location.href=options.conversationAfterSend;} }, innerText: '', getBoundingClientRect:()=>({left:900,top:840,right:940,bottom:880,width:40,height:40}) };
   let replies = [], hitTargets = [], continueClicks = 0;
+  if(options.navigationSendButton)button.innerText='新聊天';
+  let generating=false;
+  const stopControl={getClientRects:()=>[1],getAttribute:key=>key==='aria-label'?'停止回答':null,innerText:''};
+  const testPolicies=options.disabledQianwen ? {...TextProviderPolicy,
+    fromName:name=>{const value=TextProviderPolicy.fromName(name);return value ? {...value,available:name==='千问' ? false : value.available} : null;}} : TextProviderPolicy;
   const context = {
-    PromptBridge: P,TextProviderPolicy, URL, location, innerWidth: 1440, innerHeight: 900, window:{},
+    PromptBridge: P,TextProviderPolicy:testPolicies,QianwenPage, URL, location, innerWidth: 1440, innerHeight: 900, window:{},
     MouseEvent: class {constructor(type, options) {this.type=type; Object.assign(this,options);}},
     PointerEvent: class {constructor(type, options) {this.type=type; Object.assign(this,options);}},
     KeyboardEvent: class {constructor(type) {this.type = type;}},
@@ -96,6 +105,14 @@ function page(initial = '', options = {}) {
       return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
     }) || null, body: {get innerText() { return editor.value + sentText + replies.map(r=>r.innerText).join(''); }, cloneNode() { return {querySelectorAll:()=>[], get textContent() { return sentText + replies.map(r=>r.innerText).join(''); }}; }}, querySelectorAll: selector => {
       pageReads++;
+      if(selector==='button[data-session-switch-target="send-query"]' && options.qianwenExactSend)
+        return options.duplicateQianwenSend ? [button,{...button}] : [button];
+      if(options.qianwen && selector.includes('data-message-role="user"')) {
+        if(selector.includes('assistant'))return sentText || replies.length ? [{getClientRects:()=>[1]}] : [];
+        return sentText ? [{getClientRects:()=>[1],innerText:sentText,closest:()=>null}] : [];
+      }
+      if(options.qianwen && selector.includes('data-message-role="assistant"'))return replies.map(reply=>({
+        ...reply,cloneNode:()=>({textContent:reply.innerText,querySelectorAll:()=>[]})}));
       if(options.renameChat && selector==='a[href], [data-conversation-id], [data-chat-id]') return [renameLink];
       if(options.headerRename && selector==='a[href], [data-conversation-id], [data-chat-id]') return [];
       if((options.renameChat || options.headerRename) && selector==='[role="menuitem"],button,span,div') return renameMenuOpen?[renameAction]:[];
@@ -110,7 +127,7 @@ function page(initial = '', options = {}) {
           getBoundingClientRect: () => ({left:8,top:100,right:200,bottom:145}), contains: () => false,
           getAttribute: key => key === 'href' ? '/' : null,
           closest: selector => selector === 'a[href],button,[role="button"]' ? control : selector === 'nav,aside,[role="navigation"]' ? nav : null,
-          click: () => {newChats++; location.href = 'https://chatgpt.com/'; replies = [];}
+          click: () => {newChats++; if (!options.stalledNewChat) {location.href = 'https://chatgpt.com/'; replies = [];}}
         };
         const child = () => ({...control, closest: () => control});
         const plainText = {...control, closest: () => null};
@@ -158,12 +175,13 @@ function page(initial = '', options = {}) {
         return [textAction(120),textAction(470,true),
           {innerText:'',getClientRects:()=>[1],getBoundingClientRect:()=>({left:370,top:70,right:420,bottom:110}),getAttribute:key=>key==='aria-label'?'新对话':null,contains:()=>false,closest:()=>null,click:()=>{throw new Error('Toolbar icon is not the sidebar action');}}];
       }
+      if (options.hideEditorAfterSend && clicks && /prompt-textarea|contenteditable|textarea/.test(selector)) return [];
       if (selector === '#prompt-textarea') return options.modernEditor ? [] : [editor];
       if (selector === '[contenteditable="true"][role="textbox"],[contenteditable="true"][data-lexical-editor="true"],[contenteditable="true"].ProseMirror') return options.modernEditor ? (options.ambiguous ? [editor, new Input()] : [editor]) : [];
       if (selector === 'textarea[placeholder]') return [editor];
       if (selector === 'textarea') return options.doubao ? [editor] : [];
       if (options.doubaoIconSend && selector.includes('[data-testid*="send"')) return [button];
-      if (selector === 'button,[role="button"]') return options.deepseek || options.noButton ? [] : [button];
+      if (selector === 'button,[role="button"]') return options.deepseek || options.noButton ? [] : [...(generating?[stopControl]:[]),button];
       if (selector === '[data-message-author-role="assistant"]') return options.markdownOnly || options.noReplyClasses ? [] : replies;
       if (selector === '.ds-markdown' || (options.doubao && /data-testid.*message|message-content/.test(selector))) return replies;
       if (selector === '.markdown,.prose,[data-message-author-role="assistant"],[data-testid="conversation-turn"]') return options.noReplyClasses ? [] : replies;
@@ -187,6 +205,7 @@ function page(initial = '', options = {}) {
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../content.js'), 'utf8'), context);
   return {
+    setGenerating:value=>{generating=value;},
     editor, notifications, get continueClicks(){return continueClicks;}, get pageReads(){return pageReads;}, get now() {return now;},
     saveTask: value => {state[value.bridge ? `bridgeTask:${value.id}` : 'task']=value;},
     get newChats() {return newChats;}, get clicks() { return clicks; },
@@ -222,10 +241,218 @@ function page(initial = '', options = {}) {
       }
       now=target;
     }, navigate: url => { location.href=url; sentText=''; replies=[]; },
-    settleRoute: url => { location.href=url; }
+    settleRoute: url => { location.href=url; },
+    renderedRequest: text => { sentText=text; }
   };
 }
 const task = id => ({ id, request: P.buildRequest({ prompt: '原文', issue: '问题' }, id), settings: {}, created_at: new Date().toISOString() });
+
+test('explicitly disabled Qianwen never writes or sends a request',async()=>{
+ const p=page('',{qianwen:true,disabledQianwen:true});
+ const result=await p.message('AICF_SEND',task('q-disabled'));
+ assert.equal(result.ok,false);
+ assert.match(result.error,/待网页核验/);
+ assert.equal(p.clicks,0);
+ assert.equal(p.editor.value,'');
+});
+
+test('oversized Qianwen requests stop before filling, clicking or changing an existing draft',async()=>{
+ const p=page('existing draft',{qianwen:true});
+ const rejected=await p.message('AICF_SEND',{...task('q-too-long'),request:'字'.repeat(13248),bridge:{lease:'test'}});
+ assert.equal(rejected.ok,false);assert.match(rejected.error,/PROVIDER_INPUT_LIMIT:.*13248/);
+ assert.equal(p.editor.value,'existing draft');assert.equal(p.clicks,0);
+});
+
+test('Qianwen binds a submitted request and collects only a finished correlated answer',async()=>{
+ const p=page('',{qianwen:true,conversationAfterSend:'https://www.qianwen.com/example-session?key=one'});
+ const t={...task('q-finished'),bridge:{lease:'test'},force_new_conversation:true};
+ await p.message('AICF_SEND',t);
+ assert.equal(p.clicks,1);
+ assert.equal(p.task.conversation_id,'/example-session?key=one');
+ p.setGenerating(true);p.reply(answer(t.id));
+ await p.tick(500);await p.message('AICF_READ',p.task);
+ assert.notEqual(p.task.status,'complete');
+ p.setGenerating(false);await p.message('AICF_READ',p.task);await p.tick(500);
+ await p.message('AICF_READ',p.task);
+ assert.equal(p.task.status,'complete');
+ assert.equal(p.task.result.revised_prompt,'新提示词');
+ assert.equal(p.clicks,1);
+});
+
+test('Qianwen uses its verified send-query control and rejects duplicate matches',async()=>{
+ const p=page('',{qianwen:true,qianwenExactSend:true,noButton:true});
+ const result=await p.message('AICF_SEND',{...task('q-exact-send'),bridge:{lease:'test'},force_new_conversation:true});
+ assert.equal(result.ok,true);assert.equal(p.clicks,1);
+ const duplicate=page('',{qianwen:true,qianwenExactSend:true,duplicateQianwenSend:true});
+ const rejected=await duplicate.message('AICF_SEND',{...task('q-duplicate-send'),bridge:{lease:'test'},force_new_conversation:true});
+ assert.equal(rejected.ok,false);assert.match(rejected.error,/多个发送按钮/);assert.equal(duplicate.clicks,0);
+});
+
+test('Qianwen uncertain sends and changed conversations never resend or accept foreign answers',async()=>{
+ const p=page('',{qianwen:true,accept:false});
+ await p.message('AICF_SEND',{...task('q-uncertain'),bridge:{lease:'test'},force_new_conversation:true});
+ await p.message('AICF_READ',p.task);await p.tick(11000);
+ await p.message('AICF_RESUME',p.task);
+ assert.equal(p.clicks,1);
+ assert.notEqual(p.task.status,'complete');
+ const bound=page('',{qianwen:true,conversationAfterSend:'https://www.qianwen.com/session-one'});
+ await bound.message('AICF_SEND',{...task('q-bound'),bridge:{lease:'test'},force_new_conversation:true});
+ bound.navigate('https://www.qianwen.com/session-two');bound.reply(answer('q-bound'));
+ await bound.message('AICF_READ',bound.task);await bound.tick(500);
+ assert.notEqual(bound.task.status,'complete');
+ assert.equal(bound.task.conversation_url,'https://www.qianwen.com/session-one');
+ assert.equal(bound.clicks,1);
+});
+
+test('Qianwen supports a delayed route assignment without binding homepage or submitting twice',async()=>{
+ const p=page('',{qianwen:true});
+ await p.message('AICF_SEND',{...task('q-delayed'),bridge:{lease:'test'},force_new_conversation:true});
+ assert.equal(p.task.conversation_url,undefined);
+ p.settleRoute('https://www.qianwen.com/?opaque-session=one');
+ await p.message('AICF_READ',p.task);
+ assert.equal(p.task.conversation_id,'/?opaque-session=one');
+ assert.equal(p.clicks,1);
+});
+
+test('Qianwen completed homepage answers retain an exact URL for task-scoped tab cleanup',async()=>{
+ const p=page('',{qianwen:true});
+ await p.message('AICF_SEND',{...task('q-home'),bridge:{lease:'test'},force_new_conversation:true});
+ p.reply(answer('q-home'));await p.message('AICF_READ',p.task);await p.tick(500);
+ await p.message('AICF_READ',p.task);
+ assert.equal(p.task.status,'complete');
+ assert.equal(p.task.conversation_url,'https://www.qianwen.com/');
+ assert.equal(p.clicks,1);
+});
+
+test('Qianwen rejects an existing conversation, user draft, or unverified video attachment',async()=>{
+ for(const options of [{url:'https://www.qianwen.com/existing'},{}]) {
+   const p=page(options.url?'':'user draft',{qianwen:true,...options});
+   const result=await p.message('AICF_SEND',{...task('q-protect'),bridge:{lease:'test'},force_new_conversation:true});
+   assert.equal(result.ok,false);assert.equal(p.clicks,0);
+ }
+ const p=page('',{qianwen:true});
+ const result=await p.message('AICF_SEND',{...task('q-video'),attachments:[{id:'video'}],bridge:{lease:'test'},force_new_conversation:true});
+ assert.equal(result.ok,false);assert.match(result.error,/MEDIA_ATTACHMENT_UNSUPPORTED/);assert.equal(p.clicks,0);
+});
+
+test('both providers follow a settled route when DOM block boundaries remove request whitespace', async () => {
+ for (const deepseek of [false,true]) {
+  const origin=deepseek?'https://chat.deepseek.com/a/chat/s/':'https://chatgpt.com/c/';
+  const p=page('',{deepseek,conversationAfterSend:origin+'provisional'});
+  const t={...task('dom-block-boundaries'),force_new_conversation:true};
+  await p.message('AICF_SEND',t);
+  p.renderedRequest(t.request.replace(/\s+/g,''));
+  p.settleRoute(origin+'final');
+  p.reply(answer(t.id));await p.tick(5000);
+  assert.equal(p.task.status,'complete');
+  assert.equal(p.task.conversation_id,'final');
+  assert.equal(p.clicks,1);
+ }
+});
+
+test('both providers read a late initial route with a virtualized request without resending', async () => {
+ for (const deepseek of [false,true]) {
+  const home=deepseek?'https://chat.deepseek.com/':'https://chatgpt.com/';
+  const origin=deepseek?home+'a/chat/s/':home+'c/';
+  const p=page('',{deepseek,url:origin+'late-created'});
+  const t={...task('late-home-binding'),status:'waiting',force_new_conversation:true,
+   sent_at:new Date(p.now).toISOString(),dispatch_attempted_at:p.now,
+   dispatch_count:1,dispatch_url:home,conversation_url:home,conversation_id:''};
+  p.saveTask(t);await p.message('AICF_READ',t);
+  p.reply(answer(t.id));await p.tick(5000);
+  assert.equal(p.task.status,'complete');assert.equal(p.clicks,0);
+  assert.equal(p.task.conversation_id,'late-created');
+ }
+});
+
+test('both providers recover an assistant JSON answer with the exact request id but missing wrapper', async () => {
+ for (const deepseek of [false,true]) {
+  const p=page('',{deepseek});const t={...task('missing-wrapper'),kind:'json'};
+  await p.message('AICF_SEND',t);
+  p.reply('```json\n'+JSON.stringify({request_id:t.id,data:{beats:[{id:'beat-1'}]}})+'\n```');
+  await p.tick(5000);
+  assert.equal(p.task.status,'complete');assert.equal(p.task.result.data.beats[0].id,'beat-1');
+  assert.equal(p.clicks,1);
+ }
+});
+
+test('missing-wrapper recovery rejects uncorrelated, partial and echoed request examples', async () => {
+ for (const deepseek of [false,true]) {
+  for (const variant of ['wrong','missing','partial','echo']) {
+   const p=page('',{deepseek});const t={...task('wrapper-guard'),kind:'json'};
+   await p.message('AICF_SEND',t);
+   const reply=variant==='echo'?t.request:variant==='partial'?'{"request_id":"wrapper-guard","data":':
+    JSON.stringify({...(variant==='wrong'?{request_id:'another-task'}:{}),data:{beats:[]}});
+   p.reply(reply);await p.tick(5000);
+   assert.equal(p.task.status,'waiting');assert.equal(p.task.result,undefined);assert.equal(p.clicks,1);
+  }
+ }
+});
+
+test('both providers recover missing START with exact END without resending', async () => {
+ for (const deepseek of [false,true]) {
+  const p=page('',{deepseek});const t={...task('end-only'),kind:'json'};
+  await p.message('AICF_SEND',t);
+  p.reply(JSON.stringify({request_id:t.id,data:{shots:[]}})+'\n'+P.markers(t.id).end);
+  await p.tick(5000);
+  assert.equal(p.task.status,'complete');assert.deepEqual(p.task.result.data.shots,[]);
+  assert.equal(p.clicks,1);
+ }
+});
+
+test('END-only recovery rejects wrong IDs, extra text and incomplete JSON', () => {
+ const id='end-guard',raw=JSON.stringify({request_id:id,data:{shots:[]}}),end=P.markers(id).end;
+ for(const reply of [raw+'\n'+P.markers('other').end,
+  JSON.stringify({request_id:'other',data:{shots:[]}})+'\n'+end,
+  raw+'\n'+end+'\n额外文字','说明\n'+raw+'\n'+end,
+  raw.slice(0,-1)+'\n'+end])assert.equal(P.correlatedJsonEnvelope(reply,id,'json'),'');
+});
+
+test('DeepSeek follows a correlated streaming reply before END while retaining request evidence', async () => {
+ const p=page('',{deepseek:true,conversationAfterSend:'https://chat.deepseek.com/a/chat/s/provisional'});
+ const t={...task('streaming-route'),force_new_conversation:true};
+ await p.message('AICF_SEND',t);
+ p.renderedRequest(t.request.replace(/\s+/g,''));
+ p.settleRoute('https://chat.deepseek.com/a/chat/s/final');
+ p.reply(P.markers(t.id).start+'\n{"request_id":"'+t.id+'","changes":["正在生成新的内容');
+ await p.message('AICF_READ',p.task);
+ assert.equal(p.task.conversation_id,'final');assert.equal(p.task.status,'waiting');
+ p.reply(answer(t.id));await p.tick(5000);
+ assert.equal(p.task.status,'complete');assert.equal(p.clicks,1);
+});
+
+test('wrapper recovery preserves JSON strings and rejects malformed schemas and other task markers', () => {
+ const id='strict-wrapper';
+ const raw=JSON.stringify({request_id:id,data:{text:'保留 空格\n和换行'}});
+ assert.equal(P.parseResult(P.correlatedJsonEnvelope(raw,id,'json'),id,'json').data.text,'保留 空格\n和换行');
+ for (const text of [JSON.stringify({request_id:id,data:[]}),JSON.stringify({request_id:id}),
+   '说明\n'+raw,answer('other-task'),'{"request_id":"strict-wrapper","data":']) {
+  assert.equal(P.correlatedJsonEnvelope(text,id,'json'),'');
+ }
+});
+
+test('a terminal stored owner releases stale page memory before a new submission', async () => {
+  for (const status of ['complete','cancelled','error','timeout']) {
+    const p=page();
+    const old={...task('old-owner'),bridge:{lease:'old'},tab_id:7};
+    p.saveTask(old);
+    await p.message('AICF_SEND',old);
+    p.saveTask({...old,status,bridge:{...old.bridge,reported:true}});
+    const next={...task('new-owner'),bridge:{lease:'new'},tab_id:7};
+    p.saveTask(next);
+    const response=await p.message('AICF_SEND',next);
+    assert.equal(response.ok,true, status+': '+response.error);
+    assert.equal(p.clicks,2);
+  }
+});
+
+test('an active page owner blocks a second submission and identifies the owner', async () => {
+  const p=page();
+  await p.message('AICF_SEND',task('active-owner'));
+  const response=await p.message('AICF_SEND',task('next-owner'));
+  assert.equal(response.ok,false);
+  assert.equal(p.clicks,1);
+});
 
 test('malformed Doubao JSON requests one isolated repair and collects only its new envelope', async () => {
   const p=page('',{doubao:true,newChat:true}); const t={...task('json-repair'),kind:'json'};
@@ -463,11 +690,11 @@ test('cancel stops collection; timeout never resends', async () => {
   assert.equal(p.task.status, 'timeout'); assert.equal(p.clicks, 1);
 });
 
-test('manifest is restricted to two providers and local extension assets exist', () => {
+test('manifest permits only supported provider hosts and local extension assets exist', () => {
   const base = path.join(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(base, 'manifest.json')));
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.host_permissions, ['https://chatgpt.com/*', 'https://chat.deepseek.com/*', 'https://*.doubao.com/*', 'http://127.0.0.1/*', 'http://localhost/*']);
+  assert.deepEqual(manifest.host_permissions, ['https://chatgpt.com/*', 'https://chat.deepseek.com/*', 'https://*.doubao.com/*', 'https://www.qianwen.com/*', 'http://127.0.0.1/*', 'http://localhost/*']);
   assert.ok(!manifest.permissions.includes('cookies'));
   for (const file of [manifest.side_panel.default_path, manifest.background.service_worker, 'panel.css', 'panel.js', 'protocol.js', 'content.js']) assert.ok(fs.existsSync(path.join(base, file)));
 });
@@ -789,6 +1016,68 @@ test('DeepSeek follows a post-submit route change only with the submitted reques
  p.reply(answer(t.id)); await p.tick(5000);
  assert.equal(p.task.status,'complete');
  assert.equal(p.task.conversation_id,'final');
+ assert.equal(p.clicks,1);
+});
+
+test('ChatGPT retries a stalled new-chat transition without clicking again and recovers on the blank page', async () => {
+ const p=page('',{url:'https://chatgpt.com/c/old',chatgptNewChat:true,stalledNewChat:true});
+ const t={...task('chatgpt-navigation-once'),force_new_conversation:true};
+ const first=await p.message('AICF_FILL',t);
+ assert.equal(first.ok,false);
+ assert.equal(p.newChats,1);
+ const retry=await p.message('AICF_FILL',t);
+ assert.equal(retry.ok,false);
+ assert.match(retry.error,/不会再次点击新对话/);
+ assert.equal(p.newChats,1);
+ assert.equal(p.clicks,0);
+ assert.equal(p.editor.value,'');
+ p.navigate('https://chatgpt.com/');
+ const recovered=await p.message('AICF_SEND',t);
+ assert.equal(recovered.ok,true,recovered.error);
+ assert.equal(p.newChats,1);
+ assert.equal(p.clicks,1);
+});
+
+test('ChatGPT never opens a new chat for a dispatched task with a missing conversation cache', async () => {
+ for (const evidence of [{sent_at:new Date().toISOString()},{dispatch_attempted_at:Date.now()}]) {
+  for (const action of ['AICF_FILL','AICF_SEND']) {
+   const p=page('',{url:'https://chatgpt.com/c/existing',chatgptNewChat:true});
+   const t={...task('chatgpt-dispatch-guard'),bridge:{reported:false},force_new_conversation:true,...evidence};
+   p.saveTask(t);
+   const response=await p.message(action,{...task(t.id),bridge:{reported:false},force_new_conversation:true});
+   assert.equal(response.ok,false);
+   assert.match(response.error,/已尝试发送/);
+   assert.equal(p.newChats,0);
+   assert.equal(p.clicks,0);
+  }
+ }
+});
+
+test('ChatGPT project tasks never click new chat in an existing conversation',async()=>{
+ const p=page('',{url:'https://chatgpt.com/c/existing',chatgptNewChat:true});
+ const t={...task('chatgpt-isolated'),bridge:{reported:false},force_new_conversation:true};
+ const response=await p.message('AICF_SEND',t);
+ assert.equal(response.ok,false);assert.match(response.error,/独立的空白标签页/);
+ assert.equal(p.newChats,0);assert.equal(p.clicks,0);
+});
+
+test('ChatGPT rejects a new-chat control accidentally matched as send',async()=>{
+ const p=page('',{navigationSendButton:true});
+ const response=await p.message('AICF_SEND',task('wrong-chatgpt-send'));
+ assert.equal(response.ok,false);assert.match(response.error,/发送按钮误匹配/);
+ assert.equal(p.clicks,0);assert.equal(p.newChats,0);
+});
+
+test('ChatGPT keeps reading a sent task when the composer disappears before its reply', async () => {
+ const p=page('',{hideEditorAfterSend:true});
+ const t=task('chatgpt-missing-composer');
+ const sent=await p.message('AICF_SEND',t);
+ assert.equal(sent.ok,true,sent.error);
+ const read=await p.message('AICF_READ',p.task);
+ assert.equal(read.ok,true,read.error);
+ assert.equal(p.task.status,'waiting');
+ p.reply(answer(t.id));await p.tick(5000);
+ assert.equal(p.task.status,'complete');
  assert.equal(p.clicks,1);
 });
 

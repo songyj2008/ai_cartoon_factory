@@ -5,7 +5,7 @@ from typing import Any
 
 
 DEFERRED_REGENERATION_KEY = "deferred_regeneration"
-_ACTIVE_STATUSES = {"running", "pending"}
+_ACTIVE_STATUSES = {"running", "pending", "queued"}
 _ACTIVE_ATTEMPT_STATUSES = {"submitted", "running", "pending", "queued", "executing", "processing"}
 
 

@@ -1,8 +1,19 @@
 import json
 from pathlib import Path
+import pytest
 
 from services import context, ui_run_config
 from ui import project_handlers
+
+
+@pytest.fixture(autouse=True)
+def selection_runtime(isolated_runtime):
+    # These tests exercise live selection, rather than a pinned background job.
+    token = context._PINNED_RUNTIME.set(None)
+    try:
+        yield
+    finally:
+        context._PINNED_RUNTIME.reset(token)
 
 
 def test_drafts_are_independent_and_archive_in_place(tmp_path, monkeypatch):

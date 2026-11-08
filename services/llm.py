@@ -9,6 +9,7 @@ from openai import OpenAI
 from services.context import CONFIG
 from services.file_utils import get_project_temp_dir
 from services.logger import log
+from services.llm_payloads import log_request_metrics
 from services.secrets import DEEPSEEK_API_KEY_ENV, secret_value
 
 
@@ -127,7 +128,8 @@ def response_details(response):
 
 def extract_response_text(response):
     details = response_details(response)
-    for key in ("content", "reasoning_content", "delta_content", "text"):
+    # reasoning_content is an unfinished deliberation, never a final result.
+    for key in ("content", "delta_content", "text"):
         text = str(details.get(key) or "").strip()
         if text:
             return text, key, details
@@ -235,6 +237,7 @@ def call_deepseek_chat_sdk(
     full_response_path=None,
     raw_response_path=None,
     timeout="openai-sdk-default",
+    max_retries=2,
 ):
     """Call DeepSeek through the OpenAI SDK with thinking disabled.
 
@@ -242,7 +245,7 @@ def call_deepseek_chat_sdk(
     historical diagnostic file names while sharing the same SDK behavior as
     services.llm.call_llm.
     """
-    model_name = config.get("deepseek_model", CONFIG.get("deepseek_model", "deepseek-v4-flash"))
+    model_name = config.get("deepseek_model", CONFIG.get("deepseek_model", "deepseek-flash"))
     request = {
         "model": model_name,
         "messages": messages,
@@ -250,8 +253,7 @@ def call_deepseek_chat_sdk(
         "max_tokens": max_tokens,
         "stream": False,
     }
-    if str(model_name).startswith("deepseek-v4"):
-        request["extra_body"] = {"thinking": {"type": "disabled"}}
+    request["extra_body"] = {"thinking": {"type": "disabled"}}
     if json_mode:
         request["response_format"] = {"type": "json_object"}
 
@@ -261,7 +263,10 @@ def call_deepseek_chat_sdk(
     client = OpenAI(
         api_key=_deepseek_api_key(),
         base_url=config.get("deepseek_base_url", "https://api.deepseek.com"),
+        max_retries=max_retries,
+        **({"timeout": timeout} if timeout != "openai-sdk-default" else {}),
     )
+    log_request_metrics("deepseek_sdk", messages)
     response = client.chat.completions.create(**request)
     full_data = _to_plain_data(response)
     if full_response_path:
@@ -277,7 +282,7 @@ def call_deepseek_chat_sdk(
 
 
 def _completion(messages, max_tokens, temperature, label, kind, json_mode=True):
-    model_name = CONFIG.get("deepseek_model", "deepseek-v4-flash")
+    model_name = CONFIG.get("deepseek_model", "deepseek-flash")
     try:
         request = {
             "model": model_name,
@@ -286,16 +291,16 @@ def _completion(messages, max_tokens, temperature, label, kind, json_mode=True):
             "max_tokens": max_tokens,
             "stream": False,
         }
-        if str(model_name).startswith("deepseek-v4-flash"):
-            request["extra_body"] = {
-                "thinking": {
-                    "type": "disabled"
-                }
+        request["extra_body"] = {
+            "thinking": {
+                "type": "disabled"
             }
+        }
         if json_mode:
             request["response_format"] = {"type": "json_object"}
         request_path = _save_deepseek_request(label, kind, request)
         log(f"{label} DeepSeek request saved: {request_path}", "STEP")
+        log_request_metrics(str(label) + ":" + str(kind), messages)
         response = _deepseek_client().chat.completions.create(
             **request
         )
@@ -322,7 +327,7 @@ def _completion(messages, max_tokens, temperature, label, kind, json_mode=True):
 def repair_json(raw_text, label="大模型", max_tokens=3000):
     prompt = (
         "把下面可能截断或格式错误的内容修复成一个完整、合法的 JSON 对象。"
-        "保留已有信息，补齐必要的闭合符号和缺失字段。"
+        "保留已有信息，仅修复括号、逗号和转义等 JSON 语法；不得补写缺失剧情、对白或创作字段。"
         + JSON_ONLY_INSTRUCTION
         + "\n\n待修复内容：\n"
         + str(raw_text or "")
@@ -354,14 +359,19 @@ def _log_usage(label, details):
         )
 
 
-def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型", provider_override="inherit"):
+def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型", provider_override="inherit", tolerate_invalid_json=False):
+    if str(label).startswith("h3_prompt_retime_"):
+        from services.duration_planning_llm import call_duration_llm
+        return call_duration_llm(system_prompt, user_prompt, max_tokens=max_tokens,
+                                 label=label, provider_override=provider_override)
     from services.web_llm_bridge import entry_for_label, routes_for, wait_for_llm
     entry = entry_for_label(label)
     providers = routes_for(entry, provider_override)
     if providers != ["api"]:
         return wait_for_llm(system_prompt, user_prompt, kind="json", entry=entry,
+                            **({'metadata': {'preserve_invalid_json': True}} if tolerate_invalid_json else {}),
                             provider=providers if len(providers)>1 else providers[0],call_hint=label)
-    model_name = CONFIG.get("deepseek_model", "deepseek-v4-flash")
+    model_name = CONFIG.get("deepseek_model", "deepseek-flash")
     temperature = float(CONFIG.get("temperature", 0.1))
     max_tokens = max(int(max_tokens or 0), 3000)
     messages = [
@@ -378,6 +388,14 @@ def call_llm(system_prompt, user_prompt, max_tokens=2000, label="大模型", pro
     )
     _log_usage(label, details)
     log(f"{label} 返回字符数: {len(text)}", "STEP")
+
+    if tolerate_invalid_json:
+        try:
+            data = extract_json(text, response_details(response), label)
+        except ValueError as exc:
+            _save_bad_response(label, text, response_details(response), '_draft')
+            data = {'_parse_error': str(exc), '_raw_text': text}
+        return data, round(time.time() - started_at, 2)
 
     if not text:
         _save_bad_response(label, text, response_details(response), "_empty")
@@ -413,7 +431,7 @@ def call_llm_text(system_prompt, user_prompt, max_tokens=2000, label="大模型"
     if providers != ["api"]:
         return wait_for_llm(system_prompt, user_prompt, kind="text", entry=entry,
                             provider=providers if len(providers)>1 else providers[0],call_hint=label)
-    model_name = CONFIG.get("deepseek_model", "deepseek-v4-flash")
+    model_name = CONFIG.get("deepseek_model", "deepseek-flash")
     temperature = float(CONFIG.get("temperature", 0.1))
     log(f"{label} 调用开始")
     log(f"模型: {model_name}", "STEP")

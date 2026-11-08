@@ -57,6 +57,8 @@ def allowed_paths():
 def create_app():
     configure_services()
     app_demo = build_app()
+    from services.browser_runtime import bind_demo
+    bind_demo(app_demo)
     ensure_gradio_app_runtime(app_demo)
     return app_demo
 

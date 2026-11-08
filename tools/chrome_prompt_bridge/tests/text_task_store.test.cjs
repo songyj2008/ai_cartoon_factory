@@ -8,7 +8,7 @@ function fixture(){
  const area=values=>({get:async key=>key===null?{...values}:typeof key==='string'?{[key]:values[key]}:{...values},
    set:async patch=>Object.assign(values,patch)});
  const chrome={runtime:{id:'extension'},storage:{local:area(local),session:area(session)}};
- return {store:createStore(chrome,providers),local,session};
+ return {store:createStore(chrome,providers),local,session,chrome};
 }
 const base=id=>({id,provider:'ChatGPT',tab_id:7,status:'waiting',request:'request',
   bridge:{url:'http://127.0.0.1:7860',lease:'secret',reported:false}});
@@ -40,10 +40,28 @@ test('content changes are serialized and protected fields cannot be changed',asy
    patch:{status:'waiting'}}),/已经结束/);
 });
 
-test('dedicated tab ownership is per tab and stored only for this Chrome session',async()=>{
+test('dedicated tab ownership persists per tab across worker and browser restarts',async()=>{
  const f=fixture();
  await Promise.all([f.store.registerOwnedTab('deepseek',{id:10,windowId:1}),
    f.store.registerOwnedTab('deepseek',{id:11,windowId:1})]);
  assert.deepEqual((await f.store.listOwnedTabs('deepseek')).sort(),[10,11]);
- assert.equal(Object.keys(f.local).some(key=>key.startsWith('textOwnedTab:')),false);
+ assert.equal(Object.keys(f.local).filter(key=>key.startsWith('textOwnedTab:')).length,2);
+});
+
+test('Qianwen route binding requires request evidence and preserves document and epoch checks',async()=>{
+ const f=fixture(),url='https://www.qianwen.com/?opaque-session=one';
+ f.chrome.tabs={get:async()=>({id:7,url})};
+ await f.store.create({...base('q-binding'),provider:'千问'});
+ const bound=await f.store.bindDocument('q-binding',7,'q-document');
+ const page={...sender('q-document'),url:'https://www.qianwen.com/'};
+ const payload={taskId:'q-binding',bindingEpoch:bound.binding_epoch,
+   patch:{conversation_url:url,conversation_id:'/?opaque-session=one'}};
+ await assert.rejects(f.store.patchFromPage(page,payload),/CONVERSATION_BINDING_PENDING/);
+ const saved=await f.store.patchFromPage(page,{...payload,requestEvidence:true});
+ assert.equal(saved.conversation_url,url);
+ await assert.rejects(f.store.patchFromPage({...page,documentId:'old-document'},
+   {...payload,requestEvidence:true}),/STALE_BINDING/);
+ await assert.rejects(f.store.patchFromPage({...page,url:'https://www.qianwen.com.evil.test/'},
+   {...payload,requestEvidence:true}),/STALE_BINDING/);
+ await assert.rejects(f.store.patchFromPage(page,{...payload,bindingEpoch:99,requestEvidence:true}),/STALE_BINDING/);
 });

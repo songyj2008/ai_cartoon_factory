@@ -8,6 +8,7 @@ shows bound images and the prompt generator can reference them.
 from __future__ import annotations
 
 import logging
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -89,15 +90,19 @@ def enrich_asset_manifest_metadata(manifest: list[dict[str, Any]]) -> list[dict[
                         replacement_path,
                     )
         match = identity_by_path.get(_normalized_path(str(item.get("path") or "")))
+        if not match and identity_id in identity_by_id:
+            match = (identity_by_id[identity_id], str(metadata.get("image_id") or ""))
         if match:
             identity, image_id = match
             metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
             generated = _character_metadata(identity, image_id, str(item.get("path") or ""))
-            for key, value in generated.items():
-                metadata.setdefault(key, value)
+            for key in ("subject_description", "image_description", "aliases"):
+                metadata.pop(key, None)
+            metadata.update(generated)
             item["metadata"] = metadata
         enriched.append(item)
-    return enriched
+    from services.project_assets import apply_project_character_names
+    return apply_project_character_names(enriched)
 
 
 def merge_auto_backgrounds(
@@ -165,6 +170,46 @@ def merge_auto_backgrounds(
     return merged
 
 
+def order_automatic_references(manifest: list[dict[str, Any]], shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order ordinary images from final role ids; keep special image slots fixed."""
+    from .prompt_compiler import H3PromptCompiler
+    from .speech_contract import has_onscreen_speech
+
+    priorities = []
+    for shot in shots:
+        visible = shot.get('visible_roles') or []
+        units = shot.get('dialogues', shot.get('dialogue', []))
+        for unit in units if isinstance(units, list) else [units]:
+            if (isinstance(unit, dict) and str(unit.get('line') or unit.get('text') or '').strip()
+                    and has_onscreen_speech(unit) and unit.get('speaker') in visible):
+                priorities.append(unit['speaker'])
+    priorities.extend(role for shot in shots for role in shot.get('visible_roles', []))
+    rank = {role: i for i, role in enumerate(dict.fromkeys(priorities))}
+    result = copy.deepcopy(manifest)
+    # Respect the same explicit order used by H3GenerationConfig.images.
+    indexed = [(i, a) for i, a in enumerate(result) if a.get('type') == 'image']
+    indexed.sort(key=lambda pair: (pair[1].get('order') is None,
+                                  pair[1].get('order') if pair[1].get('order') is not None else pair[0], pair[0]))
+    images = [a for _, a in indexed]
+    movable = [i for i, a in enumerate(images)
+               if not H3PromptCompiler._picture_anchor_role(a.get('metadata') or {})]
+    def key(asset):
+        meta = asset.get('metadata') or {}
+        if meta.get('asset_kind') == 'background':
+            return (2, 0)
+        role = meta.get('role_id')
+        return (0, rank[role]) if role in rank else (1, 0)
+    ordered = sorted((images[i] for i in movable), key=key)
+    for i, asset in zip(movable, ordered):
+        images[i] = asset
+    # Replace image entries only. Audio/video ordering and metadata are unchanged.
+    iterator = iter(images)
+    result = [next(iterator) if a.get('type') == 'image' else a for a in result]
+    for i, asset in enumerate(images, 1):
+        asset['order'] = i
+    return result
+
+
 def auto_bind_asset_manifest(beat: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Build H3 asset_manifest entries from a beat's auto_asset_match.
 
@@ -193,12 +238,15 @@ def auto_bind_asset_manifest(beat: dict[str, Any]) -> list[dict[str, Any]] | Non
     manifest: list[dict[str, Any]] = []
     order = 0
 
+    allowed = set(beat['reference_roles']) if 'reference_roles' in beat else None
+    def permitted(entry):
+        return allowed is None or bool(allowed.intersection(str(entry.get(k) or '') for k in ('role_id','character_id','id','name','display_name')))
     # --- Characters ---
     # Prefer character_images (has per-role image_id), fall back to characters list.
     char_images = auto.get("character_images")
     if isinstance(char_images, list) and char_images:
         for entry in char_images:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not permitted(entry):
                 continue
             item = _resolve_character_image(entry, identity_by_id)
             if item is None:
@@ -212,7 +260,7 @@ def auto_bind_asset_manifest(beat: dict[str, Any]) -> list[dict[str, Any]] | Non
         chars = auto.get("characters")
         if isinstance(chars, list):
             for entry in chars:
-                if not isinstance(entry, dict):
+                if not isinstance(entry, dict) or not permitted(entry):
                     continue
                 item = _resolve_character_fallback(entry, identity_by_id)
                 if item is None:
@@ -448,6 +496,7 @@ def _character_metadata(
     metadata: dict[str, Any] = {
         "asset_kind": "character",
         "identity_id": str(identity.get("id") or "").strip(),
+        "identity_display_name": str(identity.get("display_name") or identity.get("name_cn") or identity.get("name") or "").strip(),
         "aliases": [str(value).strip() for value in identity.get("aliases") or [] if str(value).strip()],
     }
     if subject_description:

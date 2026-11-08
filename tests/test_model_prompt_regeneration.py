@@ -124,3 +124,35 @@ def test_h3_prompt_reset_preserves_reference_configuration():
         "asset_manifest": [{"id": "image-1", "type": "image", "path": "image.png"}],
         "duration_sec": 8,
     }
+
+
+def test_failed_regeneration_restores_prompt_without_replacing_picker(monkeypatch):
+    import copy
+    import pytest
+    from generation.pipelines.minimax_h3.pipeline import MiniMaxH3Ref2VAPipeline
+
+    segment = {
+        "segment_index": 1, "model_id": "minimax_h3_local_ref2va",
+        "generation_config": {"prompt_override": "confirmed screenplay", "asset_manifest": [{"id": "chosen"}]},
+        "h3_prompt_plan": {"shots": [{"action": "last usable plan"}]},
+    }
+    payload = {"segments": [segment]}
+    original = copy.deepcopy(segment)
+    service = object.__new__(GenerationService)
+    service._pipeline_for = lambda _: object.__new__(MiniMaxH3Ref2VAPipeline)
+
+    def rejected(*args, **kwargs):
+        segment["generation_config"]["asset_manifest"] = [{"id": "latest choice"}]
+        raise ValueError("time conflict")
+
+    service._run_preparation_by_model = rejected
+    monkeypatch.setattr("workflow.video_merge.load_video_jobs", lambda: payload)
+    monkeypatch.setattr("workflow.video_merge.save_video_jobs", lambda _: None)
+    monkeypatch.setattr("generation.service.normalize_video_jobs_payload", lambda value: value)
+    with pytest.raises(ValueError, match="time conflict"):
+        service.regenerate_segment_prompt({"beats": [{"plot": "current"}]}, 1)
+
+    assert segment["generation_config"]["prompt_override"] == "confirmed screenplay"
+    assert segment["generation_config"]["asset_manifest"] == [{"id": "latest choice"}]
+    assert segment["h3_prompt_plan"] == original["h3_prompt_plan"]
+    assert "h3_prompt_source" not in segment

@@ -41,7 +41,9 @@ def test_force_save_replaces_reference_baseline_and_preserves_history(monkeypatc
         service.update_segment_generation_config(1, asset_manifest=[new], prompt_override=prompt)
     assert not saves
     service.update_segment_generation_config(1, asset_manifest=[new], prompt_override=prompt, force_save=True)
-    assert segment['generation_config']['prompt_override'] == prompt
+    saved_prompt=segment['generation_config']['prompt_override']
+    assert '<Subject 1>：新场景；可见内容来自 <Picture 1>。' in saved_prompt
+    assert saved_prompt.endswith('[Shot 1] <Subject 1> 内灯光亮起。')
     assert segment['generation_config']['asset_manifest'][0]['id'] == 'new_room'
     assert 'asset_match_signature' not in segment['generation_config']
     for key in ('renders', 'runninghub_attempts', 'runninghub_usage', 'video_path'):

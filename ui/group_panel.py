@@ -9,7 +9,7 @@ from typing import Any
 
 import gradio as gr
 
-from services.context import CONFIG, get_current_episode_name
+from services.context import CONFIG, get_current_episode_name, get_project_dir
 from services.file_utils import load_json_file_silent, short_path_name
 from services.project_bible import load_project_bible
 from workflow.asset_resolver import prompt_with_character_descriptions, selected_project_materials
@@ -41,12 +41,13 @@ def _prompt_revision_state(segment: dict[str, Any]) -> tuple[str, str, str, dict
     revision = config.get("latest_prompt_revision") if isinstance(config.get("latest_prompt_revision"), dict) else {}
     revision_prompt = str(revision.get("prompt") or "").strip()
     matches = bool(revision_prompt) and _normalise_prompt_comparison(current_prompt) == _normalise_prompt_comparison(revision_prompt)
-    if not revision_prompt:
-        label, css_class, title = "暂无修正版", "status-pending", "还没有可用于比对的修正后完整提示词"
-    elif matches:
-        label, css_class, title = "已保存", "status-success", "H3 提示词与最新修正版一致"
-    else:
-        label, css_class, title = "未保存", "status-pending", "H3 提示词与最新修正版不一致"
+    # Revision comparison describes the content, not whether it was persisted.
+    saved = bool(segment.get("prompt_saved", True))
+    label = "已保存" if saved else "未保存"
+    css_class = "status-success" if saved else "status-pending"
+    title = "提示词已保存" if saved else "提示词有未保存修改"
+    if revision_prompt:
+        title += "；" + ("与最新修正版一致" if matches else "与最新修正版不一致")
     return label, css_class, title, {"current": current_info, "revision": revision, "matches": matches}
 SELECT_VIDEO_ICON = (
     '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
@@ -121,8 +122,12 @@ def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
     """Keep prompt text hidden on the card and route editing through fullscreen."""
     config = segment.get("generation_config") if isinstance(segment.get("generation_config"), dict) else {}
     manifest = [item for item in config.get("asset_manifest") or [] if isinstance(item, dict)]
-    from services.character_voice import read_voice, voice_path
+    from services.character_voice import read_voice, voice_path, refresh_character_voices
     from services.context import ASSETS_DIR
+    from generation.pipelines.minimax_h3.auto_binder import enrich_asset_manifest_metadata
+    manifest = enrich_asset_manifest_metadata(manifest)
+    if segment.get('h3_prompt_source') != 'shot_edit':
+        manifest = refresh_character_voices(manifest, ASSETS_DIR)
     root = (Path(ASSETS_DIR) / "characters" / "identities").resolve()
     manifest = [{**item, "metadata": dict(item.get("metadata") or {})} for item in manifest]
     for item in manifest:
@@ -146,8 +151,14 @@ def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
     from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
     from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
     bindings = H3AssetBinder().bind(H3GenerationConfig.from_mapping({**config, "asset_manifest": manifest}))
+    # Rendering is read-only, including damaged drafts. Never rebuild managed
+    # sections here: a missing reference must not erase text or crash refresh.
+    binding_notice = ''
     if prompt:
-        prompt = H3PromptCompiler._with_character_voices(prompt, bindings)
+        try:
+            H3PromptCompiler.validate_reference_tags(prompt, bindings)
+        except ValueError as exc:
+            binding_notice = '参考绑定不完整，请打开编辑器补齐素材；当前提示词已保留。' + str(exc)
     source_excerpt = str(segment.get("source_excerpt") or "").strip()
     source_lines = source_excerpt.count("\n") + 1 if source_excerpt else 0
     source_chars = len(source_excerpt)
@@ -181,6 +192,8 @@ def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
             f'onclick="return window.AICF.removeH3Asset(\'{index}\', this)">移除</button>'
             "</li>"
         )
+    from generation.pipelines.minimax_h3.editor_draft import reference_revision
+    save_revision = reference_revision(segment)
     manifest_json = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     _, _, _, version_data = _prompt_revision_state(segment)
     version_json = json.dumps(version_data, ensure_ascii=False, separators=(",", ":"))
@@ -199,9 +212,9 @@ def _h3_config_html(segment: dict[str, Any], material_payload: str = "") -> str:
             </div>
             <pre class="prompt-modal-source h3-card-prompt-source" data-segment-index="{index}" hidden>{esc(prompt)}</pre>
             <div class="h3-prompt-version-source" data-version-info="{esc(version_json)}" hidden></div>
-            <div class="h3-asset-list h3-card-config-source" data-segment-index="{index}" data-manifest="{esc(manifest_json)}" hidden></div>
+            <div class="h3-asset-list h3-card-config-source" data-base-revision="{esc(save_revision)}" data-segment-uid="{esc(segment.get('segment_uid') or '')}" data-segment-index="{index}" data-manifest="{esc(manifest_json)}" hidden></div>
             <div class="segment-material-source" data-materials="{esc(material_payload)}" hidden></div>
-            <span class="h3-config-status" role="status" aria-live="polite"></span>
+            <span class="h3-config-status" role="status" aria-live="polite">{esc(binding_notice)}</span>
             {source_block}
         </div>
         <template class="h3-fullscreen-config-template">
@@ -731,6 +744,28 @@ def _segment_status(part_id: str, video_path: str, segment_status: str = "") -> 
 def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarked_only=False):
     data = _parse_payload(groups_text)
     segments = [item for item in data.get("segments") or [] if isinstance(item, dict)]
+    if data.get('novel_batch_id'):
+        batch_stages = {}
+        try:
+            from services import text_jobs
+            parent = text_jobs.get(data['novel_batch_id'])
+            for stage, identifier in (parent.get('stage_records') or {}).items():
+                if stage.startswith('segment:'):
+                    batch_stages[int(stage.split(':')[1])] = text_jobs.get(identifier)
+        except (ValueError, OSError):
+            pass
+        present = {int(s.get('segment_index') or 0) for s in segments}
+        for index, beat in enumerate(_current_beats(), 1):
+            if index not in present:
+                task = batch_stages.get(index) or {}
+                failed = task.get('state') in ('error', 'cancelled', 'needs_attention')
+                segments.append({'segment_index': index, 'part_id': f'part_{index:03d}',
+                                 'title': beat.get('title') or f'Beat {index}',
+                                 'model_id': data.get('default_model_id'), 'novel_batch_id': data['novel_batch_id'],
+                                 'planning_state': 'invalid' if failed else 'pending',
+                                 'planning_issues': [{'message': task.get('message') or '请查看原任务'}] if failed else [],
+                                 'job': {'duration_sec': beat.get('estimated_duration_sec') or 0}})
+        segments.sort(key=lambda s: int(s.get('segment_index') or 0))
     viewing_label = get_current_episode_name() or "当前生成"
     if not segments:
         return """
@@ -760,7 +795,8 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         part_id = str(segment.get("part_id") or f"part_{idx:03d}")
         job = segment.get("job") if isinstance(segment.get("job"), dict) else {}
         title = str(segment.get("title") or job.get("title") or f"Segment {idx}")
-        duration = int(float(job.get("duration_sec") or 0))
+        duration = float(job.get("duration_sec") or 0)
+        duration = int(duration) if duration.is_integer() else duration
         total_duration += duration
         usage_history = _runninghub_usage_history(segment)
         roles = _role_list_display(segment.get("reference_roles"), characters)
@@ -856,7 +892,15 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
                 f'<button type="button" class="card-regen-btn primary-mini" {regen_disabled} '
                 f'onclick="return window.AICF.regenerateH3Segment(\'{idx}\', this)">{regen_label}</button>'
             )
-            prompt_regen_action_html = ""
+            if segment.get('novel_batch_id'):
+                prompt_regen_action_html = (
+                    f'<button type="button" class="card-regen-btn" data-batch-id="{esc(segment["novel_batch_id"])}" '
+                    f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成 Segment</button>'
+                )
+            else:
+                prompt_regen_action_html = (
+                    f'<button type="button" class="card-regen-btn" onclick="return window.AICF.triggerSegmentRegen(\'{idx}\', this)">重新生成 Segment</button>'
+                )
         else:
             editor_html = f"""
                 <details class="prompt-block segment-editor-block" open>
@@ -889,9 +933,28 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
                 </button>
             """
 
+        if segment.get('novel_batch_id'):
+            prompt_regen_action_html = (
+                f'<button type="button" class="card-regen-btn" data-batch-id="{esc(segment["novel_batch_id"])}" '
+                f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成 Segment</button>'
+            )
+        planning_issues = segment.get('planning_issues') or []
+        planning_label = {'ready': '分镜已规划', 'warning': '分镜有提示，待检查',
+                          'invalid': '分镜无效，待重新生成', 'pending': '等待生成或待重试'}.get(segment.get('planning_state'), '')
+        issue_html = ''.join(f'<li>{esc(i.get("message") or "")}</li>' for i in planning_issues)
+        raw = segment.get('planning_candidate') or segment.get('planning_raw_response')
+        raw_html = ('<details><summary>查看原始规划回复</summary><pre>' +
+                    esc(json.dumps(raw, ensure_ascii=False, indent=2)) + '</pre></details>') if raw is not None else ''
+        planning_html = (f'<div class="segment-planning-report" role="status"><b>{esc(planning_label)}</b>'
+                         f'<ul>{issue_html}</ul>{raw_html}</div>') if planning_label or issue_html else ''
+        if (segment.get('planning_previous') or {}).get('prompt'):
+            planning_html += ('<details><summary>查看上次分镜</summary><pre>' +
+                              esc(segment['planning_previous']['prompt']) + '</pre></details>')
+        if segment.get('continuity_note'):
+            planning_html += f'<p role="status">{esc(segment["continuity_note"])}</p>'
         cards.append(
             f"""
-            <div class="group-card" data-segment-index="{idx}" data-segment-uid="{esc(str(segment.get('segment_uid') or ''))}" data-beat-uid="{esc(str(segment.get('beat_uid') or ''))}" data-model-id="{esc(desired_model_id)}" data-video-ok="{str(protected_video_ok).lower()}">
+            <div class="group-card" data-runtime="{esc(str(get_project_dir().resolve()))}" data-segment-index="{idx}" data-segment-uid="{esc(str(segment.get('segment_uid') or ''))}" data-beat-uid="{esc(str(segment.get('beat_uid') or ''))}" data-model-id="{esc(desired_model_id)}" data-video-ok="{str(protected_video_ok).lower()}">
                 <div class="group-head">
                     <div class="segment-title-block">
                         <div class="segment-id">{esc(part_id)}</div>
@@ -930,6 +993,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
                     <div class="detail-item path-line"><span>Workflow</span><b>{esc(short_path_name(workflow_path))}</b></div>
                     <div class="detail-item path-line detail-wide"><span>视频</span><b>{esc(video_display)}</b> {preview_btn}{stale_video_html}</div>
                 </div>
+                {planning_html}
                 {usage_history}
                 {editor_html}
             </div>
@@ -953,7 +1017,8 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
     final_retry_count = max(0, final_generation_count - int(final_usage.get("segment_count") or 0))
     shown_count = len(displayed_segments)
     count_label = f"未标记OK：{shown_count} / 总分段：{len(segments)}" if unmarked_only else f"总分段：{len(segments)}"
-    stats = f"当前查看：{viewing_label}　·　第 {page + 1} / {total_pages} 页　{count_label}　当前页时长：{total_duration} 秒"
+    all_duration = sum(float((s.get('job') or {}).get('duration_sec') or 0) for s in segments)
+    stats = f"当前查看：{viewing_label}　·　第 {page + 1} / {total_pages} 页　{count_label}　预计总时长：{all_duration:g} 秒　当前页时长：{total_duration} 秒"
     filter_class = " is-filtering" if unmarked_only else ""
     filter_pressed = "true" if unmarked_only else "false"
     filter_label = "仅显示未标记视频OK分段；点击显示所有视频分段" if unmarked_only else "显示所有视频分段；点击仅显示未标记视频OK分段"

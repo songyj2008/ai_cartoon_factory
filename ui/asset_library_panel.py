@@ -380,6 +380,7 @@ def _distinct_asset_labels(labels):
 def asset_library_choices(project_filter=None, asset_type=None):
     owners = asset_project_owners()
     current_project = get_current_project_name()
+    local_names = load_project_asset_assignments(current_project).get("character_names", {})
     items = _asset_items()
     filtered = []
     for item in items:
@@ -400,9 +401,10 @@ def asset_library_choices(project_filter=None, asset_type=None):
         else:
             prefix, rank = f"【其他项目：{'、'.join(project_names)}】", 2
         item["choice_rank"] = rank
-        item["choice_label"] = prefix + item["label"]
+        local_name = (local_names.get(str(asset_id)) or {}).get("display_name") if kind == "characters" and current_project in project_names else ""
+        item["choice_label"] = prefix + str(local_name or item["label"])
     items = filtered
-    items.sort(key=lambda item: (item["choice_rank"], item["label"].casefold()))
+    items.sort(key=lambda item: (item["choice_rank"], item["choice_label"].casefold()))
     return [("---请选择---" if items else "暂无符合条件的素材", "")] + [(item["choice_label"], item["key"]) for item in items]
 
 
@@ -518,7 +520,7 @@ def _metadata_for_key(selected_key: str):
             display,
             ", ".join(_as_list_text(item.get("aliases") or identity.get("aliases"))),
             ", ".join(_as_list_text(item.get("tags_cn"))),
-            item.get("description_cn") or "",
+            identity.get("description_cn") or item.get("description_cn") or "",
             ", ".join(_as_list_text(item.get("use_for"))),
             item.get("pose") or "",
         )
@@ -540,6 +542,15 @@ def _metadata_for_key(selected_key: str):
     return "character", "", "", "", "", "", "", "", ""
 
 
+def _set_shared_character_description(data, meta, description_cn):
+    """The editable character description belongs to the shared identity."""
+    data.setdefault("identity", {})["description_cn"] = str(description_cn or "").strip()
+    for image in (data.get("images") or {}).values():
+        if isinstance(image, dict):
+            image.pop("description_cn", None)
+    meta.pop("description_cn", None)
+
+
 def _save_metadata_for_image(path: Path, asset_type, display_name, aliases, tags_cn, description_cn, use_for, pose):
     key = _asset_key_from_path(path)
     if not key:
@@ -552,6 +563,7 @@ def _save_metadata_for_image(path: Path, asset_type, display_name, aliases, tags
         data = _read_json(meta_path)
         data.setdefault("identity", {})
         data.setdefault("images", {})
+        _set_shared_character_description(data, meta, description_cn)
         if display_name or aliases:
             data["identity"].update(_meta_from_fields(display_name, aliases, "", "", "", ""))
         data["images"][asset_id] = meta
@@ -612,6 +624,7 @@ def upload_asset(asset_type, upload_file, identity_id, asset_id, display_name, a
             data = _read_json(meta_path)
             data.setdefault("identity", {})
             data.setdefault("images", {})
+            _set_shared_character_description(data, meta, description_cn)
             if display_name:
                 data["identity"].update(_meta_from_fields(display_name, aliases, "", "", "", ""))
             data["images"][asset_id] = meta
@@ -681,6 +694,7 @@ def save_asset_metadata(asset_type, identity_id, asset_id, display_name, aliases
             data = _read_json(meta_path)
             data.setdefault("identity", {})
             data.setdefault("images", {})
+            _set_shared_character_description(data, meta, description_cn)
             if display_name or aliases:
                 data["identity"].update(_meta_from_fields(display_name, aliases, "", "", "", ""))
             data["images"][asset_id] = meta

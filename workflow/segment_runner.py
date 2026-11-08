@@ -147,6 +147,15 @@ def _serialize_video_jobs(func):
     return wrapped
 
 
+def _serialize_account_submission(func):
+    def wrapped(*args, **kwargs):
+        from services.context import pin_runtime
+        from generation.account_queue import admission_lock
+        with pin_runtime(), admission_lock, video_jobs_lock():
+            return func(*args, **kwargs)
+    return wrapped
+
+
 def _active_task_id(segment: dict[str, Any]) -> str:
     return active_task_id(segment)
 
@@ -924,7 +933,7 @@ def save_segment_director_prompts_batch(edits: list[dict[str, Any]]) -> dict[str
     return load_video_jobs()
 
 
-@_serialize_video_jobs
+@_serialize_account_submission
 def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, merge_after: bool = False, wait: bool = True, backend: str | None = None) -> dict[str, Any]:
     """Submit existing saved segment workflows without regenerating prompts from beats."""
     payload = load_video_jobs()
@@ -935,7 +944,7 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
     selected = set(int(x) for x in segment_indices) if segment_indices else None
     backend = str(backend or CONFIG.get("video_submit_backend") or "comfyui").strip().lower()
     concurrency_limit = _video_submit_concurrency_limit(backend)
-    wait_for_result = bool(wait) and concurrency_limit == 1
+    wait_for_result = bool(wait) and concurrency_limit == 1 and backend != 'runninghub'
     log(f"[LICON_MSR] submit saved workflows selected={sorted(selected) if selected else 'all'}", "STEP")
     log(f"[LICON_MSR] video submit concurrency={concurrency_limit} wait={wait_for_result}", "STEP")
 
@@ -1008,12 +1017,13 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
     # HTTP workers alone therefore does not limit its live GPU queue. Keep any
     # excess parts in the local job file until a remote execution slot opens.
     if backend == "runninghub":
-        active_count = _runninghub_active_task_count(segments)
-        available_slots = max(0, concurrency_limit - active_count)
-        to_submit = submission_items[:available_slots]
-        queued_items = submission_items[available_slots:]
+        from generation.account_queue import admitted_indices
+        admitted = admitted_indices(payload, [item['segment'] for item in submission_items],
+                                    model_id=LTX_LICON_MODEL_ID, limit=concurrency_limit)
+        to_submit = [item for item in submission_items if int(item['segment']['segment_index']) in admitted]
+        queued_items = [item for item in submission_items if int(item['segment']['segment_index']) not in admitted]
         log(
-            f"[LICON_MSR] RunningHub active={active_count} limit={concurrency_limit} "
+            f"[LICON_MSR] RunningHub account limit={concurrency_limit} "
             f"submit_now={len(to_submit)} queued={len(queued_items)}",
             "STEP",
         )
@@ -1078,6 +1088,7 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
                     "part_id": part_id,
                 }
                 segment["prompt_saved"] = True
+                segment.pop('video_queue_entered_at', None)
                 _record_runninghub_result(segment, result)
                 segment["status"] = "success" if result.get("video_path") else ("running" if result.get("submitted") and result.get("task_id") else "workflow_ready")
                 if segment["status"] == "success":
@@ -1121,42 +1132,46 @@ def submit_saved_licon_msr_segments(segment_indices: set[int] | None = None, mer
     return payload
 
 
-@_serialize_video_jobs
 def dispatch_queued_runninghub_segments() -> dict[str, Any] | None:
     """Submit queued parts through their owning model when a remote slot is free."""
-    if str(CONFIG.get("video_submit_backend") or "comfyui").strip().lower() != "runninghub":
-        return None
+    from services.context import pin_runtime
 
-    payload = load_video_jobs()
-    queued_indices = [
-        int(segment.get("segment_index") or 0)
-        for segment in payload.get("segments") or []
-        if isinstance(segment, dict)
-        and int(segment.get("segment_index") or 0) > 0
-        and str(segment.get("backend") or "").strip().lower() == "runninghub"
-        and (
-            str(segment.get("status") or "").strip().lower() == "queued"
-            or (
-                str(segment.get("status") or "").strip().lower() == "failed"
-                and _is_runninghub_queue_full_error(segment.get("error") or "")
+    with pin_runtime():
+        with video_jobs_lock():
+            payload = load_video_jobs()
+            queued_indices = [
+                int(segment.get("segment_index") or 0)
+                for segment in payload.get("segments") or []
+                if isinstance(segment, dict)
+                and int(segment.get("segment_index") or 0) > 0
+                and str(segment.get("backend") or "").strip().lower() == "runninghub"
+                and (
+                    str(segment.get("status") or "").strip().lower() == "queued"
+                    or (
+                        str(segment.get("status") or "").strip().lower() == "failed"
+                        and _is_runninghub_queue_full_error(segment.get("error") or "")
+                    )
+                )
+            ]
+            if not queued_indices:
+                return None
+            active_count = _runninghub_active_task_count(
+                [item for item in payload.get("segments") or [] if isinstance(item, dict)]
             )
-        )
-    ]
-    if not queued_indices:
-        return None
-    active_count = _runninghub_active_task_count(
-        [item for item in payload.get("segments") or [] if isinstance(item, dict)]
-    )
-    if active_count >= _video_submit_concurrency_limit():
-        return None
-    available_slots = max(0, _video_submit_concurrency_limit() - active_count)
-    selected = set(sorted(queued_indices)[:available_slots])
-    if not selected:
-        return None
-    log(f"[generation] dispatch local RunningHub queue: {sorted(selected)}", "STEP")
-    from generation.service import get_generation_service
+            if active_count >= _video_submit_concurrency_limit('runninghub'):
+                return None
+            available_slots = max(0, _video_submit_concurrency_limit('runninghub') - active_count)
+            priorities = {int(s.get('segment_index') or 0): float(s.get('video_queue_entered_at') or 0)
+                          for s in payload.get('segments') or []}
+            selected = set(sorted(queued_indices, key=lambda index: (priorities[index], index))[:available_slots])
+            if not selected:
+                return None
+        log(f"[generation] dispatch local RunningHub queue: {sorted(selected)}", "STEP")
+        from generation.service import get_generation_service
 
-    return get_generation_service()._submit_saved_direct(
-        selected, merge_after=False, wait=False,
-        backend="runninghub", expected_backend="runninghub",
-    )
+        # State preparation may call the model. Only queue selection owns this
+        # lock; the model pipeline rechecks/serializes the actual submission.
+        return get_generation_service()._submit_saved_direct(
+            selected, merge_after=False, wait=False,
+            backend="runninghub", expected_backend="runninghub",
+        )

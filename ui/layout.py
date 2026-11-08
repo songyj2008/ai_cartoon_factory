@@ -1,4 +1,4 @@
-﻿"""Gradio component layout for the LiconMSR-only pipeline."""
+"""Gradio component layout for the LiconMSR-only pipeline."""
 from __future__ import annotations
 
 from html import escape
@@ -141,6 +141,8 @@ def build_layout():
         episode_select_payload = gr.Textbox(elem_id="episode_select_payload", elem_classes=["aicf-hidden-trigger"])
         episode_select_btn = gr.Button("select episode", elem_id="episode_select_btn", elem_classes=["aicf-hidden-trigger"])
         operation_refresh_btn = gr.Button("refresh text operation result", elem_id="operation_refresh_btn", elem_classes=["aicf-hidden-trigger"])
+        operation_segment_refresh_btn = gr.Button("refresh completed segment", elem_id="operation_segment_refresh_btn", elem_classes=["aicf-hidden-trigger"])
+        operation_beats_refresh_btn = gr.Button("refresh completed Beats", elem_id="operation_beats_refresh_btn", elem_classes=["aicf-hidden-trigger"])
         open_videos_dir_btn = gr.Button("open videos dir", elem_id="open_videos_dir_btn", elem_classes=["aicf-hidden-trigger"])
 
         main_page = gr.Radio(
@@ -158,8 +160,11 @@ def build_layout():
             with gr.Column(visible=True, elem_id="workbench_page", elem_classes=["page-panel"]) as workbench_page:
                 with gr.Row(elem_classes=["app-shell"]):
                     with gr.Column(scale=1, min_width=260, elem_classes=["sidebar-column"]):
+                        with gr.Group(elem_classes=["project-management-card", "project-materials-entry"]):
+                            gr.HTML('<div class="project-management-heading"><strong>素材管理</strong></div>')
+                            project_assets_open_btn = gr.Button("打开项目素材管理", elem_id="project_assets_open_btn", elem_classes=["project-management-secondary"])
                         with gr.Group(elem_id="project_management_panel", elem_classes=["project-management-card"]):
-                            gr.HTML('<div class="project-management-heading"><strong>项目与草稿</strong><p>选择项目和集数，继续创作。</p></div>')
+                            gr.HTML('<div class="project-management-heading"><strong>项目与草稿</strong></div>')
                             project_name = gr.Dropdown(
                                 label="当前项目", choices=_project_choices(),
                                 value=get_current_project_name() or "current", elem_id="project_name",
@@ -182,9 +187,6 @@ def build_layout():
                                 rename_project_btn = gr.Button("保存项目名称", elem_classes=["project-management-secondary"])
                                 gr.Markdown("清空前请确认当前草稿内容已保存。", elem_classes=["project-management-hint"])
                                 clean_btn = gr.Button("清空当前草稿", elem_classes=["project-management-danger"])
-                        with gr.Group(elem_classes=["project-management-card", "project-materials-entry"]):
-                            gr.HTML('<div class="project-management-heading"><strong>素材管理</strong><p>上传角色与场景，管理项目素材归属。</p></div>')
-                            project_assets_open_btn = gr.Button("打开项目素材管理", elem_id="project_assets_open_btn", elem_classes=["project-management-secondary"])
 
                     with gr.Column(scale=3, min_width=640, elem_classes=["workspace-column"]):
                         gr.HTML('<div class="workspace-card hero-card"><div class="section-kicker">创作控制台</div><div class="section-title">从主题到成片的一键流水线</div><div class="section-subtitle">保留原有流程，优化输入、执行与反馈的视觉层级。</div>')
@@ -227,10 +229,10 @@ def build_layout():
                                     elem_classes=["target-beat-count-hidden"],
                                 )
                                 with gr.Row(elem_classes=["compact-field-row"]):
-                                    gr.HTML('<div class="compact-field-label">目标 Beat 数：</div>')
+                                    gr.HTML('<div class="compact-field-label">参考 Beat 数：</div>')
                                     gr.HTML(
                                         '<input id="target_beat_count_proxy" class="target-beat-count-proxy" '
-                                        'type="number" min="1" step="1" inputmode="numeric" aria-label="目标 Beat 数">',
+                                        'type="number" min="1" step="1" inputmode="numeric" aria-label="参考 Beat 数，LLM 可按内容适当增减" title="仅供参考，实际数量由对白、事件边界和单段时长决定">',
                                         elem_classes=["compact-field-input", "beat-count-control"],
                                     )
 
@@ -238,7 +240,7 @@ def build_layout():
                             gen_story_btn = gr.Button("生成完整剧情", elem_id="gen_story_btn", elem_classes=["primary-btn", "step-action"])
                             split_beats_btn = gr.Button("拆分剧情 Beats", elem_id="split_beats_btn", elem_classes=["primary-btn", "step-action"])
                             generate_segment_prompts_btn = gr.Button("生成分段提示词", elem_id="generate_segment_prompts_btn", elem_classes=["quick-btn", "quick-blue", "step-action"])
-                            render_video_btn = gr.Button("生成视频", elem_classes=["primary-btn", "step-action"])
+                            render_video_btn = gr.Button("生成视频", elem_id="render_video_btn", elem_classes=["primary-btn", "step-action"])
                             merge_video_btn = gr.Button("合并最终视频", elem_classes=["primary-btn", "step-action"])
                         with gr.Row(elem_classes=["one-click-action-row"]):
                             one_click_full_btn = gr.Button("后台准备剧情、Beats 与提示词", elem_id="one_click_full_btn", elem_classes=["primary-btn", "one-click-main"])
@@ -247,8 +249,8 @@ def build_layout():
                         with gr.Accordion("已有完整小说？生成 Beats 再生成 Segments", open=False, elem_classes=["novel-segments-panel"]):
                             gr.HTML('<div class="section-subtitle">先把小说切分为 Beats（保留对白与原文），再按当前模型生成分段。会覆盖已有 Beats 与分段信息。</div>')
                             novel_text = gr.Textbox(label="完整小说段", lines=12, max_lines=36, placeholder="粘贴已有小说内容（支持几千字）。系统将保留小说对白与原文，按模型规则切分 Beats 后生成视频 Segments。", elem_id="novel_text_editor")
-                            novel_segment_count = gr.Number(label="目标视频分段数", value=4, minimum=1, step=1, precision=0)
-                            generate_novel_segments_btn = gr.Button("生成 Beats → Segments", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
+                            novel_segment_count = gr.Number(label="参考 Beat 数量", info="仅供参考，LLM 可按完整对白、事件边界和单段时长适当增减。", value=4, minimum=1, step=1, precision=0)
+                            generate_novel_segments_btn = gr.Button("生成 / 继续 Beats → Segments", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
 
                         with gr.Accordion("剧情简介（可编辑）", open=True):
                             story_json = gr.Textbox(
@@ -261,7 +263,7 @@ def build_layout():
                                 elem_id="story_editor",
                             )
 
-                        with gr.Accordion("Beats", open=True):
+                        with gr.Accordion("Beats 原文（高级编辑）", open=False, visible=False):
                             beats_json = gr.Textbox(
                                 label="具体剧情 Beats（可编辑，Ctrl+S 保存）",
                                 value="",
@@ -271,40 +273,35 @@ def build_layout():
                                 elem_id="beats_editor",
                             )
                             save_beats_btn = gr.Button("保存剧情修改", elem_id="save_story_beats_btn")
-                            with gr.Accordion("Beat 风险检测 / 复杂 Beat 拆分", open=False):
-                                beat_risk_notice = gr.HTML("")
-                                with gr.Row(elem_classes=["beat-risk-row"]):
-                                    complex_beat_index = gr.Number(
-                                        label="指定 Beat",
-                                        value=1,
-                                        step=1,
-                                        precision=0,
-                                        scale=0,
-                                        min_width=188,
-                                        elem_id="complex_beat_index",
-                                        elem_classes=["beat-split-index"],
-                                    )
-                                    detect_beat_risk_btn = gr.Button("检测 Beat 风险", elem_classes=["quick-btn", "beat-risk-detect-btn"])
-                                    split_complex_beat_btn = gr.Button("继续拆分指定 Beat", elem_id="split_complex_beat_btn", elem_classes=["quick-btn", "quick-blue", "beat-split-submit-btn"])
-                                    add_beat_btn = gr.Button("新增 Beat", elem_classes=["quick-btn", "beat-add-submit-btn"])
-                                    delete_beat_btn = gr.Button("删除指定 Beat", elem_classes=["quick-btn", "beat-delete-submit-btn"])
-                                with gr.Row():
-                                    copy_beat_source = gr.Number(label="复制源 Beat 序号", value=1, minimum=1, precision=0, step=1)
-                                    copy_beat_target = gr.Number(label="插入为 Beat 序号", value=2, minimum=1, precision=0, step=1)
-                                    copy_beat_btn = gr.Button("复制 Beat", elem_classes=["quick-btn", "quick-blue"])
-                                gr.Markdown("复制剧情、绑定、已保存的提示词和配置；不复制小说原文和生成记录。目标位置及后续 Beat 顺延，填总数 + 1 可追加到末尾。提示词修改后请先保存。")
+                        with gr.Accordion("Beat 检查与管理", open=False, elem_id="beat_management_panel"):
+                            with gr.Row(elem_classes=["beat-check-toolbar"]):
+                                gr.HTML('<div class="beat-section-heading"><span class="beat-section-mark">检查</span><span>检测全部 Beat 的复杂度风险</span></div>')
+                                detect_beat_risk_btn = gr.Button("检测全部 Beat", elem_id="detect_beat_risk_btn", scale=0, min_width=120, elem_classes=["beat-control", "beat-check-primary"])
+                            beat_risk_notice = gr.HTML("", elem_id="beat_risk_notice")
+                            with gr.Row(elem_classes=["beat-manage-row"]):
+                                complex_beat_index = gr.Number(
+                                    label="目标 Beat", value=1, step=1, precision=0,
+                                    scale=0, min_width=108, elem_id="complex_beat_index",
+                                    elem_classes=["beat-number-field"],
+                                )
+                                split_complex_beat_btn = gr.Button("拆分指定 Beat", elem_id="split_complex_beat_btn", scale=0, min_width=120, elem_classes=["beat-control", "beat-action-outline"])
+                                add_beat_btn = gr.Button("新增 Beat", scale=0, min_width=96, elem_classes=["beat-control", "beat-action-neutral"])
+                                delete_beat_btn = gr.Button("删除指定 Beat", scale=0, min_width=108, elem_classes=["beat-control", "beat-action-danger"])
+                            with gr.Group(elem_classes=["beat-copy-section"]):
+                                gr.HTML('<div class="beat-section-heading"><span class="beat-section-mark beat-mark-resource">复制</span><span>从已有 Beat 创建副本</span></div>')
+                                with gr.Row(elem_classes=["beat-copy-row"]):
+                                    copy_beat_source = gr.Number(label="来源 Beat", value=1, minimum=1, precision=0, step=1, scale=0, min_width=108, elem_classes=["beat-number-field"])
+                                    copy_beat_target = gr.Number(label="插入位置", value=2, minimum=1, precision=0, step=1, scale=0, min_width=108, elem_classes=["beat-number-field"])
+                                    copy_beat_btn = gr.Button("复制 Beat", scale=0, min_width=96, elem_classes=["beat-control", "beat-action-neutral"])
+                                gr.Markdown("插入后，原位置及后续 Beat 顺延；填总数 + 1 可追加到末尾。", elem_classes=["beat-helper"])
+                                gr.HTML('<div class="beat-copy-footnote"><span>提示词修改后，请先保存再复制。</span><details><summary>复制内容说明</summary><p>复制剧情、绑定、已保存的提示词与配置；不含小说原文和生成记录。</p></details></div>')
+                            with gr.Group(elem_classes=["beat-generation-options"]):
                                 ignore_beat_risk_box = gr.Checkbox(
-                                    label="忽略 Beat 风险，继续生成分段提示词",
-                                    value=False,
-                                    elem_id="ignore_beat_risk_box",
+                                    label="允许在存在 Beat 风险时生成分段提示词",
+                                    value=False, elem_id="ignore_beat_risk_box",
                                 )
-                                beat_risk_report = gr.Code(
-                                    label="Beat 风险报告",
-                                    value="",
-                                    language="json",
-                                    lines=10,
-                                    visible=False,
-                                )
+                                gr.Markdown("勾选后，后续生成操作将跳过风险拦截；不会立即开始生成。", elem_classes=["beat-helper", "beat-checkbox-help"])
+                            beat_risk_report = gr.Code(label="Beat 风险报告", value="", language="json", lines=10, visible=False)
 
                         video_jobs_json = gr.Code(
                             label="video_jobs.json",
@@ -530,6 +527,15 @@ def build_layout():
                                             project_assets_save_owners_btn = gr.Button("保存所选素材归属", elem_id="project_assets_save_owners_btn", variant="primary")
                                             project_assets_unbind_btn = gr.Button("解除所选素材绑定", elem_id="project_assets_unbind_btn")
                                         project_assets_status = gr.Markdown("", elem_classes=["project-assets-assignment-status"])
+                                        with gr.Accordion('本项目人物名称', open=False) as project_character_names_panel:
+                                            gr.Markdown('选择人物后编辑本项目名称和别名；名称留空时使用素材库默认名。别名用逗号分隔。')
+                                            project_character_names = gr.Dropdown(label='项目人物', choices=[], interactive=True)
+                                            project_character_local_name = gr.Textbox(label='项目内名称', placeholder='留空使用默认名称')
+                                            project_character_local_aliases = gr.Textbox(label='项目内别名', placeholder='多个别名用逗号分隔')
+                                            with gr.Row():
+                                                project_character_names_refresh = gr.Button('刷新人物列表')
+                                                project_character_names_save = gr.Button('保存本项目名称')
+                                            project_character_names_status = gr.Markdown('')
 
                         # Generation handlers still consume Project Bible state. Keep its
                         # synchronized fields hidden; material selection now happens only
@@ -597,8 +603,9 @@ def build_layout():
                             with gr.Row(elem_classes=["kv-row"]):
                                 gr.HTML('<div class="kv-key">LLM 模型</div>')
                                 deepseek_model_box = gr.Dropdown(
-                                    choices=["deepseek_v4-flash", "deepseek-v4-pro"],
-                                    value=CONFIG.get("deepseek_model", "deepseek_v4-flash"),
+                                    choices=["deepseek-flash", "deepseek-v4-pro"],
+                                    value=CONFIG.get("deepseek_model", "deepseek-flash"),
+                                    info="用于其他 API 功能；规划时长的 API 固定使用 deepseek-v4-pro。",
                                     allow_custom_value=True,
                                 )
                             with gr.Row(elem_classes=["kv-row"]):
@@ -610,8 +617,8 @@ def build_layout():
                                     lines=1,
                                 )
                             with gr.Row(elem_classes=["kv-row"]):
-                                gr.HTML('<div class="kv-key">输出目录</div>')
-                                output_dir = gr.Textbox(value=str(get_project_dir()), lines=1)
+                                gr.HTML('<div class="kv-key">当前生成目录（随项目 / 集数切换）</div>')
+                                output_dir = gr.Textbox(value=str(get_project_dir()), lines=1, interactive=False)
                         submit_backends = CONFIG.get("submit_backends") if isinstance(CONFIG.get("submit_backends"), dict) else {}
                         comfy_backend = submit_backends.get("comfyui") if isinstance(submit_backends, dict) else {}
                         runninghub_backend = submit_backends.get("runninghub") if isinstance(submit_backends, dict) else {}
@@ -772,6 +779,8 @@ def build_layout():
                                 episode_select_payload,
                                 episode_select_btn,
                                 operation_refresh_btn,
+                                operation_segment_refresh_btn,
+                                operation_beats_refresh_btn,
                                 open_videos_dir_btn,
                                 feedback_part_select,
                                 feedback_refresh_btn,

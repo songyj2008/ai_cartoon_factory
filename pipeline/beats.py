@@ -35,7 +35,8 @@ def build_beat_generation_input(story: dict[str, Any], target_duration_sec: int,
     from generation.model_rules import rules_for_model
 
     model_rules = rules_for_model(model_id)
-    payload = dict(story or {})
+    from services.llm_payloads import select_fields, STORY_FIELDS
+    payload = select_fields(story or {}, STORY_FIELDS)
     payload["target_duration_sec"] = int(target_duration_sec or CONFIG.get("default_video_duration", 60) or 60)
     count = _normalise_target_beat_count(target_beat_count)
     count_source = "user" if count else ""
