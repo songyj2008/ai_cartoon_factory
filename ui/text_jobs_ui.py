@@ -104,8 +104,9 @@ PANEL_JS = r'''
   const videoPhases={queued:'等待扩展领取',claimed:'准备网页提交',submitted:'豆包生成中',complete:'视频已保存',uncertain:'请检查原网页',error:'生成失败'};
   function videoView(row){
     const state={queued:'queued',claimed:'running',submitted:'running',complete:'applied',uncertain:'needs_attention',error:'error'}[row.state]||'needs_attention';
-    const phase=videoPhases[row.state]||row.state;
-    return {id:row.id,kind:'web_video',isVideo:true,title:`${row.channel==='doubao_web'?'豆包视频':row.channel} · 第 ${row.segment_index} 段`,
+    const basePhase=row.state==='submitted' && row.channel!=='doubao_web'?'网页视频生成中':videoPhases[row.state]||row.state;
+    const phase=basePhase+(row.browser_name?' · '+row.browser_name+(row.state==='queued' && !row.browser_online?'（离线，等待连接）':''):'');
+    return {id:row.id,kind:'web_video',isVideo:true,title:`${({doubao_web:'豆包视频',runninghub_web:'RunningHub 网页视频',runninghub_international_web:'RunningHub 国际网页视频'})[row.channel] || row.channel} · 第 ${row.segment_index} 段`,
       project:row.project,episode:row.episode,segment:{segment_index:row.segment_index,segment_uid:row.segment_uid},
       state,phase,progress:{percent:row.state==='complete'?100:0,node:phase},
       created:row.created_at,updated:row.updated_at,elapsed_seconds:Math.max(0,Math.floor(Date.now()/1000-row.created_at)),

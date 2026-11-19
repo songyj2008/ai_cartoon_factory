@@ -30,6 +30,7 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
     PromptBridge: P,TextProviderPolicy:testPolicies,TextTaskStore,FocusCoordinator,
     TextScheduler:{createScheduler:options=>TextScheduler.createScheduler({...options,now:()=>schedulerNow})},
     importScripts() {}, videoPumpFromStorage:async()=>{}, URL, Date,
+    navigator:{userAgent:'Chrome/130'},videoCatalog:async()=>[{id:'doubao_web'},{id:'runninghub_web'}],
     setTimeout:(fn,ms,...args)=>setTimeout(fn,ms===10000?5:ms===60000?50:ms,...args), clearTimeout, queueMicrotask,
     crypto: require('node:crypto').webcrypto, AbortSignal,
     fetch: async (url, opts) => {
@@ -37,7 +38,7 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
       if(url.endsWith('/ping')) {store.lastPing=JSON.parse(opts.body);return {ok:true,json:async()=>({ok:true,...(store.poolLimits?{
         limits:store.poolLimits,queued:Object.fromEntries(Object.keys(store.poolLimits).filter(id=>id!=='total').map(id=>
           [id,remoteTasks.filter(task=>task.provider===id && task.status==='queued' && !claimedIds.has(task.id)).length]))
-      }:{})})};}
+      }:{}),text_enabled:store.textEnabled !== false})};}
       if(url.endsWith('/claim')) {
         const attempt=++claims;
         const request=JSON.parse(opts.body);
@@ -62,7 +63,7 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
         assert.equal(options.url,'poller.html'); assert.deepEqual(Array.from(options.reasons),['WORKERS']);
         offscreen=true; offscreenCreates++;
       },closeDocument:async()=>{offscreen=false;}},
-      runtime: {id:'ext',onInstalled:event,onStartup:event,onMessage:{addListener(fn){listener=fn;}}},
+      runtime: {id:'ext',getManifest:()=>({version:'0.4.59'}),onInstalled:event,onStartup:event,onMessage:{addListener(fn){listener=fn;}}},
       debugger: {attach:async(target,version)=>debuggerCalls.push({action:'attach',target,version}),
         sendCommand:async(target,method,params)=>debuggerCalls.push({action:'command',target,method,params}),
         detach:async target=>debuggerCalls.push({action:'detach',target})},
@@ -133,6 +134,17 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
     qianwenInput:(message,sender)=>new Promise(resolve=>listener({type:'AICF_QIANWEN_INPUT',...message},sender,resolve)),
     trustedClick:(message,sender={id:'ext',tab:{id:7},url:'https://chat.deepseek.com/a/chat/test',frameId:0})=>new Promise(resolve=>listener({type:'AICF_TRUSTED_CONTINUE_CLICK',...message},sender,resolve))};
 }
+
+test('secondary browser registers capabilities without claiming text or opening task tabs',async()=>{
+ const f=fixture();f.store.textEnabled=false;
+ await f.poll();
+ assert.equal(f.claims,0);
+ assert.equal(f.sends,0);
+ assert.equal(f.browserTabs.length,1);
+ assert.equal(f.store.lastPing.browser.type,'Chrome');
+ assert.deepEqual(Array.from(f.store.lastPing.browser.channels),['doubao_web','runninghub_web']);
+ assert.match(f.store.bridgeStatus.message,/主浏览器/);
+});
 
 test('Qianwen trusted input inserts only stored text without clicking, Enter or switching tabs',async()=>{
  const f=fixture();

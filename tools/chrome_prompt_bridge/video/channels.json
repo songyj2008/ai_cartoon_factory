@@ -4,5 +4,23 @@
     "url": "https://www.doubao.com/chat/",
     "hostname": "doubao.com",
     "script": "video/doubao.js"
+  },
+  {
+    "id": "runninghub_web",
+    "url": "https://www.runninghub.cn/runow/home?mode=video&model=grp_83d7da0dcd3d",
+    "hostname": "www.runninghub.cn",
+    "dependencies": [
+      "video/runow_contract.js"
+    ],
+    "script": "video/runow.js"
+  },
+  {
+    "id": "runninghub_international_web",
+    "url": "https://www.runninghub.ai/runow/home?mode=video&model=grp_5947bf0b6892",
+    "hostname": "www.runninghub.ai",
+    "dependencies": [
+      "video/runow_contract.js"
+    ],
+    "script": "video/runow.js"
   }
 ]

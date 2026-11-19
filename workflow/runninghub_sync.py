@@ -227,14 +227,15 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
             and str(item.get("status") or "").strip().lower() in {"running", "pending", "workflow_ready", ""}
         )
         pending_task_ids = {_saved_task_id(item) for item, _ in pending}
-        usage_backfill = [
-            item
-            for item in segments
-            if str(item.get("backend") or "").strip().lower() == "runninghub"
-            and _saved_task_id(item)
-            and _saved_task_id(item) not in pending_task_ids
-            and attempt_needs_usage_sync(item, _saved_task_id(item))
-        ]
+        usage_backfill = []
+        for item in segments:
+            task_ids = {str(a.get("task_id") or "").strip()
+                        for a in item.get("runninghub_attempts") or [] if isinstance(a, dict)}
+            if str(item.get("backend") or "").strip().lower() == "runninghub":
+                task_ids.add(_saved_task_id(item))
+            for task_id in sorted(task_ids):
+                if task_id and task_id not in pending_task_ids and attempt_needs_usage_sync(item, task_id):
+                    usage_backfill.append((item, task_id))
         if not pending and not usage_backfill:
             if recovered_deferred:
                 save_video_jobs(payload)
@@ -250,7 +251,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
         # still creates at most one client per deployment.
         providers: dict[str, RunningHubSubmitProvider] = {}
 
-        def provider_for(segment: dict[str, Any]) -> RunningHubSubmitProvider:
+        def provider_for(segment: dict[str, Any], task_id: str = "") -> RunningHubSubmitProvider:
             # A segment can later be prepared for another model.  Poll the
             # immutable render that owns this remote task rather than using the
             # segment's next selected model/workflow.
@@ -258,7 +259,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
             try:
                 from generation.render_history import find_render
 
-                render = find_render(segment, task_id=_saved_task_id(segment))
+                render = find_render(segment, task_id=task_id or _saved_task_id(segment))
                 model = render.get("model") if isinstance(render, dict) else {}
                 model_id = str((model or {}).get("id") or "").strip()
             except Exception:
@@ -324,7 +325,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
                 if not outputs:
                     outputs = provider.client.get_task_outputs(task_id)
                 record_runninghub_attempt(segment, task_id, status=status_text, outputs=outputs)
-                if not outputs and status_text not in DONE_STATUSES:
+                if not any(item.get("fileUrl") or item.get("file_url") or item.get("url") for item in outputs) and status_text not in DONE_STATUSES:
                     continue
                 video_path, output_urls = provider._download_first_video(outputs, part_id, task_id)
                 segment["submit_result"] = {
@@ -428,9 +429,8 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
         # Completed jobs created before usage tracking was introduced have a
         # task id but no history record.  Fetch their output metadata once so
         # old episode data can be included in the same totals.
-        for segment in usage_backfill:
-            provider = provider_for(segment)
-            task_id = _saved_task_id(segment)
+        for segment, task_id in usage_backfill:
+            provider = provider_for(segment, task_id)
             if not attempt_needs_usage_sync(segment, task_id):
                 continue
             try:

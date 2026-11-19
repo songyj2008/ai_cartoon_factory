@@ -277,7 +277,7 @@ def _format_usage_number(value: Any, suffix: str = "") -> str:
         return "待同步"
     if number.is_integer():
         return f"{int(number)}{suffix}"
-    return f"{number:.2f}{suffix}"
+    return f"{number:.3f}".rstrip("0").rstrip(".") + suffix
 
 
 def _format_task_duration(value: Any) -> str:
@@ -290,6 +290,17 @@ def _format_task_duration(value: Any) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
 
+def _format_rh_duration(value: Any) -> str:
+    # Model-backed tasks can report zero even after a long cloud run.
+    # That value does not establish an actual zero-second execution.
+    try:
+        if value is not None and float(value) == 0:
+            return "未提供（接口返回 0）"
+    except (TypeError, ValueError):
+        return "待同步"
+    return _format_task_duration(value)
+
+
 def _runninghub_usage_history(segment: dict[str, Any]) -> str:
     from workflow.runninghub_usage import runninghub_attempt_model_id
 
@@ -297,10 +308,17 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
     attempts = video_attempts(segment)
     if not attempts:
         return ""
-    rh_count = len([item for item in attempts if item.get('backend') != 'doubao_web'])
+    from generation.channels import get_channel
+    def web_channel(backend):
+        try:
+            channel = get_channel(backend)
+            return channel if not channel.uses_workflow else None
+        except ValueError:
+            return None
+    rh_count = len([item for item in attempts if not web_channel(item.get('backend'))])
     usage = segment.get("runninghub_usage") if isinstance(segment.get("runninghub_usage"), dict) else {}
-    total_task_cost = _format_task_duration(usage.get("total_task_cost_seconds")) if usage.get("task_cost_seconds_known") else "待同步"
-    total_coins = _format_usage_number(usage.get("total_consume_coins"), " RH币") if usage.get("consume_coins_known") else "待同步"
+    total_task_cost = _format_rh_duration(usage.get("total_task_cost_seconds")) if usage.get("task_cost_seconds_known") else "待同步"
+    total_points = _format_usage_number(usage.get("total_consume_points"), " RH积分") if usage.get("consume_points_known") else "待同步"
     segment_index = int(segment.get("segment_index") or 0)
     active_task_id = str(segment.get("task_id") or "").strip()
     selected_task_id = ""
@@ -322,9 +340,10 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
         task_id = str(attempt.get("task_id") or "").strip()
         attempt_model_id = runninghub_attempt_model_id(segment, attempt)
         attempt_model_label = _model_label(attempt_model_id) if attempt_model_id else "未标注"
-        is_web = attempt.get('backend') == 'doubao_web'
+        browser_channel = web_channel(attempt.get('backend'))
+        is_web = browser_channel is not None
         if is_web:
-            attempt_model_label = '豆包网页视频'
+            attempt_model_label = getattr(browser_channel, 'history_label', '豆包网页视频')
         video_path = "" if attempt.get("video_deleted") else str(attempt.get("video_path") or "").strip()
         # Attempts created before task-video history was introduced can still
         # preview/delete the currently active completed task.
@@ -366,8 +385,8 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
             f'<td class="usage-model-label" title="{esc(attempt_model_id)}">{esc(attempt_model_label)}</td>'
             f"<td class=\"usage-task-id\">{esc(task_id or '—')}</td>"
             f"<td>{esc(status_text)}</td>"
-            f"<td>{esc(_format_task_duration(attempt.get('task_cost_seconds')))}</td>"
-            f"<td>{esc('免费渠道' if is_web else _format_usage_number(attempt.get('consume_coins'), ' RH币'))}</td>"
+            f"<td>{esc((_format_task_duration if is_web else _format_rh_duration)(attempt.get('task_cost_seconds')))}</td>"
+            f"<td>{esc(getattr(browser_channel, 'history_cost_label', '免费渠道') if is_web else _format_usage_number(attempt.get('consume_points'), ' RH积分'))}</td>"
             '<td class="usage-delete-cell">'
             '<div class="usage-row-actions">'
             f"{prompt_button}"
@@ -382,10 +401,10 @@ def _runninghub_usage_history(segment: dict[str, Any]) -> str:
         )
     return f"""
         <details class="usage-history">
-            <summary>视频列表与计费明细（生成 {len(attempts)} 次，RH 重试 {max(0, rh_count - 1)} 次，RH 累计 {total_coins}，RH 耗时 {total_task_cost}）</summary>
+            <summary>视频列表与计费明细（生成 {len(attempts)} 次，RH 重试 {max(0, rh_count - 1)} 次，RH 累计 {total_points}，RH 运行耗时 {total_task_cost}）</summary>
             <div class="usage-table-wrap">
                 <table>
-                    <thead><tr><th>次数</th><th>生成模型</th><th>任务 ID</th><th>状态</th><th>任务耗时</th><th>RH币</th><th aria-label="任务操作"></th></tr></thead>
+                    <thead><tr><th>次数</th><th>生成模型</th><th>任务 ID</th><th>状态</th><th>RH 运行耗时</th><th>RH积分</th><th aria-label="任务操作"></th></tr></thead>
                     <tbody>{''.join(rows)}</tbody>
                 </table>
             </div>
@@ -826,6 +845,13 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         protected_button_title = "取消视频OK保护" if protected_video_ok else (
             "标记该分段视频OK" if can_toggle_video_ok else "本段还没有生成视频，不能标记视频OK"
         )
+        reset_queued_html = ""
+        if segment_status == "queued" and backend.strip().lower().endswith("_web"):
+            reset_queued_html = (
+                '<button type="button" class="card-regen-btn action-utility" '
+                'title="释放卡住的排队状态；原网页任务会被取消且不再接收结果，不会自动重发" '
+                f'onclick="return window.AICF.resetQueuedSegment(\'{idx}\', this)">重置排队</button>'
+            )
         video_display = short_path_name(video_path) or "未生成"
         if stale_video_path and not video_path:
             video_display = "待重新生成"
@@ -970,6 +996,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
                             {editor_action_html}
                             {video_regen_action_html}
                             {prompt_regen_action_html}
+                            {reset_queued_html}
                             <button type="button" class="card-regen-btn action-utility" aria-pressed="{protected_button_pressed}" title="{esc(protected_button_title)}" {protected_button_disabled} onclick="return window.AICF.toggleSegmentVideoOk('{idx}', {str(protected_video_ok).lower()}, this)">
                                 {protected_button_label}
                             </button>
@@ -1003,13 +1030,13 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
     final_video = str(data.get("final_video_path") or "")
     final_preview = _render_video_preview_btn(final_video, "final") if final_video and Path(final_video).exists() else ""
     final_usage = data.get("final_video_usage") if isinstance(data.get("final_video_usage"), dict) else {}
-    final_coins = (
-        _format_usage_number(final_usage.get("total_consume_coins"), " RH币")
-        if int(final_usage.get("consume_coins_known_segment_count") or 0) > 0
+    final_points = (
+        _format_usage_number(final_usage.get("total_consume_points"), " RH积分")
+        if int(final_usage.get("consume_points_known_segment_count") or 0) > 0
         else "待同步"
     )
     final_task_cost = (
-        _format_task_duration(final_usage.get("total_task_cost_seconds"))
+        _format_rh_duration(final_usage.get("total_task_cost_seconds"))
         if int(final_usage.get("task_cost_seconds_known_segment_count") or 0) > 0
         else "待同步"
     )
@@ -1042,11 +1069,11 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
             <div class="panel-subtitle">每个 Beat 由所选模型独立编译；可单段重新生成、预览并最终合并。各模型的时长、参考素材和音频能力以其自身契约为准。</div>
             <button type="button" class="segment-ok-filter{filter_class}" aria-pressed="{filter_pressed}" aria-label="{filter_label}" title="{filter_label}" onclick="return window.AICF.toggleVideoOkSegmentVisibility(this)">OK</button>
         </div>
-        <div class="usage-summary-line" role="status">本集最终视频累计：<b>{esc(final_coins)}</b><span>（共 {final_generation_count} 次生成，重试 {final_retry_count} 次，任务累计耗时 {esc(final_task_cost)}）</span></div>
+        <div class="usage-summary-line" role="status">本集最终视频累计：<b>{esc(final_points)}</b><span>（共 {final_generation_count} 次生成，重试 {final_retry_count} 次，任务累计耗时 {esc(final_task_cost)}）</span></div>
         {empty_filtered}
         {"".join(cards)}
         {retired_history}
-        <div class="final-output-line">最终视频：<b>{esc(short_path_name(final_video) or "未合并")}</b> {final_preview}<span class="final-usage">RH币总消耗：<b>{esc(final_coins)}</b></span></div>
+        <div class="final-output-line">最终视频：<b>{esc(short_path_name(final_video) or "未合并")}</b> {final_preview}<span class="final-usage">RH积分总消耗：<b>{esc(final_points)}</b></span></div>
     </div>
     """
 

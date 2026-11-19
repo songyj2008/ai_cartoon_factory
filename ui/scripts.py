@@ -118,40 +118,6 @@ window.switchDevTab = function(evt, tabId) {
 };
 function initAICF() {
 window.AICF.bindProjectAssetCardSelection();
-try {
-    document.body.classList.toggle('minimal-mode', localStorage.getItem('ui_minimal_mode') === 'true');
-} catch (e) {}
-window.AICF.setActionRows = function(enabled) {
-    try {
-        enabled = !!enabled;
-        document.querySelectorAll('.main-action-row').forEach(function(row) {
-            row.classList.toggle('aicf-force-hidden', enabled);
-            row.classList.toggle('aicf-force-grid', !enabled);
-            row.style.display = enabled ? 'none' : '';
-        });
-        document.querySelectorAll('.one-click-action-row').forEach(function(row) {
-            row.classList.toggle('aicf-force-hidden', !enabled);
-            row.classList.toggle('aicf-force-flex', enabled);
-            row.style.display = enabled ? 'flex' : 'none';
-            row.style.justifyContent = 'center';
-            row.style.alignItems = 'center';
-        });
-    } catch (error) {}
-};
-window.AICF.applyMinimalMode = function(enabled) {
-    try {
-        enabled = !!enabled;
-        document.body.classList.toggle('minimal-mode', enabled);
-        window.AICF.setActionRows(enabled);
-    } catch (error) {}
-};
-window.AICF.syncMinimalMode = function() {
-    try {
-        var minimalBox = document.querySelector('#minimal_mode_box input[type="checkbox"]');
-        var enabled = minimalBox ? !!minimalBox.checked : localStorage.getItem('ui_minimal_mode') === 'true';
-        window.AICF.applyMinimalMode(enabled);
-    } catch (error) {}
-};
 window.AICF.bindTargetBeatCountInput = function() {
     var proxy = document.getElementById('target_beat_count_proxy');
     var source = document.querySelector('#target_beat_count_box textarea, #target_beat_count_box input');
@@ -171,16 +137,6 @@ window.AICF.bindTargetBeatCountInput = function() {
         source.dispatchEvent(new Event('change', { bubbles: true }));
     });
 };
-if (!window.AICF._minimalModeDelegated) {
-    window.AICF._minimalModeDelegated = true;
-    document.addEventListener('change', function(event) {
-        var target = event && event.target;
-        if (target && target.matches && target.matches('#minimal_mode_box input[type="checkbox"]')) {
-            localStorage.setItem('ui_minimal_mode', target.checked ? 'true' : 'false');
-            window.AICF.applyMinimalMode(target.checked);
-        }
-    }, true);
-}
 window.AICFRunTimer = window.AICFRunTimer || {
     format: function(seconds) {
         seconds = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -1404,6 +1360,41 @@ window.AICF.confirmDeleteTaskVideo = function(segmentIndex, taskId, button) {
     });
     return false;
 };
+window.AICF.resetQueuedSegment = function(segmentIndex, button) {
+    if (window.AICF.archiveReadOnly || (button && button.disabled)) return false;
+    if (!window.confirm(
+        '确定重置本段的排队状态吗？\n\n' +
+        '原网页任务将被取消且不再接收结果；不会自动重发，也不会产生新的费用。\n' +
+        '重置后可以重新提交该分段。'
+    )) return false;
+    var originalText = button ? button.textContent : '';
+    var card = button && button.closest ? button.closest('.group-card') : null;
+    var segmentUid = card ? (card.getAttribute('data-segment-uid') || '') : '';
+    if (button) {
+        button.disabled = true;
+        button.textContent = '…';
+    }
+    fetch('/api/segment/reset_queued_task', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({segment_index: Number(segmentIndex), segment_uid: segmentUid})
+    }).then(function(response) {
+        return response.json().then(function(data) {
+            if (!response.ok || !data || !data.ok) {
+                throw new Error((data && data.message) || '重置排队任务失败');
+            }
+            window.location.reload();
+        });
+    }).catch(function(error) {
+        console.error('reset queued segment failed', error);
+        alert(error && error.message ? error.message : '重置排队任务失败');
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || '重置排队';
+        }
+    });
+    return false;
+};
 window.AICF.selectUsageAttemptVideo = function(segmentIndex, taskId, button) {
     if (window.AICF.archiveReadOnly || !taskId || (button && button.disabled)) return false;
     var card = button && button.closest ? button.closest('.group-card') : null;
@@ -1455,6 +1446,41 @@ window.AICF.mountVideoChannels = async function(segmentIndex) {
         if (!response.ok || !data.ok) throw new Error(data.message || '无法读取视频渠道');
         if (String(modal.dataset.segmentIndex) !== String(segmentIndex) || String(modal.dataset.h3Session || '') !== channelSession || !field.isConnected) return;
         field._channels = data.channels || [];
+        var browserLabel=document.createElement('label');browserLabel.textContent='网页视频执行浏览器';
+        var browserSelect=document.createElement('select');browserSelect.setAttribute('aria-label','网页视频执行浏览器');
+        var defaultBrowser=document.createElement('option');defaultBrowser.value='';defaultBrowser.textContent='跟随渠道默认 / 文字主浏览器';browserSelect.append(defaultBrowser);
+        for(const browser of (data.browsers || []).filter(item=>item.online)) {
+            var browserOption=document.createElement('option');browserOption.value=browser.id;
+            browserOption.textContent=browser.name+(browser.online?' · 在线':' · 离线');browserSelect.append(browserOption);
+        }
+        browserSelect.value=data.video_browser_id || '';browserSelect.disabled=!!window.AICF.archiveReadOnly;
+        browserSelect.onchange=function() {
+            field.disabled=true;
+            field._savePending=(async()=>{
+                const response=await fetch('/api/video-channels/segments/'+encodeURIComponent(segmentIndex),{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({channel_id:data.selected,video_browser_id:browserSelect.value})});
+                const result=await response.json();if(!response.ok || !result.ok)throw new Error(result.message || '浏览器保存失败');
+                data.video_browser_id=browserSelect.value;hint.textContent='执行浏览器已保存';
+            })();
+            field._savePending.catch(error=>{hint.textContent=error.message;browserSelect.value=data.video_browser_id || '';}).finally(()=>{field.disabled=false;});
+        };
+        browserLabel.append(browserSelect);field.append(browserLabel);
+        if(data.video_task_id) {
+            const move=document.createElement('button');move.type='button';move.textContent='将排队视频任务改到所选浏览器';
+            move.disabled=!!window.AICF.archiveReadOnly;
+            move.onclick=async()=>{
+                move.disabled=true;
+                try {
+                    if(!browserSelect.value)throw new Error('请先选择具体浏览器');
+                    const response=await fetch('/api/web-video/tasks/'+encodeURIComponent(data.video_task_id)+'/browser',{
+                        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:browserSelect.value})});
+                    const result=await response.json();if(!response.ok || !result.ok)throw new Error(result.message || '更换失败');
+                    hint.textContent='排队视频任务已更换执行浏览器';
+                }catch(error){hint.textContent=error.message;}finally{move.disabled=false;}
+            };
+            field.append(move);
+        }
         hint.textContent = '默认使用 RunningHub；切换后按分段自动保存。';
         field._channels.forEach(function(item) {
             var label = document.createElement('label');
@@ -3343,26 +3369,6 @@ window._findGradioInput = window.AICF.findGradioInput;
         if (window.AICF && window.AICF.bindTargetBeatCountInput) {
             window.AICF.bindTargetBeatCountInput();
         }
-        var minimalBox = document.querySelector('#minimal_mode_box input[type="checkbox"]');
-        if (minimalBox && !minimalBox._minimalModeBound) {
-            minimalBox._minimalModeBound = true;
-            var serverMinimal = !!minimalBox.checked;
-            if (!serverMinimal && localStorage.getItem('ui_minimal_mode') === null && localStorage.getItem('aicf_minimal_mode') !== null) {
-                serverMinimal = localStorage.getItem('aicf_minimal_mode') === 'true';
-            }
-            localStorage.setItem('ui_minimal_mode', serverMinimal ? 'true' : 'false');
-            minimalBox.checked = serverMinimal;
-            window.AICF.applyMinimalMode(serverMinimal);
-            minimalBox.addEventListener('change', function() {
-                localStorage.setItem('ui_minimal_mode', minimalBox.checked ? 'true' : 'false');
-                window.AICF.applyMinimalMode(minimalBox.checked);
-            });
-        } else {
-            var minimalSaved = localStorage.getItem('ui_minimal_mode') === 'true';
-            window.AICF.applyMinimalMode(minimalSaved);
-        }
-        window.setTimeout(window.AICF.syncMinimalMode, 60);
-        window.setTimeout(window.AICF.syncMinimalMode, 300);
         var fbtn = document.getElementById('final_video_preview_btn');
         if (fbtn && !fbtn._previewBound) {
             fbtn._previewBound = true;

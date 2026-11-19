@@ -894,6 +894,26 @@ def register_api_routes(demo):
                 log(f"[LICON_MSR][api_delete_task_video][error] {exc}", "ERROR")
                 return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=400)
 
+        @app.post("/api/segment/reset_queued_task")
+        async def api_reset_queued_task(request: Request):
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            try:
+                from services import web_video_bridge
+
+                assert_current_runtime_writable("重置排队任务")
+                segment_index = int(float((payload or {}).get("segment_index") or 0))
+                segment_uid = str((payload or {}).get("segment_uid") or "").strip()
+                if segment_index <= 0:
+                    raise ValueError("segment_index 不能为空")
+                result = web_video_bridge.reset_queued_segment(segment_index, segment_uid)
+                return JSONResponse({"ok": True, "video_jobs": result, "log_tail": get_logs()})
+            except Exception as exc:
+                log(f"[api_reset_queued_task][error] {exc}", "ERROR")
+                return JSONResponse({"ok": False, "message": str(exc), "log_tail": get_logs()}, status_code=400)
+
         @app.post("/api/segment/select_task_video")
         async def api_select_task_video(request: Request):
             try:

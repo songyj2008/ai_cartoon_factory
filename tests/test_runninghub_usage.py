@@ -60,6 +60,8 @@ def test_attempt_history_preserves_retries_and_final_video_sums_segment_costs():
         "task_cost_seconds_known": True,
         "total_consume_coins": 27,
         "consume_coins_known": True,
+        "total_consume_points": 0,
+        "consume_points_known": False,
     }
     assert payload["final_video_usage"]["generation_count"] == 3
     assert payload["final_video_usage"]["total_task_cost_seconds"] == 235
@@ -128,3 +130,75 @@ def test_an_old_unlinked_attempt_is_not_relabelled_after_a_model_switch():
     }
 
     assert runninghub_attempt_model_id(segment, {"task_id": "old-task"}) == ""
+
+
+def test_real_point_response_is_recorded_without_coin_conversion():
+    from workflow.runninghub_client import _find_outputs
+    from workflow.runninghub_usage import attempt_needs_usage_sync
+    response = {"code": 0, "data": [
+        {"fileUrl": "https://example.test/a.mp4", "nodeId": "160", "taskCostTime": "0",
+         "consumeCoins": None, "settleMode": "POINT", "chargedPoint": "186.66"},
+        {"fileUrl": "https://example.test/b.mp4", "nodeId": "161", "taskCostTime": "0",
+         "consumeCoins": None, "settleMode": "POINT", "chargedPoint": "186.66"},
+    ]}
+    segment = {"runninghub_attempts": [{"task_id": "task", "status": "success", "usage_status": "recorded", "task_cost_seconds": 0}]}
+    assert attempt_needs_usage_sync(segment, "task")
+    attempt = record_runninghub_attempt(segment, "task", outputs=_find_outputs(response))
+    assert attempt["consume_points"] == 186.66
+    assert attempt["task_cost_seconds"] == 0
+    assert attempt.get("consume_coins") is None
+    assert not attempt_needs_usage_sync(segment, "task")
+    payload = {"segments": [segment]}
+    refresh_runninghub_usage_summaries(payload)
+    assert payload["final_video_usage"]["total_consume_points"] == 186.66
+
+
+def test_v2_and_webhook_task_usage_is_counted_once():
+    from workflow.runninghub_client import _find_outputs
+    event = {"status": "SUCCESS", "usage": {"chargedPoint": "12.345", "taskCostTime": "174"},
+             "results": [{"url": "https://example.test/a.mp4"}, {"url": "https://example.test/b.mp4"}],
+             "taskUsageList": [{"usage": {"chargedPoint": "12.345"}}]}
+    for response in (event, {"event": "TASK_END", "eventData": event}):
+        outputs = _find_outputs(response)
+        assert len([item for item in outputs if item.get("url")]) == 2
+        usage = task_usage_from_outputs(outputs)
+        assert usage["consume_points"] == 12.345
+        assert usage["task_cost_seconds"] == 174
+
+
+def test_missing_and_zero_point_costs_remain_distinct():
+    from workflow.runninghub_usage import attempt_needs_usage_sync
+    missing = record_runninghub_attempt({}, "missing", status="success", outputs=[{"taskCostTime": "0"}])
+    assert missing.get("consume_points") is None
+    assert missing["usage_status"] == "unavailable"
+    zero = record_runninghub_attempt({}, "zero", status="success", outputs=[{"chargedPoint": "0", "taskCostTime": "0"}])
+    assert zero["consume_points"] == 0
+    assert zero["usage_status"] == "recorded"
+    assert not attempt_needs_usage_sync({"runninghub_attempts": [missing]}, "missing")
+
+
+def test_task_level_usage_overrides_repeated_file_billing():
+    from workflow.runninghub_client import _find_outputs
+    usage = task_usage_from_outputs(_find_outputs({
+        "usage": {"chargedPoint": "25", "taskCostTime": "120"},
+        "results": [{"url": "https://example.test/a.mp4", "chargedPoint": "25"},
+                    {"url": "https://example.test/b.mp4", "chargedPoint": "25"}],
+    }))
+    assert usage["consume_points"] == 25
+    assert usage["task_cost_seconds"] == 120
+
+
+def test_usage_ui_displays_points_and_does_not_claim_zero_execution_time():
+    from ui.group_panel import _runninghub_usage_history, _format_rh_duration, _format_usage_number
+    segment = {"segment_index": 1}
+    record_runninghub_attempt(segment, "task", status="success", outputs=[{
+        "nodeId": "160", "chargedPoint": "186.66", "settleMode": "POINT", "taskCostTime": "0"}])
+    refresh_runninghub_usage_summaries({"segments": [segment]})
+    rendered = _runninghub_usage_history(segment)
+    assert "186.66 RH积分" in rendered
+    assert "RH币" not in rendered
+    assert "未提供（接口返回 0）" in rendered
+    assert _format_usage_number(12.345, " RH积分") == "12.345 RH积分"
+    assert _format_rh_duration(174) == "02:54"
+    assert _format_rh_duration(None) == "待同步"
+    assert _format_rh_duration("invalid") == "待同步"

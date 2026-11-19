@@ -119,7 +119,7 @@ class RunningHubClient:
             if status_text in {"failed", "failure", "error", "canceled", "cancelled"}:
                 raise RuntimeError(f"RunningHub task failed: {status}")
             outputs = self.get_task_outputs(task_id)
-            if outputs:
+            if any(item.get("fileUrl") or item.get("file_url") or item.get("url") for item in outputs):
                 return {"status": status, "outputs": outputs}
             time.sleep(self.poll_seconds)
 
@@ -182,13 +182,19 @@ def _find_outputs(value: Any) -> list[dict[str, Any]]:
                     "task_cost_time",
                     "consumeCoins",
                     "consume_coins",
+                    "chargedPoint",
                     "consumeMoney",
                     "thirdPartyConsumeMoney",
                 )
             )
             if url or has_usage:
                 found.append(item)
-            for key in ("outputs", "data", "result", "files"):
+            # V2 results/webhooks put task-level billing beside the files.
+            # Preserve it once, rather than copying charges onto every file.
+            usage = item.get("usage")
+            if isinstance(usage, dict):
+                found.append({**usage, "_task_usage": True})
+            for key in ("outputs", "data", "result", "results", "files", "eventData"):
                 child = item.get(key)
                 if child is not None:
                     walk(child)

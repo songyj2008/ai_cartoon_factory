@@ -212,9 +212,11 @@ def test_other_scene_progresses_after_one_group_fails(runtime,monkeypatch):
     task=batches.start(plan)
     for _ in range(2):batches.reconcile_pending()
     parent=text_jobs.get(task['id'])
-    assert '1:optimize' in parent['stages'] and '2:timing' in parent['stages']
-    assert '2:submit' not in parent['stages']
+    assert '1:optimize' in parent['stages'] and '2:timing' not in parent['stages']
     text_jobs.update(parent['stages']['1:optimize'],'error',message='group failed')
+    batches.reconcile_pending()
+    parent=text_jobs.get(task['id'])
+    assert '2:timing' in parent['stages'] and '2:submit' not in parent['stages']
     text_jobs.update(parent['stages']['2:timing'],'applied',result={'scene_batch_stamp':batches._stamp(load(project),'2')})
     for _ in range(2):batches.reconcile_pending()
     parent=text_jobs.get(task['id'])
@@ -541,3 +543,82 @@ def test_segment_apply_failure_has_persisted_finish_time(runtime, monkeypatch):
         assert failed['timing_state'] == 'error'
         assert failed['started_at'] == 1000 and failed['finished_at'] == 1010
         assert failed['elapsed_seconds'] == 8
+
+
+def test_independent_rows_prepare_serially_and_submit_without_waiting_for_render(runtime):
+    project, _ = runtime
+    plan = prepare(project)
+    for row in plan['rows']:
+        row['scene'] = ''
+    task = batches.start(plan)
+    for _ in range(3):
+        batches.reconcile_pending()
+    parent = text_jobs.get(task['id'])
+    assert list(parent['stages']) == ['1:timing']
+    first_id = parent['stages']['1:timing']
+    text_jobs.update(first_id, 'running')
+    for _ in range(3):
+        batches.reconcile_pending()
+    assert list(text_jobs.get(task['id'])['stages']) == ['1:timing']
+    text_jobs.update(first_id, 'applied', result={'scene_batch_stamp': batches._stamp(load(project), '1')})
+    for _ in range(2):
+        batches.reconcile_pending()
+    parent = text_jobs.get(task['id'])
+    assert set(parent['stages']) == {'1:timing', '1:submit', '2:timing'}
+    assert text_jobs.get(parent['stages']['1:submit'])['state'] == 'queued'
+    # Dispatch remains independent of the following segment's preparation.
+    text_jobs.update(parent['stages']['1:submit'], 'error', message='dispatch failed')
+    batches.reconcile_pending()
+    assert '3:timing' not in text_jobs.get(task['id'])['stages']
+
+
+def test_dispatch_serializes_preexisting_scene_batch_queue_across_providers(runtime):
+    from concurrent.futures import ThreadPoolExecutor
+    project, _ = runtime
+    plan = prepare(project)
+    for row in plan['rows']:
+        row['scene'] = ''
+    parent = batches.start(plan)
+    children = []
+    for row, provider in zip(plan['rows'], ['deepseek', 'chatgpt', 'doubao']):
+        child = batches._child(text_jobs.get(parent['id']), row, 'timing', load(project))
+        text_jobs.update(child['id'], provider=provider, provider_candidates=[provider])
+        children.append(child)
+    limits = {'total': 6, 'deepseek': 2, 'chatgpt': 2, 'doubao': 2}
+    with ThreadPoolExecutor(2) as pool:
+        claimed = list(pool.map(lambda _: text_jobs._claim_runnable({}, limits), range(2)))
+    running = [item for item in claimed if item]
+    assert len(running) == 1
+    assert running[0]['id'] == children[0]['id']
+    text_jobs.update(children[0]['id'], 'applied')
+    assert text_jobs._claim_runnable({}, limits)['id'] == children[1]['id']
+    assert text_jobs._claim_runnable({}, limits) is None
+
+
+def test_serial_preparation_keeps_saved_order_across_interleaved_scenes(runtime):
+    project, _ = runtime
+    plan = prepare(project)
+    plan['rows'][1]['scene'] = ''
+    task = batches.start(plan)
+    text_jobs.update(task['id'], progress_rows={'1': {'next': 5}})
+    for _ in range(3):
+        batches.reconcile_pending()
+    assert list(text_jobs.get(task['id'])['stages']) == ['2:timing']
+
+
+def test_existing_parallel_preparations_drain_before_claiming_another(runtime):
+    project, _ = runtime
+    plan = prepare(project)
+    for row in plan['rows']:
+        row['scene'] = ''
+    parent = batches.start(plan)
+    children = [batches._child(text_jobs.get(parent['id']), row, 'timing', load(project))
+                for row in plan['rows']]
+    for child in children[:2]:
+        text_jobs.update(child['id'], 'running')
+    limits = {'total': 6, 'deepseek': 2}
+    assert text_jobs._claim_runnable({}, limits) is None
+    text_jobs.update(children[0]['id'], 'applied')
+    assert text_jobs._claim_runnable({}, limits) is None
+    text_jobs.update(children[1]['id'], 'applied')
+    assert text_jobs._claim_runnable({}, limits)['id'] == children[2]['id']

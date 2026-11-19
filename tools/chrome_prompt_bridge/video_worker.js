@@ -1,6 +1,7 @@
 "use strict";
 // Separate video task lifecycle. Existing text-LLM tasks never enter this path.
-let videoPumping = false;
+const videoPumpingChannels = new Set();
+let videoPumpScanning = false;
 const videoKey = id => `videoTask:${id}`;
 let videoCatalogPromise;
 function videoCatalog() {
@@ -40,11 +41,12 @@ async function videoAssetLocalPath(config,task,image) {
     '/assets/'+encodeURIComponent(image.id)+'/local-path?lease='+encodeURIComponent(task.lease);
   const response=await fetch(url,{headers:{Authorization:'Bearer '+config.token},signal:AbortSignal.timeout(20000)});
   const result=await response.json();
-  if(!response.ok || !result.ok || !result.path)throw new Error(result.message || '豆包参考图片路径读取失败：'+image.name);
+  if(!response.ok || !result.ok || !result.path)throw new Error(result.message || '视频参考素材路径读取失败：'+image.name);
   return {name:image.name,path:result.path};
 }
 async function videoTab(adapter) {
-  if(adapter.id==='doubao_web')return chrome.tabs.create({url:adapter.url,active:false});
+  if(adapter.id==='doubao_web' || globalThis.VideoChannelDrivers?.[adapter.id]?.freshTab)
+    return chrome.tabs.create({url:adapter.url,active:false});
   const key='videoDedicatedTabId:'+adapter.id;
   const versionKey='videoAdapterVersion:'+adapter.id;
   const saved=await chrome.storage.local.get([key,versionKey]);
@@ -71,6 +73,8 @@ async function videoPage(task,type) {
   const operate=async()=>{
     let tab=await ensureTabReady(task.tabId);
     if(!new URL(tab.url).hostname.endsWith(adapter.hostname)) throw new Error('视频专用标签页已离开渠道网站');
+    const driver=globalThis.VideoChannelDrivers?.[task.channel];
+    if(driver?.matchesUrl && !driver.matchesUrl(tab.url))throw new Error('视频专用标签页已离开渠道生成页面');
     const versionKey='videoAdapterVersion:'+adapter.id;
     const expectedVersion=chrome.runtime.getManifest().version+':video-confirmation-v3';
     const version=(await chrome.storage.local.get(versionKey))[versionKey];
@@ -79,7 +83,7 @@ async function videoPage(task,type) {
       await chrome.storage.local.set({[versionKey]:expectedVersion});
       tab=await ensureTabReady(task.tabId);
     }
-    await chrome.scripting.executeScript({target:{tabId:tab.id},files:[adapter.script]});
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:[...(adapter.dependencies || []),adapter.script]});
     const result=await chrome.tabs.sendMessage(tab.id,{type,task});
     if(!result?.ok) {
       const error=new Error(result?.error || '视频网页未响应');
@@ -105,6 +109,8 @@ async function videoTrustedClick(sender,message) {
     throw new Error('仅允许豆包视频任务自动回复生成确认');
   const adapter=await videoAdapter(task.channel);
   if(!new URL(sender.url).hostname.endsWith(adapter.hostname)) throw new Error('视频发送页面不是任务渠道');
+  const driver=globalThis.VideoChannelDrivers?.[task.channel];
+  if(driver?.matchesUrl && !driver.matchesUrl(sender.url))throw new Error('视频操作页面不是任务渠道生成页面');
   const {x,y,width,height}=message;
   if(![x,y,width,height].every(Number.isFinite) || x<0 || y<0 || x>=width || y>=height)
     throw new Error('视频发送按钮坐标无效');
@@ -143,11 +149,14 @@ async function videoTrustedChooseFile(sender,message) {
   const files=Array.isArray(message.files)?message.files:[];
   const allowed=new Set(task?.filePaths || []);
   if(!Number.isInteger(tabId) || sender.frameId!==0 || task?.tabId!==tabId ||
-     task.state!=='claimed' || task.channel!=='doubao_web' || files.length!==1 || !allowed.has(files[0]))
+     task.state!=='claimed' || !(task.channel==='doubao_web' || globalThis.VideoChannelDrivers?.[task.channel]?.nativeUpload) ||
+     files.length!==1 || !allowed.has(files[0]))
     throw new Error('豆包参考图片选择任务无效');
   const adapter=await videoAdapter(task.channel);
   if(!new URL(sender.url).hostname.endsWith(adapter.hostname) || !(await chrome.tabs.get(tabId)).active)
     throw new Error('豆包视频专用页面未激活，参考图片未上传');
+  const driver=globalThis.VideoChannelDrivers?.[task.channel];
+  if(driver?.matchesUrl && !driver.matchesUrl(sender.url))throw new Error('视频素材上传页面不是任务渠道生成页面');
   const {x,y,width,height}=message;
   if(![x,y,width,height].every(Number.isFinite) || x<0 || y<0 || x>=width || y>=height)
     throw new Error('豆包上传菜单位置无效');
@@ -168,7 +177,7 @@ async function videoTrustedChooseFile(sender,message) {
     const deadline=Date.now()+12000;
     let menuClicked=false;
     while(!opened && Date.now()<deadline) {
-      if(!menuClicked) {
+      if(!menuClicked && task.channel==='doubao_web') {
         const result=await chrome.tabs.sendMessage(tabId,{type:'AICF_VIDEO_UPLOAD_MENU'});
         const menu=result?.menu;
         if(!opened && menu && [menu.x,menu.y,menu.width,menu.height].every(Number.isFinite) &&
@@ -192,17 +201,21 @@ async function videoTrustedChooseFile(sender,message) {
 }
 async function videoReport(config,task,state,extra={}) {
   const result=await videoApi(config,'/tasks/'+encodeURIComponent(task.id)+'/report',
-    {lease:task.lease,state,...extra});
+    {lease:task.lease,state,...(task.receipt?{receipt:task.receipt}:{}),...extra});
   task.state=state;
   if(state==='submitted')task.submittedAt=Date.now();
   await videoTaskSave(task);
-  if(state==='complete' && task.channel==='doubao_web' && task.ownedTab && result.task?.preview_ready) {
+  if(state==='complete' && (task.channel==='doubao_web' || globalThis.VideoChannelDrivers?.[task.channel]?.closeAfterComplete) && task.ownedTab && !task.cleanupSkipped && result.task?.preview_ready) {
     const url=new URL(result.task.preview_url,baseUrl(config.url));
     if(url.origin!==baseUrl(config.url) || !url.pathname.startsWith('/gradio_api/file='))return result;
     const response=await fetch(url.href,{headers:{Range:'bytes=0-1023'},signal:AbortSignal.timeout(10000)});
     if(response.ok && /video\//i.test(response.headers.get('content-type') || '') && (await response.arrayBuffer()).byteLength>0) {
+      await globalThis.VideoChannelDrivers?.[task.channel]?.cleanup?.(task);
       const tab=await chrome.tabs.get(task.tabId).catch(()=>null);
       const adapter=await videoAdapter(task.channel);
+      if(tab && task.channel!=='doubao_web' && task.pageUrl!==tab.url) {
+        task.cleanupSkipped=true;await videoTaskSave(task);return result;
+      }
       if(tab && new URL(tab.url).hostname.endsWith(adapter.hostname))await chrome.tabs.remove(task.tabId);
       task.tabClosed=true;await videoTaskSave(task);
     }
@@ -243,7 +256,9 @@ async function videoResume(config,task) {
     }
     return;
   }
-  const result=await videoPage(task,'AICF_VIDEO_STATUS');
+  const driver=globalThis.VideoChannelDrivers?.[task.channel];
+  const result=driver?.status?await driver.status(task):await videoPage(task,'AICF_VIDEO_STATUS');
+  if(result.receipt)task.receipt=result.receipt;
   if(result.failed) {
     task.phase='generation_failed';
     // Submission already happened: settle the render without releasing quota or retrying.
@@ -267,15 +282,31 @@ async function videoResume(config,task) {
     throw new Error('45 分钟内未确认视频完成；请检查豆包网页，任务不会自动重发');
 }
 async function videoPumpFromStorage() {
-  if(videoPumping)return;
-  videoPumping=true;
+  if(videoPumpScanning)return;
+  videoPumpScanning=true;
+  try {
+    const saved=await chrome.storage.local.get(['backend','clientId']);
+    if(!saved.backend?.enabled || !saved.backend.token)return;
+    const clientId=saved.clientId || crypto.randomUUID();
+    if(!saved.clientId)await chrome.storage.local.set({clientId});
+    for(const channel of await videoCatalog()) {
+      if(videoPumpingChannels.has(channel.id))continue;
+      videoPumpingChannels.add(channel.id);
+      // A slow page operation must not hold up another channel's next tick.
+      videoPumpChannel(saved.backend,clientId,channel.id)
+        .catch(error=>chrome.storage.local.set({videoBridgeStatus:{message:error.message || String(error),at:Date.now()}}))
+        .finally(()=>videoPumpingChannels.delete(channel.id));
+    }
+  } finally {videoPumpScanning=false;}
+}
+async function videoPumpChannel(config,clientId,channelId) {
   try {
     const saved=await chrome.storage.local.get(null);
-    const config=saved.backend;
-    if(!config?.enabled || !config.token)return;
-    const tasks=Object.entries(saved).filter(([key,value])=>key.startsWith('videoTask:') && value?.id)
+    const tasks=Object.entries(saved).filter(([key,value])=>key.startsWith('videoTask:') && value?.id && value.channel===channelId)
       .map(([,value])=>value);
-    const cleanup=tasks.find(task=>task.state==='complete' && task.channel==='doubao_web' && task.ownedTab && !task.tabClosed);
+    const cleanup=tasks.find(task=>task.state==='complete' &&
+      (task.channel==='doubao_web' || globalThis.VideoChannelDrivers?.[task.channel]?.closeAfterComplete) &&
+      task.ownedTab && !task.tabClosed && !task.cleanupSkipped);
     if(cleanup) {
       try {await videoReport(config,cleanup,'complete');} catch(error) {
         cleanup.lastCleanupError=error.message;await videoTaskSave(cleanup);
@@ -283,6 +314,13 @@ async function videoPumpFromStorage() {
     }
     const pending=tasks.find(task=>!['complete','error','uncertain'].includes(task.state));
     if(pending) {
+      const remote=(await videoApi(config,'/tasks/'+encodeURIComponent(pending.id)+'/status',{client_id:clientId})).task;
+      if(!remote || ['complete','error','uncertain','cancelled_unclaimed'].includes(remote.state)) {
+        pending.state=remote?.state==='cancelled_unclaimed'?'uncertain':remote?.state || 'uncertain';
+        pending.error=remote?.error || '后台任务已结束跟踪';
+        await videoTaskSave(pending);
+        return;
+      }
       if(pending.state==='claimed') {
         await videoReport(config,pending,'uncertain',{error:'扩展在网页提交前中断；请检查豆包页面后手动决定是否重新生成'});
         return;
@@ -302,18 +340,18 @@ async function videoPumpFromStorage() {
       }
       return;
     }
-    const clientId=saved.clientId || crypto.randomUUID();
-    if(!saved.clientId) await chrome.storage.local.set({clientId});
-    const catalog=await videoCatalog();
-    const claimed=(await videoApi(config,'/claim',{client_id:clientId,channels:catalog.map(item=>item.id)})).task;
+    const claimed=(await videoApi(config,'/claim',{client_id:clientId,channels:[channelId]})).task;
     if(!claimed)return;
     const task={...claimed,tabId:null,state:'claimed'};
     await videoTaskSave(task); // persist before any page action
     let sendAttempted=false;
     try {
       const tab=await videoTab(await videoAdapter(claimed.channel));
-      task.tabId=tab.id;task.ownedTab=claimed.channel==='doubao_web';await videoTaskSave(task);
-      if(claimed.channel==='doubao_web') {
+      const driver=globalThis.VideoChannelDrivers?.[claimed.channel];
+      task.tabId=tab.id;task.ownedTab=claimed.channel==='doubao_web' || driver?.freshTab===true;await videoTaskSave(task);
+      if(driver) {
+        await driver.prepare(config,task);
+      } else if(claimed.channel==='doubao_web') {
         task.images=await Promise.all((claimed.input.images || []).map(image=>videoAssetLocalPath(config,task,image)));
         task.filePaths=task.images.map(image=>image.path);
         await videoTaskSave(task);
@@ -322,17 +360,19 @@ async function videoPumpFromStorage() {
       }
       sendAttempted=true;
       const result=await videoPage(task,'AICF_VIDEO_SUBMIT');
-      task.images=[];task.filePaths=[];task.baseline=result.baseline || [];
+      task.images=[];task.media=[];task.filePaths=[];task.baseline=result.baseline || [];
+      if(result.pageUrl)task.pageUrl=result.pageUrl;
+      if(result.receipt)task.receipt=result.receipt;
       task.baselineReadyCount=result.baselineReadyCount || 0;
       task.baselineFailureCount=result.baselineFailureCount || 0;
       task.baselineConfirmationCount=result.baselineConfirmationCount || 0;
       task.phase='generating';
       await videoReport(config,task,'submitted');
     } catch(error) {
-      task.images=[];task.filePaths=[];
+      task.images=[];task.media=[];task.filePaths=[];
       await videoReport(config,task,sendAttempted && !error.beforeSend?'uncertain':'error',{error:error.message || String(error)});
     }
   } catch(error) {
     await chrome.storage.local.set({videoBridgeStatus:{message:error.message || String(error),at:Date.now()}});
-  } finally {videoPumping=false;}
+  }
 }

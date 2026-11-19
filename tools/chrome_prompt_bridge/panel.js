@@ -30,7 +30,7 @@ async function pollBackend() {
   try {
     const response = await Promise.race([
       chrome.runtime.sendMessage({ type: "AICF_BACKEND_POLL" }),
-      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("扩展后台未响应。请在 chrome://extensions 重新加载本扩展，再关闭并重开侧边栏。")), 15000); })
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("扩展后台未响应。请在浏览器扩展管理页重新加载本扩展，再关闭并重开侧边栏。")), 15000); })
     ]);
     if (response?.accepted) {
       const saved=(await chrome.storage.local.get('bridgeStatus')).bridgeStatus;
@@ -38,7 +38,7 @@ async function pollBackend() {
     } else if (response?.status) backendStatus(response.status.message, response.status.error);
   } catch (error) {
     if (/receiving end|establish connection|context invalidated/i.test(error.message || "")) {
-      throw new Error("扩展后台脚本未连接。请在 chrome://extensions 重新加载本扩展，再关闭并重开侧边栏。");
+      throw new Error("扩展后台脚本未连接。请在浏览器扩展管理页重新加载本扩展，再关闭并重开侧边栏。");
     }
     throw error;
   } finally { clearTimeout(timeout); }
@@ -133,6 +133,15 @@ async function assertManualTabFree(tabId) {
     throw new Error('所选标签页正在执行项目后台任务，请等待完成或选择其他标签页。');
 }
 async function submit(type) {
+  const state=await chrome.storage.local.get(['backend','clientId']);
+  if(state.backend?.enabled) {
+    const response=await fetch(state.backend.url+'/api/web-llm/bridge/text-permission',{
+      method:'POST',headers:{Authorization:'Bearer '+state.backend.token,'Content-Type':'application/json'},
+      body:JSON.stringify({client_id:state.clientId || ''}),signal:AbortSignal.timeout(10000)});
+    const permission=await response.json();
+    if(!response.ok || !permission.ok)throw new Error(permission.message || '主浏览器身份检查失败');
+    if(!permission.text_enabled)throw new Error('请先在项目设置中将此浏览器设为文字主浏览器，并等待原文字任务完成');
+  }
   let next = task;
   if (!activeTask()) {
     const tab = tabs.find(item => item.id === Number($("target").value));
@@ -199,7 +208,7 @@ for (const key of draftKeys) $(key).addEventListener("input", () => {
 });
 (async () => {
   controls();
-  if (!hasExtension) { $("target").options[0].textContent = "预览模式 · 加载扩展后选择对话"; status("界面预览模式。请在 Chrome 扩展侧边栏中使用提交功能。"); return; }
+  if (!hasExtension) { $("target").options[0].textContent = "预览模式 · 加载扩展后选择对话"; status("界面预览模式。请在 浏览器扩展侧边栏中使用提交功能。"); return; }
   const saved = await chrome.storage.local.get(["draft", "task", "settings"]);
   settings = saved.settings || {};
   const restoredDraft = saved.task && ["prepared", "sending", "waiting"].includes(saved.task.status) ? saved.task.draft : saved.draft;
@@ -210,6 +219,7 @@ for (const key of draftKeys) $(key).addEventListener("input", () => {
     if (area === "local" && changes.bridgeStatus) backendStatus(changes.bridgeStatus.newValue?.message || "", changes.bridgeStatus.newValue?.error);
   });
   const backend = (await chrome.storage.local.get("backend")).backend || {};
+  $('browser-name').value=(await chrome.storage.local.get('browserName')).browserName || '';
   $("backend-url").value = backend.url || "http://127.0.0.1:7860";
   $("backend-token").value = backend.token || "";
   const previousStatus = (await chrome.storage.local.get("bridgeStatus")).bridgeStatus;
@@ -222,6 +232,7 @@ for (const key of draftKeys) $(key).addEventListener("input", () => {
 
 $("connect-backend").addEventListener("click", runBackend(async () => {
   backendStatus("正在保存配置…");
+  await chrome.storage.local.set({browserName:$('browser-name').value.trim()});
   const url = new URL($("backend-url").value.trim());
   if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname) || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("请输入本机 HTTP 地址，例如 http://127.0.0.1:7860。");
   const token = $("backend-token").value.trim();
@@ -258,7 +269,7 @@ async function loadConversationPolicy() {
 $('save-conversation').addEventListener('click', async () => {
   const button = $('save-conversation'); button.disabled = true;
   try {
-    if (!hasExtension) throw new Error('请在 Chrome 扩展侧边栏中保存策略。');
+    if (!hasExtension) throw new Error('请在 浏览器扩展侧边栏中保存策略。');
     const maxRounds = Number($('conversation-rounds').value), maxChars = Number($('conversation-chars').value);
     if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 50) throw new Error('任务轮数须为 1–50 的整数。');
     if (!Number.isInteger(maxChars) || maxChars < 1000 || maxChars > 500000) throw new Error('累计字符须为 1000–500000 的整数。');

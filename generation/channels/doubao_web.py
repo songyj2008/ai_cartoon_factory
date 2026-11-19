@@ -63,7 +63,7 @@ class DoubaoWebChannel:
             return "缺少参考图片"
         from services.web_video_bridge import remaining_quota
 
-        if remaining_quota(self.id) <= 0:
+        if remaining_quota(self.id, segment=segment) <= 0:
             return "此账号今日 10 次免费生成额度已用完"
         return ""
 

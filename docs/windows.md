@@ -59,15 +59,15 @@ JSON 路径可用 `/`，如使用反斜杠必须写成 `\\`。默认 `../ComfyUI
 
 云端排队与渲染独立于本地文字准备；视频提交成功不等于渲染完成。失败时先查看对应任务的错误，确认额度、工作流、节点和素材格式，再决定是否重试。
 
-## 4. Chrome 扩展
+## 4. Chrome / Edge 扩展
 
-1. 打开 `chrome://extensions`，启用开发者模式。
+1. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`，启用开发者模式。
 2. 点击“加载已解压的扩展程序”，选择 `tools/chrome_prompt_bridge` 目录；不要选择整个项目，也不要加载旧 ZIP 包。
-3. 在应用“设置 → 模型配置 → 网页 LLM / Chrome 扩展”查看本机后台地址和配对码。
+3. 在应用“设置 → 模型配置 → 网页 LLM / 浏览器扩展”查看本机后台地址和配对码。
 4. 打开扩展侧边栏，填写该地址和配对码并启用连接。
 5. 打开并登录所需模型网页，按扩展配置绑定服务，确认应用显示在线后提交文字任务。
 
-当前清单版本为 0.4.46，服务包括 DeepSeek、ChatGPT、豆包和千问；千问文字功能仍需真实账号联调，不支持其视频附件任务。网页改版、登录、验证码和额度问题需要在浏览器处理。扩展声明 debugger 等权限用于受控输入，安装或更新时以 `manifest.json` 为准。
+当前清单版本为 0.4.59，服务包括 DeepSeek、ChatGPT、豆包和千问。各浏览器可填写不同实例名称，独立登录网站。设置页选择文字主浏览器和各网页视频渠道默认浏览器，分段编辑器支持单独保存执行浏览器和改派尚未领取的视频任务。文字主浏览器切换时等待原任务收尾，离线后可手动切换。同一网站账号的账号标识应填写相同值以共享额度统计。网页改版、登录、验证码和额度问题需要在浏览器处理。扩展声明 debugger 等权限用于受控输入，安装或更新时以 `manifest.json` 为准。多浏览器真实账号完整联调仍需验证。
 
 更新源码后须在扩展管理页点击“重新加载”，再刷新已打开的模型页面。仅重启 Python 不会更新浏览器内容脚本。已尝试发送但状态不明确的任务，不要连续重试发送；先核对原会话和任务回执。已确认回传的文字任务仅清理扩展创建的对应页，保留后台结果，不清空其他任务。
 
@@ -115,3 +115,17 @@ python app.py
 | 无素材、无历史项目 | 属于源码初始状态；自行导入素材或恢复本机备份 |
 
 PowerShell 设置端口的写法是 `$env:AI_CARTOON_FACTORY_PORT = "7861"`。默认只监听 `127.0.0.1`，本指南按本机使用配置。
+
+## 8. Windows EXE 发布包
+
+在 Windows x64 的 Anaconda Prompt 中进入项目，执行以下命令构建便携包。
+
+```bat
+conda activate ai_cartoon_factory
+python -m pip install -r requirements-desktop.txt pyinstaller
+python scripts/package_windows.py
+```
+
+构建需要 PATH 中可执行的 `ffmpeg` 和 `ffprobe`。首次构建会下载并验证微软签名的 WebView2 x64 离线安装器，缓存于 `.local/packaging/`。后续构建复用缓存。脚本在中文与空格路径的临时副本中清除 Python / Conda 路径，验证 EXE 启动、业务 API 和媒体工具，然后生成 `dist/AI_Cartoon_Factory_Windows_x64.zip` 及 SHA-256 文件。
+
+新电脑将完整 ZIP 解压到可写目录，双击 `AI_Cartoon_Factory.exe`。包内包含 Python、依赖、媒体工具和 WebView2 离线安装器。首次运行自动创建公开默认配置和空项目。生成服务、账号和素材按前文配置，迁移后在设置中重新填写密钥。便携包使用 Windows 10 / 11 x64 系统的 .NET Framework 4.8。详细启动说明随包附在 `使用说明.txt`。

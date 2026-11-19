@@ -60,32 +60,42 @@
    }
    async function withVideoForeground({taskId,tabId,returnUrl},action) {
      if(lease?.type==='video' && lease.taskId===taskId && lease.tabId===tabId)return action();
-     while(lease?.type==='text')await wakeWait();
-     if(lease)return {deferred:true,reason:'FOCUS_BUSY'};
-     const target=await chromeApi.tabs.get(tabId);
-     let original=(await chromeApi.tabs.query({active:true,windowId:target.windowId}))[0];
-     if(returnUrl) {
-       try {
-         const origin=new URL(returnUrl).origin;
-         const tabs=await chromeApi.tabs.query({windowId:target.windowId});
-         const projectTabs=tabs.filter(tab=>{try{return new URL(tab.url).origin===origin;}catch{return false;}});
-         original=projectTabs.find(tab=>tab.active) || projectTabs[0] || original;
-       } catch {}
-     }
-     const current={type:'video',taskId,tabId,windowId:target.windowId,
-       originalTabId:original?.id,startedAt:now(),userInterrupted:false};
-     lease=current;
-     await chromeApi.storage.session.set({[leaseKey]:current});
-     let completed=false;
+     while(lease)await wakeWait();
+     // Reserve focus before the first browser API await so other channels wait.
+     lease={type:'video',taskId,tabId};
      try {
-       if(!target.active){expectedTab=tabId;await chromeApi.tabs.update(tabId,{active:true});}
-       const value=await action();completed=true;return value;
-     } finally {
-       if(completed && !current.userInterrupted && original && original.id!==tabId) {
-         try {if((await chromeApi.tabs.get(tabId)).active)
-           {expectedTab=original.id;await chromeApi.tabs.update(original.id,{active:true});}}catch{}
+       const target=await chromeApi.tabs.get(tabId);
+       let original=(await chromeApi.tabs.query({active:true,windowId:target.windowId}))[0];
+       if(returnUrl) {
+         try {
+           const origin=new URL(returnUrl).origin;
+           const tabs=await chromeApi.tabs.query({windowId:target.windowId});
+           const projectTabs=tabs.filter(tab=>{try{return new URL(tab.url).origin===origin;}catch{return false;}});
+           original=projectTabs.find(tab=>tab.active) || projectTabs[0] || original;
+         } catch {}
        }
-       lease=null;await chromeApi.storage.session.remove(leaseKey).catch(()=>{});released();
+       const current={type:'video',taskId,tabId,windowId:target.windowId,
+         originalTabId:original?.id,startedAt:now(),userInterrupted:false};
+       lease=current;
+       await chromeApi.storage.session.set({[leaseKey]:current});
+       let completed=false;
+       try {
+         if(!target.active){expectedTab=tabId;await chromeApi.tabs.update(tabId,{active:true});}
+         const value=await action();completed=true;return value;
+       } finally {
+         if(completed && !current.userInterrupted && original && original.id!==tabId) {
+           try {if((await chromeApi.tabs.get(tabId)).active)
+             {expectedTab=original.id;await chromeApi.tabs.update(original.id,{active:true});}}catch{}
+         }
+         lease=null;await chromeApi.storage.session.remove(leaseKey).catch(()=>{});released();
+       }
+     } finally {
+       // Setup can fail before the action's own finally is entered.
+       if(lease?.type==='video' && lease.taskId===taskId && lease.tabId===tabId) {
+         lease=null;
+         await chromeApi.storage.session.remove(leaseKey).catch(()=>{});
+         released();
+       }
      }
    }
    async function recoverInterruptedLease(){

@@ -336,6 +336,11 @@
       if (matches.length !== 1) throw new Error("发送按钮选择器必须匹配唯一可见元素。");
       return matches[0];
     }
+    if (site === 'ChatGPT') {
+      const buttons = all('button#composer-submit-button,button[data-testid="send-button"]');
+      if (buttons.length > 1) throw new Error('ChatGPT 页面找到多个发送按钮，未发送；请检查发送按钮选择器。');
+      if (buttons.length === 1) return buttons[0];
+    }
     if(site==='千问') {
       const buttons=all('button[data-session-switch-target="send-query"]');
       if(buttons.length>1)throw new Error('千问页面找到多个发送按钮，未发送；请检查发送按钮选择器。');
@@ -473,7 +478,10 @@
       await waitForEditor(next.settings);
     }
     if (plan.fresh && (next.force_new_conversation || !equivalent(inputText(editor(next.settings)), next.request))) {
-      if (inputText(editor(next.settings)).trim()) throw new Error('开启新对话前发现输入框已有草稿，请先处理草稿；未切换或发送。');
+      const ownDraft = site === 'ChatGPT' && next.bridge &&
+        new URL(location.href).pathname === '/' && !all('[data-message-author-role]').length &&
+        equivalent(inputText(editor(next.settings)), next.request);
+      if (inputText(editor(next.settings)).trim() && !ownDraft) throw new Error('开启新对话前发现输入框已有草稿，请先处理草稿；未切换或发送。');
       const replies = () => all(site === 'ChatGPT' ? '[data-message-author-role]' :
         site === '豆包' ? '[data-testid*="message"],[class*="message-content"]' : '.ds-markdown');
       const emptyHome = () => site === '豆包'
@@ -707,6 +715,18 @@
     if (next.sent_at || (next.bridge && next.dispatch_attempted_at) ||
         (saved?.id === next.id && (saved.sent_at || (saved.bridge && saved.dispatch_attempted_at))))
       throw new Error("这个任务已尝试发送，不会重复点击。请查看网页并读取回复。");
+    // A user may submit the exact task while automatic preparation is paused.
+    // Adopt only a request carrying this task's unique marker on its bound tab;
+    // do this before preparing a fresh conversation or inspecting the composer.
+    if (site === 'ChatGPT' && next.bridge && saved?.id === next.id &&
+        pageHasRequest(next.id) && pageHasSubmittedRequest(next)) {
+      task = saved;
+      await persist({status:'waiting',sent_at:new Date().toISOString(),dispatch_url:location.href,
+        conversation_url:location.href,conversation_id:conversationIdentity(location.href),
+        message:'已识别手动发送的本任务请求，继续读取回复；不会重复提交。'});
+      observeReply();
+      return check();
+    }
     if (!task || task.id !== next.id || task.status !== "prepared" || !equivalent(inputText(editor(next.settings)), next.request)) await fill(next);
     const el = editor(task.settings);
     if (!equivalent(inputText(el), task.request)) throw new Error("网页输入内容已变化，未发送。请结束当前任务后重新填入。");
@@ -743,9 +763,9 @@
       observeReply();
       return task;
     }
-    if (site === 'DeepSeek') {
+    if (site === 'DeepSeek' || site === 'ChatGPT') {
       // In a background tab Chrome can throttle ten 200 ms timers for several
-      // minutes. DeepSeek may also replace the composer while navigating from
+      // minutes. These sites may also replace the composer while navigating from
       // / to the new chat, leaving the old `el` with its unchanged draft.
       // Check the live page once and let worker polls handle uncertain sends.
       const moved = location.href !== task.dispatch_url && Boolean(conversationIdentity(location.href));
@@ -756,10 +776,10 @@
       if (moved || currentInput === '' || pageHasRequest(task.id) || isGenerating()) {
         await persist({status:'waiting',
           ...(moved ? {conversation_url:location.href,conversation_id:conversationIdentity(location.href)} : {}),
-          message:'已尝试提交到 DeepSeek，正在读取本次回复；不会重复发送。'});
+          message:`已尝试提交到 ${site}，正在读取本次回复；不会重复发送。`});
         observeReply();
       } else {
-        await persist({status:'prepared',message:'发送状态尚未确认，正在自动检查网页；不会立即重复发送。'});
+        await persist({status:'prepared',message:'网页尚未接受提交，正在自动检查网页；不会立即重复发送。'});
       }
       return task;
     }

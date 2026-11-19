@@ -191,9 +191,12 @@ def _run_gradio() -> None:
         allowed_paths=allowed_paths(),
         prevent_thread_lock=True,
         quiet=True,
-        show_api=False,
         **ui_launch_kwargs(),
     )
+    from ui.api_routes import register_api_routes
+
+    register_api_routes(demo)
+    ensure_gradio_app_runtime(demo)
 
 
 def _wait_for_server(url: str, timeout_sec: int = 90) -> bool:
@@ -222,6 +225,9 @@ def main() -> None:
         raise RuntimeError(f"Gradio server did not start: {url}")
 
     if os.environ.get("AI_CARTOON_FACTORY_SMOKE") == "1":
+        # Readiness includes the business routes used by the frontend.
+        if not _wait_for_server(url + "/api/project/current_state"):
+            raise RuntimeError("Desktop API routes did not become ready")
         print(f"[desktop] smoke ok: {url}")
         os._exit(0)
 
@@ -237,7 +243,7 @@ def main() -> None:
         text_select=True,
     )
     try:
-        webview.start()
+        webview.start(gui="edgechromium")
     finally:
         runninghub_worker.stop()
     os._exit(0)

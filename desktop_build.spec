@@ -1,24 +1,47 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import os
+import shutil
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
-PROJECT_DIR = Path(r"F:\work\comfyui\ai_cartoon_factory")
+PROJECT_DIR = Path(SPECPATH)
 APP_NAME = "AI_Cartoon_Factory"
+WEBVIEW2_INSTALLER = Path(os.environ.get(
+    "AICF_WEBVIEW2_INSTALLER",
+    str(PROJECT_DIR / ".local" / "packaging" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"),
+))
 
 datas = [
-    (str(PROJECT_DIR / "config.json"), "."),
+    (str(PROJECT_DIR / "config.example.json"), "."),
     (str(PROJECT_DIR / "templates"), "templates"),
-    (str(PROJECT_DIR / "resources"), "resources"),
+    (str(PROJECT_DIR / "resources" / "brand"), "resources/brand"),
+    (str(WEBVIEW2_INSTALLER), "runtime"),
     (str(PROJECT_DIR / "web"), "web"),
+    # Gradio inspects custom component source when constructing its metadata.
+    (str(PROJECT_DIR / "ui" / "gradio_components.py"), "ui"),
     (str(PROJECT_DIR / "profiles"), "profiles"),
     (str(PROJECT_DIR / "prompt_profiles"), "prompt_profiles"),
-    (str(PROJECT_DIR / "projects"), "projects"),
     (str(PROJECT_DIR / "generation" / "channels" / "registry.json"), "generation/channels"),
-    (str(PROJECT_DIR / "tools" / "chrome_prompt_bridge"), "tools/chrome_prompt_bridge"),
 ]
+for source in (PROJECT_DIR / "tools" / "chrome_prompt_bridge").rglob("*"):
+    relative = source.relative_to(PROJECT_DIR)
+    if source.is_file() and not {"tests", "__pycache__"}.intersection(relative.parts):
+        datas.append((str(source), str(relative.parent)))
+
+for executable in ("ffmpeg", "ffprobe"):
+    source = shutil.which(executable)
+    if not source:
+        raise RuntimeError(f"Install {executable} and add it to PATH before packaging")
+    datas.append((source, "runtime"))
 binaries = []
+# Conda keeps these Python extension dependencies outside its DLLs directory.
+import sys
+for name in ("ffi.dll", "sqlite3.dll", "libmpdec-4.dll"):
+    source = Path(sys.prefix) / "Library" / "bin" / name
+    if source.is_file():
+        binaries.append((str(source), "."))
 hiddenimports = [
     "uvicorn",
     "uvicorn.loops.auto",
@@ -35,6 +58,8 @@ for package in [
     "starlette",
     "pydantic",
     "gradio_client",
+    "safehttpx",
+    "groovy",
     "webview",
 ]:
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
@@ -68,7 +93,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[str(PROJECT_DIR / "pyinstaller_hooks")],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(PROJECT_DIR / "pyinstaller_hooks" / "desktop_runtime.py")],
     excludes=[
         "torch",
         "torchvision",
@@ -85,6 +110,15 @@ a = Analysis(
 )
 
 a.binaries = prepare_binaries(a.binaries)
+# Omit generated media and dependency demo/test assets from distributable data.
+video_suffixes = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+a.datas = [
+    item for item in a.datas
+    if Path(item[0]).suffix.lower() not in video_suffixes
+    and not {"media_assets", "test_data", "tests", "__pycache__"}.intersection(
+        str(item[0]).replace("\\", "/").split("/")
+    )
+]
 
 pyz = PYZ(a.pure)
 
@@ -104,6 +138,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    contents_directory=".",
 )
 
 coll = COLLECT(

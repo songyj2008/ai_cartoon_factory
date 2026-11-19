@@ -53,3 +53,22 @@ test('video foreground defers text wake and releases after submission',async()=>
  release();assert.equal(await video,'done');
  assert.equal(f.tabs.find(t=>t.active).id,1);
 });
+
+
+test('concurrent video channels wait for focus and run after setup failure',async()=>{
+ const f=fixture();
+ let release,started;
+ const gate=new Promise(resolve=>{release=resolve;});
+ const ready=new Promise(resolve=>{started=resolve;});
+ const calls=[];
+ const first=f.focus.withVideoForeground({taskId:'doubao',tabId:2},async()=>{
+   calls.push('doubao');started();await gate;
+ });
+ await ready;
+ const second=f.focus.withVideoForeground({taskId:'runow',tabId:3},async()=>{calls.push('runow');return 'sent';});
+ await Promise.resolve();assert.deepEqual(calls,['doubao']);
+ release();await first;assert.equal(await second,'sent');
+ assert.deepEqual(calls,['doubao','runow']);
+ await assert.rejects(f.focus.withVideoForeground({taskId:'missing',tabId:99},async()=>{}),/No tab/);
+ assert.equal(await f.focus.withVideoForeground({taskId:'next',tabId:2},async()=> 'ok'),'ok');
+});

@@ -176,7 +176,7 @@ def register_web_llm_routes(app):
         try:
             _ui_origin(request)
             return {"ok": True, "settings": bridge.get_settings(), "providers": bridge.PROVIDERS,
-                    "entries": bridge.ENTRIES, "connection": bridge.connection_status()}
+                    "entries": bridge.ENTRIES, "connection": bridge.connection_status(), "browsers": bridge.browser_clients()}
         except Exception as exc:
             return _error(exc)
 
@@ -320,14 +320,23 @@ def register_web_llm_routes(app):
         except Exception as exc:
             return _error(exc)
 
+    @app.post('/api/web-llm/bridge/text-permission')
+    async def text_permission(request: Request):
+        try:
+            _extension_auth(request)
+            data = await request.json()
+            return {'ok': True, 'text_enabled': bridge.text_owner(str(data.get('client_id') or ''))}
+        except Exception as exc:
+            return _error(exc)
+
     @app.post("/api/web-llm/bridge/ping")
     async def ping(request: Request):
         try:
             _extension_auth(request)
             payload = await request.json()
             bridge.heartbeat(str(payload.get("client_id") or ""), payload.get("providers") or [],
-                             payload.get('capabilities') or [], payload.get('provider_capabilities'))
-            return {"ok": True, **bridge.pool_status()}
+                             payload.get('capabilities') or [], payload.get('provider_capabilities'), payload.get('browser'))
+            return {"ok": True, **bridge.pool_status(), 'text_enabled': bridge.text_owner(str(payload.get('client_id') or ''))}
         except Exception as exc:
             return _error(exc)
 

@@ -105,6 +105,8 @@ function page(initial = '', options = {}) {
       return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
     }) || null, body: {get innerText() { return editor.value + sentText + replies.map(r=>r.innerText).join(''); }, cloneNode() { return {querySelectorAll:()=>[], get textContent() { return sentText + replies.map(r=>r.innerText).join(''); }}; }}, querySelectorAll: selector => {
       pageReads++;
+      if (selector === 'button#composer-submit-button,button[data-testid="send-button"]' && options.chatgptSubmitId)
+        return options.duplicateSubmit ? [button,{...button}] : [button];
       if(selector==='button[data-session-switch-target="send-query"]' && options.qianwenExactSend)
         return options.duplicateQianwenSend ? [button,{...button}] : [button];
       if(options.qianwen && selector.includes('data-message-role="user"')) {
@@ -694,7 +696,7 @@ test('manifest permits only supported provider hosts and local extension assets 
   const base = path.join(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(base, 'manifest.json')));
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.host_permissions, ['https://chatgpt.com/*', 'https://chat.deepseek.com/*', 'https://*.doubao.com/*', 'https://www.qianwen.com/*', 'http://127.0.0.1/*', 'http://localhost/*']);
+  assert.deepEqual(manifest.host_permissions, ['https://chatgpt.com/*', 'https://chat.deepseek.com/*', 'https://*.doubao.com/*', 'https://www.qianwen.com/*', 'https://www.runninghub.cn/*', 'https://www.runninghub.ai/*', 'http://127.0.0.1/*', 'http://localhost/*']);
   assert.ok(!manifest.permissions.includes('cookies'));
   for (const file of [manifest.side_panel.default_path, manifest.background.service_worker, 'panel.css', 'panel.js', 'protocol.js', 'content.js']) assert.ok(fs.existsSync(path.join(base, file)));
 });
@@ -1079,6 +1081,65 @@ test('ChatGPT keeps reading a sent task when the composer disappears before its 
  p.reply(answer(t.id));await p.tick(5000);
  assert.equal(p.task.status,'complete');
  assert.equal(p.clicks,1);
+});
+
+test('ChatGPT accepts its own restored draft on a blank project task page', async () => {
+ const t={...task('restored-project-draft'),bridge:{reported:false},force_new_conversation:true};
+ const p=page(t.request);
+ const response=await p.message('AICF_SEND',t);
+ assert.equal(response.ok,true,response.error);
+ assert.equal(p.task.status,'waiting');assert.equal(p.clicks,1);assert.equal(p.newChats,0);
+});
+
+test('ChatGPT preserves a different restored draft and an existing conversation', async () => {
+ for (const existing of [false,true]) {
+  const t={...task('preserve-project-draft'),bridge:{reported:false},force_new_conversation:true};
+  const draft=existing?t.request:'user-owned draft';
+  const p=page(draft,existing?{url:'https://chatgpt.com/c/existing'}:{});
+  const response=await p.message('AICF_SEND',t);
+  assert.equal(response.ok,false);assert.equal(p.editor.value,draft);assert.equal(p.clicks,0);
+ }
+});
+
+test('ChatGPT takes over manual submission after preparation failed without sending again', async () => {
+ const t={...task('manual-before-prepare'),bridge:{reported:false},force_new_conversation:true};
+ const p=page('other draft');
+ assert.equal((await p.message('AICF_SEND',t)).ok,false);
+ p.editor.value='';p.settleRoute('https://chatgpt.com/c/manual');p.renderedRequest(t.request);
+ p.reply(answer(t.id));
+ const response=await p.message('AICF_SEND',t);
+ assert.equal(response.ok,true,response.error);
+ await p.tick(5000);
+ assert.equal(p.task.status,'complete');assert.equal(p.task.conversation_id,'manual');
+ assert.equal(p.clicks,0);assert.equal(p.newChats,0);
+});
+
+test('ChatGPT does not adopt another task request during unsent recovery', async () => {
+ const t={...task('manual-wrong-id'),bridge:{reported:false},force_new_conversation:true};
+ const p=page('',{url:'https://chatgpt.com/c/other'});
+ p.renderedRequest(task('another-task').request);
+ const response=await p.message('AICF_SEND',t);
+ assert.equal(response.ok,false);assert.equal(p.clicks,0);assert.equal(p.task.sent_at,undefined);
+});
+
+test('ChatGPT submit ID works without a send label and rejects duplicate controls', async () => {
+ for (const duplicateSubmit of [false,true]) {
+  const p=page('',{noButton:true,chatgptSubmitId:true,duplicateSubmit});
+  const response=await p.message('AICF_SEND',task('submit-id'));
+  assert.equal(response.ok,!duplicateSubmit);
+  assert.equal(p.clicks,duplicateSubmit?0:1);
+ }
+});
+
+test('ChatGPT releases sending immediately with a detached draft and throttled timers', async () => {
+ const p=page('',{accept:false,hideEditorAfterSend:true,throttleAfterSend:true});
+ const t={...task('chatgpt-background-read'),bridge:{reported:false},force_new_conversation:true};
+ const response=await Promise.race([p.message('AICF_SEND',t),
+  new Promise((_,reject)=>setTimeout(()=>reject(new Error('send blocked reply collection')),100))]);
+ assert.equal(response.ok,true,response.error);
+ p.settleRoute('https://chatgpt.com/c/background');p.renderedRequest(t.request);p.reply(answer(t.id));
+ await p.message('AICF_READ',p.task);await p.tick(5000);
+ assert.equal(p.task.status,'complete');assert.equal(p.clicks,1);
 });
 
 test('ChatGPT follows its settled conversation route while retaining the task request', async () => {

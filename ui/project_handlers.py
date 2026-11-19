@@ -9,6 +9,8 @@ import shutil
 import traceback
 from html import escape
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import Lock
 
 import gradio as gr
 
@@ -58,6 +60,8 @@ from ui.project_bible_panel import project_bible_ui_state
 
 QUALITY_ISSUES_FILE = "quality_issues.json"
 NOVEL_SOURCE_FILE = "novel_source.json"
+INTERFACE_MODE_CHOICES = [("完整模式", "full"), ("极简模式", "minimal"), ("完整小说模式", "novel")]
+_GLOBAL_CONFIG_LOCK = Lock()
 
 
 def _quality_issues_path() -> Path:
@@ -913,7 +917,7 @@ def update_custom_duration_visibility(duration_select, custom_duration):
     return gr.update(visible=True, interactive=str(duration_select or "") == "custom")
 
 
-def save_runtime_ui_options(dry_run=None, workflow_only=None, no_concat=None, auto_cleanup=None, workflow_mode=None, minimal_mode=None):
+def save_runtime_ui_options(dry_run=None, workflow_only=None, no_concat=None, auto_cleanup=None, workflow_mode=None):
     updates = {}
     if dry_run is not None:
         updates["ui_dry_run"] = bool(dry_run)
@@ -925,8 +929,6 @@ def save_runtime_ui_options(dry_run=None, workflow_only=None, no_concat=None, au
         updates["ui_auto_cleanup"] = bool(auto_cleanup)
     if workflow_mode is not None:
         updates["ui_workflow_mode"] = workflow_mode or CONFIG.get("output_mode", "api")
-    if minimal_mode is not None:
-        updates["ui_minimal_mode"] = bool(minimal_mode)
     if updates:
         update_ui_run_config(**updates)
     return None
@@ -1042,8 +1044,33 @@ def secret_key_placeholders() -> tuple[str, str]:
     return masked_secret(DEEPSEEK_API_KEY_ENV), masked_secret(RUNNINGHUB_API_KEY_ENV)
 
 
-def _save_global_config() -> None:
-    CONFIG_PATH.write_text(json.dumps(CONFIG, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def _save_global_config(**updates) -> None:
+    with _GLOBAL_CONFIG_LOCK:
+        text = json.dumps({**CONFIG, **updates}, ensure_ascii=False, indent=2) + "\n"
+        temp_path = None
+        try:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temp:
+                temp_path = Path(temp.name)
+                temp.write(text)
+            temp_path.replace(CONFIG_PATH)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        CONFIG.update(updates)
+
+
+def current_interface_mode() -> str:
+    mode = CONFIG.get("ui_interface_mode")
+    return mode if any(mode == value for _, value in INTERFACE_MODE_CHOICES) else "novel"
+
+
+def save_interface_mode(mode: str) -> str:
+    if mode != current_interface_mode() and any(mode == value for _, value in INTERFACE_MODE_CHOICES):
+        try:
+            _save_global_config(ui_interface_mode=mode)
+        except OSError:
+            gr.Warning("界面模式保存失败，请重试。")
+    return current_interface_mode()
 
 
 def save_workflow_config(

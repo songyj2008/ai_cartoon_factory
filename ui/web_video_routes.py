@@ -6,11 +6,15 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from generation.channels import options_for
 from services import web_video_bridge
+from services import web_llm_bridge
 from ui.web_llm_routes import _error, _extension_auth, _ui_origin
 from workflow.video_merge import load_video_jobs
 
 
 def register_web_video_routes(app):
+    from ui.runow_web_routes import register_runow_web_routes
+    register_runow_web_routes(app)
+
     @app.get("/api/video-channels/segments/{index}/panel")
     def current_panel(index: int, request: Request):
         try:
@@ -32,6 +36,9 @@ def register_web_video_routes(app):
             if segment is None:
                 raise ValueError("分段不存在")
             return {"ok": True, "channels": options_for(segment, payload),
+                    "browsers": [item for item in web_llm_bridge.browser_clients() if item["online"]],
+                    "video_task_id": segment.get('task_id', ''),
+                    "video_browser_id": web_video_bridge.video_browser(segment, str((segment.get("generation_config") or {}).get("channel_id") or "runninghub")),
                     "selected": str((segment.get("generation_config") or {}).get("channel_id") or "runninghub")}
         except Exception as exc:
             return _error(exc)
@@ -54,9 +61,26 @@ def register_web_video_routes(app):
                     raise ValueError('分段不存在')
                 config = dict(segment.get('generation_config') or {})
                 config['channel_id'] = channel_id
+                if 'video_browser_id' in data:
+                    from services.web_llm_bridge import browser_clients
+                    browser_id = str(data['video_browser_id'] or '')
+                    if browser_id and not any(item['id'] == browser_id and item['online'] for item in browser_clients()):
+                        raise ValueError('请选择在线浏览器实例')
+                    config['video_browser_id'] = browser_id
                 segment['generation_config'] = config
                 save_video_jobs(payload)
             return {'ok': True, 'selected': channel_id}
+        except Exception as exc:
+            return _error(exc)
+
+    @app.post('/api/web-video/tasks/{task_id}/browser')
+    async def retarget(task_id: str, request: Request):
+        try:
+            _ui_origin(request)
+            from services.context import assert_current_runtime_writable
+            assert_current_runtime_writable('更换排队视频浏览器')
+            data = await request.json()
+            return {'ok': True, 'task': web_video_bridge.retarget(task_id, str(data.get('client_id') or ''))}
         except Exception as exc:
             return _error(exc)
 
@@ -67,6 +91,15 @@ def register_web_video_routes(app):
             data = await request.json()
             return {"ok": True, "task": web_video_bridge.claim(str(data.get("client_id") or ""),
                                                                  [str(value) for value in data.get("channels") or []])}
+        except Exception as exc:
+            return _error(exc)
+
+    @app.post('/api/web-video/bridge/tasks/{task_id}/status')
+    async def execution_status(task_id: str, request: Request):
+        try:
+            _extension_auth(request)
+            data = await request.json()
+            return {'ok': True, 'task': web_video_bridge.execution_status(task_id, str(data.get('client_id') or ''))}
         except Exception as exc:
             return _error(exc)
 
@@ -96,7 +129,7 @@ def register_web_video_routes(app):
             data = await request.json()
             return {"ok": True, "task": web_video_bridge.report(task_id, str(data.get("lease") or ""),
                 str(data.get("state") or ""), output_path=str(data.get("output_path") or ""),
-                error=str(data.get("error") or ""))}
+                error=str(data.get("error") or ""), receipt=data.get('receipt'))}
         except Exception as exc:
             return _error(exc)
 

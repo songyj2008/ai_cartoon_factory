@@ -57,8 +57,16 @@ def _stable_project_bible(topic_text, identities, backgrounds, project_name=None
     }
     old_background_by_asset = {str(item.get("asset_background_id") or ""): item for item in old_backgrounds}
 
-    core_characters = []
-    supporting_characters = []
+    # Text-authored entries exist independently of asset memberships while their
+    # reference images are being prepared. Keep their IDs available to Beats.
+    core_characters = [
+        copy.deepcopy(item) for item in (previous.get("core_characters") or [])
+        if isinstance(item, dict) and not str(item.get("asset_identity_id") or "").strip()
+    ]
+    supporting_characters = [
+        copy.deepcopy(item) for item in (previous.get("supporting_characters") or [])
+        if isinstance(item, dict) and not str(item.get("asset_identity_id") or "").strip()
+    ]
     for identity in identities:
         asset_id = str(identity.get("id") or "").strip()
         if not asset_id:
@@ -89,7 +97,10 @@ def _stable_project_bible(topic_text, identities, backgrounds, project_name=None
         else:
             core_characters.append(entry)
 
-    allowed_backgrounds = []
+    allowed_backgrounds = [
+        copy.deepcopy(item) for item in old_backgrounds
+        if not str(item.get("asset_background_id") or "").strip()
+    ]
     for background in backgrounds:
         asset_id = str(background.get("id") or "").strip()
         if not asset_id:

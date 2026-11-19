@@ -2,7 +2,7 @@
 
 ## 使用
 
-重启项目，在 Chrome 重新加载 `tools/chrome_prompt_bridge` 扩展（当前清单版本 0.4.46），刷新 LLM 网页。完整安装和配对步骤见 [Windows 指南](windows.md)。配置界面位于「设置 → 模型配置 → 网页 LLM / Chrome 扩展」。
+重启项目，在 Chrome 重新加载 `tools/chrome_prompt_bridge` 扩展（当前清单版本 0.4.47），刷新 LLM 网页。完整安装和配对步骤见 [Windows 指南](windows.md)。配置界面位于「设置 → 模型配置 → 网页 LLM / Chrome 扩展」。
 
 复制本机后台地址和配对码到扩展侧边栏，为各服务配置并启用连接。项目显示扩展在线后即可提交。扩展后端连接限本机 HTTP 服务；当前启用 DeepSeek、ChatGPT、豆包和千问文字任务，千问仍需真实账号联调，视频附件不支持。默认文字任务使用扩展创建的独立后台页，完成且后台确认接收后仅清理对应任务页。
 

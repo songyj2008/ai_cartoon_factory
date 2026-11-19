@@ -260,6 +260,8 @@ def test_provider_capabilities_are_scoped_and_legacy_heartbeats_still_work(env):
     assert bridge.supports_capability(cap, ['deepseek'])
     assert not bridge.supports_capability(cap, ['chatgpt'])
     bridge.heartbeat('old-client', ['chatgpt'], [cap])
+    assert not bridge.supports_capability(cap, ['chatgpt'])
+    bridge.save_settings({'primary_text_client_id': 'old-client'})
     assert bridge.supports_capability(cap, ['chatgpt'])
     with pytest.raises(ValueError, match='能力格式'):
         bridge.heartbeat('bad-client', ['deepseek'], [], {'deepseek': cap})
@@ -277,6 +279,48 @@ def test_attachment_required_tasks_are_not_claimed_by_a_text_only_provider(env, 
                        metadata={'required_capability': cap})
     text = bridge.create_task('qianwen', 'text', {'user': 'text'})
     assert bridge.claim('client', ['qianwen'], tab_id=44, capabilities=[])['id'] == text['id']
+
+
+def test_primary_browser_drains_existing_tasks_before_switch(env):
+    bridge.heartbeat('chrome', ['deepseek'])
+    bridge.heartbeat('edge', ['deepseek'])
+    assert bridge.get_settings()['primary_text_client_id'] == 'chrome'
+    first = bridge.create_task('deepseek', 'json', {'user': 'first'})
+    second = bridge.create_task('deepseek', 'json', {'user': 'second'})
+    assert bridge.claim('edge', ['deepseek'], tab_id=1) is None
+    claimed = bridge.claim('chrome', ['deepseek'], tab_id=1)
+    assert claimed['id'] == first['id']
+    bridge.save_settings({'primary_text_client_id': 'edge'})
+    assert bridge.claim('chrome', ['deepseek'], tab_id=2) is None
+    assert bridge.claim('edge', ['deepseek'], tab_id=2) is None
+    bridge.report(first['id'], claimed['lease'], 'error', message='finished')
+    assert bridge.claim('edge', ['deepseek'], tab_id=2)['id'] == second['id']
+
+
+def test_manual_text_permission_uses_primary_browser(env):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from ui.web_llm_routes import register_web_llm_routes
+    bridge.heartbeat('chrome', ['deepseek'])
+    bridge.heartbeat('edge', ['deepseek'])
+    app = FastAPI()
+    register_web_llm_routes(app)
+    client = TestClient(app)
+    path = '/api/web-llm/bridge/text-permission'
+    assert client.post(path, json={'client_id':'chrome'}).status_code == 403
+    headers = {'Authorization':'Bearer ' + bridge.get_settings()['token']}
+    assert client.post(path, headers=headers, json={'client_id':'chrome'}).json()['text_enabled']
+    assert not client.post(path, headers=headers, json={'client_id':'edge'}).json()['text_enabled']
+
+
+def test_primary_connection_does_not_use_secondary_heartbeat(env):
+    bridge.heartbeat('chrome', ['deepseek'], browser={'name':'Chrome 工作', 'channels':['doubao_web']})
+    bridge.heartbeat('edge', ['chatgpt'])
+    with bridge._connect() as db:
+        db.execute('UPDATE clients SET seen=0 WHERE id=?', ('chrome',))
+    assert not bridge.connection_status()['connected']
+    assert not bridge.text_owner('edge')
+    assert any(row['name'] == 'Chrome 工作' for row in bridge.browser_clients())
 
 
 def test_atomic_claim_callback_auth_and_idempotency(env):

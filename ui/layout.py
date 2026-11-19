@@ -13,10 +13,12 @@ from services.ui_run_config import load_ui_run_config
 from ui.progress_panel import render_workflow_progress
 from ui.project_bible_panel import UNASSIGNED_PROJECT_FILTER, project_asset_management_state, project_bible_asset_choices, project_bible_selected_asset_ids
 from ui.project_handlers import (
+    INTERFACE_MODE_CHOICES,
     _episode_choices,
     _project_choices,
     available_video_models,
     current_default_video_model,
+    current_interface_mode,
     latest_final_video_path,
     secret_key_placeholders,
     workflow_model_settings,
@@ -78,6 +80,7 @@ def _episode_strip_html() -> str:
 def build_layout():
     brand_ok = is_brand_verified()
     ui_config = load_ui_run_config()
+    initial_interface_mode = current_interface_mode()
     initial_video_jobs_text = load_json_file_silent("video_jobs.json") or ""
     initial_group_total_pages = group_total_pages(initial_video_jobs_text)
     # Themes are deliberately page-scoped.  A refresh must start each project
@@ -85,6 +88,12 @@ def build_layout():
     initial_theme = "linear"
     with gr.Blocks() as demo:
         runtime_refresh_timer = gr.Timer(value=5.0, active=True)
+        interface_mode_state = gr.HTML(
+            value=initial_interface_mode,
+            html_template='<span data-interface-mode="${value}"></span>',
+            elem_id="interface_mode_state",
+            visible="hidden",
+        )
         gr.HTML(
             """
             <script>
@@ -237,22 +246,38 @@ def build_layout():
                                     )
 
                         with gr.Row(elem_classes=["main-action-row"]):
-                            gen_story_btn = gr.Button("生成完整剧情", elem_id="gen_story_btn", elem_classes=["primary-btn", "step-action"])
-                            split_beats_btn = gr.Button("拆分剧情 Beats", elem_id="split_beats_btn", elem_classes=["primary-btn", "step-action"])
-                            generate_segment_prompts_btn = gr.Button("生成分段提示词", elem_id="generate_segment_prompts_btn", elem_classes=["quick-btn", "quick-blue", "step-action"])
-                            render_video_btn = gr.Button("生成视频", elem_id="render_video_btn", elem_classes=["primary-btn", "step-action"])
+                            gen_story_btn = gr.Button(
+                                "生成完整剧情", elem_id="gen_story_btn",
+                                elem_classes=["primary-btn", "step-action", "full-mode-action"],
+                            )
+                            split_beats_btn = gr.Button(
+                                "拆分剧情 Beats", elem_id="split_beats_btn",
+                                elem_classes=["primary-btn", "step-action", "full-mode-action"],
+                            )
+                            generate_segment_prompts_btn = gr.Button(
+                                "生成分段提示词", elem_id="generate_segment_prompts_btn",
+                                elem_classes=["quick-btn", "quick-blue", "step-action", "full-mode-action"],
+                            )
+                            render_video_btn = gr.Button(
+                                "生成视频", elem_id="render_video_btn",
+                                elem_classes=["primary-btn", "step-action", "full-mode-action"],
+                            )
                             merge_video_btn = gr.Button("合并最终视频", elem_classes=["primary-btn", "step-action"])
                         with gr.Row(elem_classes=["one-click-action-row"]):
                             one_click_full_btn = gr.Button("后台准备剧情、Beats 与提示词", elem_id="one_click_full_btn", elem_classes=["primary-btn", "one-click-main"])
                         gr.HTML("</div>")
 
-                        with gr.Accordion("已有完整小说？生成 Beats 再生成 Segments", open=False, elem_classes=["novel-segments-panel"]):
+                        with gr.Accordion(
+                            "已有完整小说？生成 Beats 再生成 Segments",
+                            open=initial_interface_mode == "novel",
+                            elem_classes=["novel-segments-panel"],
+                        ) as novel_segments_panel:
                             gr.HTML('<div class="section-subtitle">先把小说切分为 Beats（保留对白与原文），再按当前模型生成分段。会覆盖已有 Beats 与分段信息。</div>')
                             novel_text = gr.Textbox(label="完整小说段", lines=12, max_lines=36, placeholder="粘贴已有小说内容（支持几千字）。系统将保留小说对白与原文，按模型规则切分 Beats 后生成视频 Segments。", elem_id="novel_text_editor")
                             novel_segment_count = gr.Number(label="参考 Beat 数量", info="仅供参考，LLM 可按完整对白、事件边界和单段时长适当增减。", value=4, minimum=1, step=1, precision=0)
                             generate_novel_segments_btn = gr.Button("生成 / 继续 Beats → Segments", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
 
-                        with gr.Accordion("剧情简介（可编辑）", open=True):
+                        with gr.Accordion("剧情简介（可编辑）", open=True, elem_id="story_summary_panel"):
                             story_json = gr.Textbox(
                                 label="剧情简介 / 完整剧情输入",
                                 value="",
@@ -713,7 +738,12 @@ def build_layout():
                         submit_comfyui_box = gr.Checkbox(label="提交到 ComfyUI", value=default_backend == "comfyui", interactive=not workflow_only_initial)
                         submit_runninghub_box = gr.Checkbox(label="提交到 RunningHub", value=default_backend == "runninghub", interactive=not workflow_only_initial)
                         no_concat_box = gr.Checkbox(label="生成后不自动合并", value=bool(ui_config.get("ui_no_concat", True)))
-                        minimal_mode_box = gr.Checkbox(label="极简模式", value=bool(ui_config.get("ui_minimal_mode", False)), elem_id="minimal_mode_box")
+                        interface_mode_picker = gr.Radio(
+                            choices=INTERFACE_MODE_CHOICES,
+                            value=initial_interface_mode,
+                            label="界面模式",
+                            elem_id="interface_mode_picker",
+                        )
                         auto_cleanup_box = gr.Checkbox(label="自动清理临时目录", value=bool(ui_config.get("ui_auto_cleanup", True)), visible=False)
                         one_click_resume_mode = gr.State("restart")
                         group_page_state = gr.State(0)

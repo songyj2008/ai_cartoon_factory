@@ -1,5 +1,7 @@
 [
   "generation.channels.comfyui",
   "generation.channels.runninghub",
-  "generation.channels.doubao_web"
+  "generation.channels.doubao_web",
+  "generation.channels.runninghub_web",
+  "generation.channels.runninghub_international_web"
 ]

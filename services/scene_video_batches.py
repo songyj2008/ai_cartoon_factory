@@ -83,6 +83,11 @@ def start(plan):
         created = {}
         for item in rows:
             row = live[item['uid']]
+            if item.get('selected') and plan.get('backend') in {'doubao_web', 'runninghub_web', 'runninghub_international_web'}:
+                from services.web_video_bridge import video_browser
+                item['video_browser_id'] = video_browser(row, plan['backend'])
+                if not item['video_browser_id']:
+                    raise ValueError('请先连接浏览器插件并选择视频执行浏览器')
             if not item.get('selected'):
                 # Unchecked rows are read-only continuity inputs, never work items.
                 item['scene'] = row.get('scene_context_id') or ''
@@ -234,7 +239,7 @@ def _child(parent, row, stage, data):
     current = next(s for s in data['segments'] if s['segment_uid'] == uid)
     attempt = (parent.get('attempts') or {}).get(key, 0)
     args = {'uid': uid, 'stage': stage, 'mode': row['mode'], 'stamp': None if stage == 'initial' else _stamp(data, uid),
-            'backend': parent['args'][0].get('backend', 'runninghub')}
+            'backend': parent['args'][0].get('backend', 'runninghub'), 'video_browser_id': row.get('video_browser_id')}
     kind = 'scene_video_step'
     if stage == 'timing':
         draft = snapshot(current)
@@ -269,66 +274,78 @@ def reconcile_pending():
 
 def _reconcile(parent):
     from workflow.video_merge import load_video_jobs
-    plan = parent['args'][0]; groups = {}
+    plan = parent['args'][0]
+    progress = copy.deepcopy(parent.get('progress_rows') or {})
+    failures = {}; pending = False; preparing = False; blocked = set()
+    # One preparation lane per batch, in saved segment order. Submission stays
+    # independent: a saved ending state, not video dispatch, unlocks the next row.
     for row in plan['rows']:
-        if row['selected']:
-            groups.setdefault(row['scene'] or row['uid'], []).append(row)
-    progress = copy.deepcopy(parent.get('progress_rows') or {}); failures = {}; pending = False
-    for group, rows in groups.items():
-        for row in rows:
-            uid = row['uid']; data = load_video_jobs()
-            state = progress.setdefault(uid, {'next': 0, 'phase': '等待准备'})
-            stages = (['initial', 'optimize', 'timing', 'state'] if row['scene'] else ['timing']) + ['submit']
-            if state['next'] >= len(stages): continue
-            stage = stages[state['next']]
-            if stage == 'initial':
-                scene = data['h3_scene_continuity']['contexts'][row['scene']]
-                if not scene.get('initial_pending') and isinstance(scene.get('initial_state'), dict):
-                    state.update(next=state['next']+1); pending=True; break
-                members = [s for s in data['segments'] if s.get('scene_context_id') == row['scene']]
-                if members[0]['segment_uid'] != uid:
-                    failures[group] = '场景初态尚未建立；未勾选的场景首段不会自动准备，请先校准初态'
-                    state['phase'] = failures[group]
-                    break
-            key = uid + ':' + stage
-            child_id = (parent.get('stages') or {}).get(key)
-            if child_id:
-                child = tasks.get(child_id)
-                if child['state'] == 'applied':
-                    # The child records a guarded post-write stamp; never bless external edits.
-                    expected = (child.get('result') or {}).get('scene_batch_stamp')
-                    if expected is None: raise ValueError('步骤缺少提交后的版本记录，不能跳过校验继续')
-                    state.update(next=state['next']+1, stamp=expected, phase=PHASES[stage]+' 已完成')
-                    pending=True
-                    if stage == 'submit': continue
-                    break
-                if child['state'] in ('error','cancelled','needs_attention') or (child['state']=='ready' and child.get('apply_error')):
-                    failures[group]=child.get('apply_error') or child.get('message') or '子任务失败'
-                    state['phase']=PHASES[stage]+' 失败：'+failures[group]
-                    if stage == 'submit': continue
-                    break
-                pending=True;state['phase']=PHASES[stage]+' 执行中'
+        if not row['selected']:
+            continue
+        group = row['scene'] or row['uid']
+        if group in blocked:
+            continue
+        uid = row['uid']; data = load_video_jobs()
+        state = progress.setdefault(uid, {'next': 0, 'phase': '等待准备'})
+        stages = (['initial', 'optimize', 'timing', 'state'] if row['scene'] else ['timing']) + ['submit']
+        if state['next'] >= len(stages): continue
+        stage = stages[state['next']]
+        if stage != 'submit' and preparing:
+            pending = True
+            continue
+        if stage == 'initial':
+            scene = data['h3_scene_continuity']['contexts'][row['scene']]
+            if not scene.get('initial_pending') and isinstance(scene.get('initial_state'), dict):
+                state.update(next=state['next']+1); pending=True; preparing=True; continue
+            members = [s for s in data['segments'] if s.get('scene_context_id') == row['scene']]
+            if members[0]['segment_uid'] != uid:
+                failures[group] = '场景初态尚未建立；未勾选的场景首段不会自动准备，请先校准初态'
+                state['phase'] = failures[group]
+                blocked.add(group)
+                continue
+        key = uid + ':' + stage
+        child_id = (parent.get('stages') or {}).get(key)
+        if child_id:
+            child = tasks.get(child_id)
+            if child['state'] == 'applied':
+                # The child records a guarded post-write stamp; never bless external edits.
+                expected = (child.get('result') or {}).get('scene_batch_stamp')
+                if expected is None: raise ValueError('步骤缺少提交后的版本记录，不能跳过校验继续')
+                state.update(next=state['next']+1, stamp=expected, phase=PHASES[stage]+' 已完成')
+                pending=True
                 if stage == 'submit': continue
-                break
-            if stage != 'initial':
-                try:
-                    current_stamp = _stamp(data, uid)
-                except ValueError as exc:
-                    failures[group] = str(exc) + '；未勾选段不会自动准备'
-                    state['phase'] = PHASES[stage] + ' 受阻：' + failures[group]
-                    break
-                if state.get('stamp') and state['stamp'] != current_stamp:
-                    failures[group]='输入或前序状态已变化，请重新打开分组页建立新批次';state['phase']=failures[group];break
-                if not state.get('stamp'):
-                    current=next(s for s in data['segments'] if s['segment_uid']==uid)
-                    if fingerprint(snapshot(current)) != plan['baseline'][uid]:
-                        failures[group]='保存稿已变化，请重新分组提交';state['phase']=failures[group];break
-            parent = tasks.get(parent['id'])
-            _child(parent,row,stage,data);pending=True;state['phase']=PHASES[stage]+' 已排队'
-            # A saved ending state is enough for the next scene member.
-            # Video dispatch/completion is not a text preparation dependency.
+                preparing=True
+                continue
+            if child['state'] in ('error','cancelled','needs_attention') or (child['state']=='ready' and child.get('apply_error')):
+                failures[group]=child.get('apply_error') or child.get('message') or '子任务失败'
+                state['phase']=PHASES[stage]+' 失败：'+failures[group]
+                if stage == 'submit': continue
+                blocked.add(group)
+                continue
+            pending=True;state['phase']=PHASES[stage]+' 执行中'
             if stage == 'submit': continue
-            break
+            preparing=True
+            continue
+        if stage != 'initial':
+            try:
+                current_stamp = _stamp(data, uid)
+            except ValueError as exc:
+                failures[group] = str(exc) + '；未勾选段不会自动准备'
+                state['phase'] = PHASES[stage] + ' 受阻：' + failures[group]
+                blocked.add(group)
+                continue
+            if state.get('stamp') and state['stamp'] != current_stamp:
+                failures[group]='输入或前序状态已变化，请重新打开分组页建立新批次';state['phase']=failures[group];blocked.add(group);continue
+            if not state.get('stamp'):
+                current=next(s for s in data['segments'] if s['segment_uid']==uid)
+                if fingerprint(snapshot(current)) != plan['baseline'][uid]:
+                    failures[group]='保存稿已变化，请重新分组提交';state['phase']=failures[group];blocked.add(group);continue
+        parent = tasks.get(parent['id'])
+        _child(parent,row,stage,data);pending=True;state['phase']=PHASES[stage]+' 已排队'
+        # A saved ending state is enough for the next scene member.
+        # Video dispatch/completion is not a text preparation dependency.
+        if stage == 'submit': continue
+        preparing=True
     progress = _row_timings(tasks.get(parent['id']), progress)
     values={'progress_rows':progress,'failures':failures}
     if pending: tasks.update(parent['id'], **values)
@@ -397,6 +414,8 @@ def execute_step(item):
                     return {'message':'视频已提交','scene_batch_stamp':_stamp(live,uid)}
                 target['scene_batch_submission']={'task':item['id'],'state':'sending','stamp':args['stamp'],
                     'renders':[r.get('render_id') for r in target.get('renders',[])]}
+                if args.get('video_browser_id'):
+                    target.setdefault('generation_config', {})['video_browser_id'] = args['video_browser_id']
                 save_video_jobs(live)
             pipeline=get_generation_service()._pipeline_for(resolved_model_id(row,data))
             pipeline.submit_saved({row['segment_index']},wait=False,backend=args['backend'])

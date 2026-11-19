@@ -31,11 +31,15 @@ def test_doubao_free_duration_filters_without_changing_model_or_duration(tmp_pat
     assert [segment["job"]["duration_sec"] for segment in payload["segments"]] == [3, 4, 10, 11]
     assert all(segment["model_id"] == "minimax_h3_local_ref2va" for segment in payload["segments"])
     assert {option["id"] for option in options_for(payload["segments"][1], payload)} == {
-        "comfyui", "runninghub", "doubao_web"
+        "comfyui", "runninghub", "doubao_web", "runninghub_web", "runninghub_international_web"
     }
 
 
 def test_web_quota_is_atomic_and_claim_is_once_only(tmp_path, monkeypatch):
+    from services import web_llm_bridge
+    monkeypatch.setattr(web_llm_bridge, 'BRIDGE_DIR', tmp_path / 'clients')
+    web_llm_bridge.heartbeat('browser-profile', ['deepseek'], browser={'name':'Chrome', 'channels':['doubao_web']})
+    web_llm_bridge.heartbeat('edge', ['deepseek'], browser={'name':'Edge', 'channels':['doubao_web']})
     monkeypatch.setattr(bridge, "_DB", tmp_path / "queue.sqlite3")
     monkeypatch.setattr(bridge, "get_project_dir", lambda: tmp_path)
     monkeypatch.setattr(bridge, "get_current_project_name", lambda: "test")
@@ -59,14 +63,22 @@ def test_web_quota_is_atomic_and_claim_is_once_only(tmp_path, monkeypatch):
     assert results.count(True) == 10
     assert results.count(False) == 1
     assert bridge.remaining_quota("doubao_web") == 0
+    assert bridge.claim('edge', ['doubao_web']) is None
+    queued = bridge.list_tasks()[0]
+    bridge.retarget(queued['id'], 'edge')
+    targeted = bridge.claim('edge', ['doubao_web'])
+    assert targeted['id'] == queued['id']
+    with pytest.raises(ValueError, match='尚未领取'):
+        bridge.retarget(targeted['id'], 'browser-profile')
     first = bridge.claim("browser-profile", ["doubao_web"])
     assert first and first["lease"]
     assert bridge.asset(first["id"], "0", first["lease"]) == image
     with pytest.raises(PermissionError):
         bridge.asset(first["id"], "0", "wrong-lease")
+    assert bridge.claim("browser-profile", ["doubao_web"]) is None
+    bridge.report(first["id"], first["lease"], "error", error="参考图上传前失败")
     second = bridge.claim("browser-profile", ["doubao_web"])
     assert second and second["id"] != first["id"]
-    bridge.report(first["id"], first["lease"], "error", error="参考图上传前失败")
     assert bridge.remaining_quota("doubao_web") == 1
     bridge.report(second["id"], second["lease"], "submitted")
     visible = bridge.list_tasks()
@@ -120,3 +132,67 @@ def test_channel_options_route_reports_web_capability(tmp_path, monkeypatch):
     listing = TestClient(app).get("/api/web-video/tasks")
     assert listing.status_code == 200
     assert listing.json() == {"ok": True, "tasks": []}
+
+
+def test_video_claim_reserves_browser_channel_independently(tmp_path, monkeypatch):
+    from services import web_llm_bridge
+    monkeypatch.setattr(web_llm_bridge, 'BRIDGE_DIR', tmp_path / 'clients')
+    monkeypatch.setattr(bridge, '_DB', tmp_path / 'queue.sqlite3')
+    monkeypatch.setattr(bridge, '_public', lambda row, **kwargs: dict(row))
+    monkeypatch.setattr(web_llm_bridge, 'get_settings', lambda: {})
+    monkeypatch.setattr(web_llm_bridge, 'browser_clients', lambda: [
+        {'id': browser, 'online': True, 'channels': ['doubao_web', 'runninghub_web']}
+        for browser in ('edge', 'chrome')])
+    with bridge._connect() as conn:
+        for identifier, browser, channel in [('a','edge','doubao_web'), ('b','edge','doubao_web'),
+                                             ('c','edge','runninghub_web'), ('d','chrome','doubao_web')]:
+            conn.execute("""INSERT INTO tasks
+                (id,channel,account,quota_day,state,runtime,project,episode,segment_index,
+                 segment_uid,render_id,input_json,created_at,updated_at,target_client_id)
+                VALUES (?,?,? ,?,'queued','','','',1,'','','{}',1,1,?)""",
+                (identifier, channel, 'default', bridge._today(), browser))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: bridge.claim('edge', ['doubao_web']), range(2)))
+    assert sum(result is not None for result in results) == 1
+    assert next(result for result in results if result)['id'] == 'a'
+    assert bridge.claim('edge', ['doubao_web', 'runninghub_web'])['id'] == 'c'
+    assert bridge.claim('chrome', ['doubao_web'])['id'] == 'd'
+    with bridge._connect() as conn:
+        conn.execute("UPDATE tasks SET state='submitted' WHERE id='a'")
+    assert bridge.claim('edge', ['doubao_web']) is None
+    with bridge._connect() as conn:
+        conn.execute("UPDATE tasks SET state='uncertain' WHERE id='a'")
+    assert bridge.claim('edge', ['doubao_web'])['id'] == 'b'
+
+
+def test_offline_video_browser_prefers_online_same_type():
+    browsers = [
+        {'id': 'old', 'type': 'Edge', 'online': False, 'channels': ['runninghub_web']},
+        {'id': 'chrome', 'type': 'Chrome', 'online': True, 'seen': 20, 'channels': ['runninghub_web']},
+        {'id': 'edge', 'type': 'Edge', 'online': True, 'seen': 10, 'channels': ['runninghub_web']},
+    ]
+    assert bridge._online_video_browser('old', 'runninghub_web', browsers) == 'edge'
+    assert bridge._online_video_browser('chrome', 'runninghub_web', browsers) == 'chrome'
+    assert bridge._online_video_browser('old', 'unsupported', browsers) == ''
+
+
+def test_queued_offline_target_is_reassigned_on_claim(tmp_path, monkeypatch):
+    from services import web_llm_bridge
+    monkeypatch.setattr(bridge, '_DB', tmp_path / 'queue.sqlite3')
+    monkeypatch.setattr(bridge, '_public', lambda row, **kwargs: dict(row))
+    monkeypatch.setattr(web_llm_bridge, 'get_settings', lambda: {})
+    monkeypatch.setattr(web_llm_bridge, 'browser_clients', lambda: [
+        {'id': 'old', 'type': 'Edge', 'online': False},
+        {'id': 'new', 'type': 'Edge', 'online': True, 'channels': ['runninghub_web']},
+    ])
+    with bridge._connect() as conn:
+        conn.execute("""INSERT INTO tasks
+            (id,channel,account,quota_day,state,runtime,project,episode,segment_index,
+             segment_uid,render_id,input_json,created_at,updated_at,target_client_id)
+            VALUES ('queued','runninghub_web','default',?,'queued','','','',1,'','','{}',1,1,'old')""",
+            (bridge._today(),))
+    claimed = bridge.claim('new', ['runninghub_web'])
+    assert claimed['id'] == 'queued'
+    assert claimed['target_client_id'] == 'new'
+    assert claimed['client_id'] == 'new'
+    assert bridge.claim('new', ['runninghub_web']) is None

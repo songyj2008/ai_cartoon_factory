@@ -5,6 +5,8 @@ importScripts("text_task_store.js");
 importScripts("text_scheduler.js");
 importScripts("focus_coordinator.js");
 importScripts("video_worker.js");
+importScripts("runow_worker.js");
+importScripts("runow_submission_patch.js");
 const ENABLED_PROVIDERS = TextProviderPolicy.ids.filter(id=>TextProviderPolicy.policy(id).available);
 const PROVIDER_NAMES = Object.fromEntries(ENABLED_PROVIDERS.map(id=>[id,TextProviderPolicy.policy(id).displayName]));
 const PROVIDER_URLS = Object.fromEntries(ENABLED_PROVIDERS.map(id=>[id,TextProviderPolicy.policy(id).homeUrl]));
@@ -185,7 +187,7 @@ async function api(config, path, data) {
     headers: { "Authorization": "Bearer " + config.token, "Content-Type": "application/json" },
     ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.timeout(10000)
   }); } catch(error) {
-    throw new Error("无法连接本机后台。请确认项目已启动、地址端口正确，并在 Chrome 扩展管理页重新加载扩展以启用本机访问权限。" + (error.name === "TimeoutError" ? "（请求超时）" : ""));
+    throw new Error("无法连接本机后台。请确认项目已启动、地址端口正确，并在浏览器扩展管理页重新加载扩展以启用本机访问权限。" + (error.name === "TimeoutError" ? "（请求超时）" : ""));
   }
   if(response.status === 404) throw new Error("项目后台缺少扩展接口，请重启项目以加载新版代码。");
   let body;
@@ -715,9 +717,17 @@ async function pump() {
     if (!saved.clientId) await chrome.storage.local.set({clientId});
     const advertised=Object.keys(PROVIDER_NAMES);
     const providerCapabilities=Object.fromEntries(advertised.map(id=>[id,TextProviderPolicy.policy(id).capabilities]));
+    const browserType=/Edg\//.test(navigator.userAgent)?'Edge':'Chrome';
     const pool=await api(config,'/ping',{client_id:clientId,providers:advertised,
+      browser:{type:browserType,name:saved.browserName || browserType+' '+clientId.slice(0,8),
+        version:chrome.runtime.getManifest().version,channels:(await videoCatalog()).map(item=>item.id)},
       capabilities:['video_learning_attachments_v1'],provider_capabilities:providerCapabilities});
     if(await syncQueueReset(pool,saved))return;
+    await chrome.storage.local.set({textEnabled:pool.text_enabled !== false});
+    if(pool.text_enabled === false) {
+      await chrome.storage.local.set({bridgeStatus:{message:'已连接 · 文字任务由主浏览器执行，当前浏览器接收指定视频任务',at:Date.now()}});
+      return;
+    }
     // Missing pool capability means an older backend: preserve serial mode.
     const limits=pool.limits || {total:3,deepseek:1,chatgpt:1,doubao:1};
     const occupied=new Set(tasks.filter(task=>!task.bridge.reported || task.quarantined).map(task=>task.tab_id));
@@ -783,6 +793,10 @@ async function pump() {
   }
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id === chrome.runtime.id && message?.type === 'AICF_RUNOW_SUBMISSION_PATCH') {
+    runowPatchCommand(sender,message).then(respond).catch(error=>respond({ok:false,error:error.message}));
+    return true;
+  }
   if(message?.type==='AICF_QIANWEN_INPUT') {
     trustedQianwenInput(sender,message).then(respond).catch(error=>respond({ok:false,error:error.message}));
     return true;
@@ -794,6 +808,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type==='AICF_TASK_PATCH') {
     textStore.patchFromPage(sender,message).then(task=>respond({ok:true,task}))
       .catch(error=>respond({ok:false,error:error.message || String(error)}));
+    return true;
+  }
+  if (sender.id === chrome.runtime.id && message?.type === 'AICF_RUNOW_INSERT_TEXT') {
+    runowInsertText(sender,message).then(respond).catch(error=>respond({ok:false,error:error.message || String(error)}));
+    return true;
+  }
+  if (sender.id === chrome.runtime.id && message?.type === 'AICF_RUNOW_DURATION_KEY') {
+    runowDurationKey(sender,message).then(respond).catch(error=>respond({ok:false,error:error.message || String(error)}));
+    return true;
+  }
+  if (sender.id === chrome.runtime.id && message?.type === 'AICF_RUNOW_PROGRESS') {
+    runowProgress(sender,message).then(respond).catch(error=>respond({ok:false,error:error.message || String(error)}));
     return true;
   }
   if (sender.id === chrome.runtime.id && message?.type === 'AICF_VIDEO_TRUSTED_CLICK') {

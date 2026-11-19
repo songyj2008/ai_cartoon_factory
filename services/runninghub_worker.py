@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import atexit
 import threading
+import time
 
 from services.context import capture_runtime, get_project_dir, pin_runtime, OUTPUT_DIR, EPISODES_DIR
 from services.logger import log
+
+
+WEB_RECONCILE_INTERVAL = 60.0
 
 
 class RunningHubWorker:
@@ -14,6 +18,7 @@ class RunningHubWorker:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
+        self._last_web_reconcile = 0.0
 
     def start(self):
         with self._lock:
@@ -33,9 +38,14 @@ class RunningHubWorker:
             thread.join(timeout=2)
 
     def tick(self):
+        from services import web_video_bridge
         from workflow.runninghub_sync import sync_runninghub_video_jobs
         from workflow.video_merge import finish_requested_video_merge
 
+        moment = time.time()
+        do_reconcile = moment - self._last_web_reconcile >= WEB_RECONCILE_INTERVAL
+        if do_reconcile:
+            self._last_web_reconcile = moment
         runtimes = {capture_runtime()}
         if OUTPUT_DIR.exists():
             runtimes.update((path, path.name, '') for path in OUTPUT_DIR.iterdir() if path.is_dir())
@@ -53,6 +63,13 @@ class RunningHubWorker:
                     finish_requested_video_merge()
                 except Exception as exc:
                     log(f'[runninghub][worker] {runtime[1]}/{runtime[2]}: {exc}', 'WARN')
+                if do_reconcile:
+                    # Web channels have no local slot queue; unlock segments
+                    # whose browser task already ended or went silent.
+                    try:
+                        web_video_bridge.reconcile_queued_segments(now=moment)
+                    except Exception as exc:
+                        log(f'[runninghub][worker][web-video] {runtime[1]}/{runtime[2]}: {exc}', 'WARN')
 
     def _run(self):
         while not self._stop.is_set():

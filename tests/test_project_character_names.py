@@ -2,6 +2,39 @@ from services import project_assets as assets
 from ui import project_bible_panel as panel
 
 
+def test_asset_sync_preserves_text_authored_characters_and_scenes(tmp_path, monkeypatch):
+    monkeypatch.setattr(assets, 'PROJECTS_DIR', tmp_path)
+    pending_core = {'id': 'character_010', 'display_name': '少年甲', 'need_reference_image': True}
+    pending_support = {'id': 'character_011', 'display_name': '少年乙', 'asset_identity_id': ''}
+    pending_scene = {'id': 'scene_003', 'display_name': '村口', 'asset_background_id': ''}
+    previous = {
+        'core_characters': [pending_core, {'id': 'character_001', 'asset_identity_id': 'removed'}],
+        'supporting_characters': [pending_support],
+        'allowed_backgrounds': [pending_scene, {'id': 'scene_001', 'asset_background_id': 'removed'}],
+        'adaptation_contract': {'age_stages': ['童年', '少年', '成年']},
+    }
+    monkeypatch.setattr(panel, 'load_project_bible', lambda *_: previous)
+    for preserve_supporting in (False, True):
+        result = panel._stable_project_bible('', [{'id': 'new', 'display_name': '新素材'}],
+                                             [{'id': 'new_scene', 'display_name': '新场景'}], 'A',
+                                             preserve_supporting=preserve_supporting)
+        assert result['core_characters'][0] == pending_core
+        assert result['supporting_characters'] == [pending_support]
+        assert result['allowed_backgrounds'][0] == pending_scene
+        assert result['adaptation_contract'] == previous['adaptation_contract']
+        assert result['core_characters'][1]['id'] == 'character_002'
+        assert result['allowed_backgrounds'][1]['id'] == 'scene_002'
+        assert all(entry.get('asset_identity_id') != 'removed' for entry in result['core_characters'])
+        assert all(entry.get('asset_background_id') != 'removed' for entry in result['allowed_backgrounds'])
+        assert result['core_characters'][0] is not pending_core
+        monkeypatch.setattr(panel, 'load_project_bible', lambda *_: result)
+        repeated = panel._stable_project_bible('', [{'id': 'new', 'display_name': '新素材'}],
+                                               [{'id': 'new_scene', 'display_name': '新场景'}], 'A',
+                                               preserve_supporting=preserve_supporting)
+        assert repeated == result
+        monkeypatch.setattr(panel, 'load_project_bible', lambda *_: previous)
+
+
 def test_project_names_independent_and_membership_changes_preserve_them(tmp_path, monkeypatch):
     monkeypatch.setattr(assets, 'PROJECTS_DIR', tmp_path)
     assets.save_project_asset_assignments({'characters': ['person'], 'character_names': {

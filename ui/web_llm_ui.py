@@ -2,7 +2,7 @@
 
 SETTINGS_HTML = '''
 <section class="web-llm-settings web-llm-box">
-  <h3>网页 LLM / Chrome 扩展</h3>
+  <h3>网页 LLM / 浏览器扩展</h3>
     <p>配置全局默认服务；各功能默认跟随全局，也可单独选择其他网页服务或 API。网页文字服务支持 DeepSeek、ChatGPT 和豆包。</p>
   <fieldset class="web-llm-provider-picker"><legend>全局默认服务</legend>
     <div class="web-llm-default-options web-llm-provider-options" aria-label="全局默认 LLM 服务"></div>
@@ -16,14 +16,15 @@ SETTINGS_HTML = '''
     <div class="web-llm-concurrency-providers"></div>
     <button type="button" onclick="window.AICF.saveWebLLMPool(this)">保存并发设置</button>
   </details>
-  <details><summary>连接 Chrome 扩展</summary>
-    <p>扩展代码更新后，请在 Chrome 扩展管理页重新加载。在扩展侧边栏填写本机地址和配对码，为每个服务绑定专用对话并启用连接。</p>
+  <details><summary>连接浏览器扩展</summary>
+    <p>扩展代码更新后，请在浏览器扩展管理页重新加载。在扩展侧边栏填写本机地址和配对码，为每个服务绑定专用对话并启用连接。</p>
     <label>本机后台地址<input class="web-llm-address" readonly></label>
     <label>扩展配对码<input class="web-llm-token" type="password" readonly></label>
     <button type="button" onclick="window.AICF.copyWebLLMToken(this)">复制配对码</button>
   </details>
   <button type="button" onclick="window.AICF.refreshWebLLMSettings()">刷新连接状态</button>
   <span class="web-llm-connection" role="status"></span>
+  <div class="web-llm-browser-list" aria-label="浏览器连接状态"></div>
   <span class="web-llm-settings-status" role="status" aria-live="polite"></span>
 </section>
 '''
@@ -123,6 +124,41 @@ WEB_LLM_JS = r"""
     selected=selectedRoutes(host);
     pickerSummary(host);return selected;
   }
+  function displayBrowserConnections(root, value) {
+    const browsers=value.browsers || [];
+    const primaryId=value.settings.primary_text_client_id;
+    const primary=browsers.find(browser=>browser.id===primaryId && browser.online);
+    const online=browsers.filter(browser=>browser.online);
+    const summary=root.querySelector('.web-llm-connection');
+    summary.textContent=online.length
+      ? '浏览器在线 '+online.length+' · 文字主浏览器'+(primary?' '+primary.name:'待选择')
+      : '暂无在线浏览器，请在插件侧边栏保存并启用连接。';
+    const list=root.querySelector('.web-llm-browser-list');
+    list.replaceChildren();
+    for(const browser of online) {
+      const row=document.createElement('div');row.className='web-llm-browser-row';
+      const content=document.createElement('div');
+      const heading=document.createElement('div');heading.className='web-llm-browser-heading';
+      const name=document.createElement('strong');name.textContent=browser.name;
+      const state=document.createElement('span');state.className='web-llm-browser-state '+(browser.online?'is-online':'is-offline');
+      state.textContent=browser.online?'在线':'离线';heading.append(name,state);
+      if(browser.id===primaryId) {
+        const role=document.createElement('span');role.className='web-llm-browser-role';role.textContent='文字主浏览器';heading.append(role);
+      }
+      const info=document.createElement('p');
+      const channels=(browser.channels || []).map(channel=>({doubao_web:'豆包网页视频',runninghub_web:'RunningHub 网页视频',runninghub_international_web:'RunningHub 国际网页视频'})[channel] || channel);
+      info.textContent=[browser.type,browser.version?'插件 '+browser.version:'',channels.length?'视频能力 '+channels.join('、'):'视频能力待插件上报'].filter(Boolean).join(' · ');
+      const seen=document.createElement('p');
+      seen.textContent='最近心跳 '+(browser.seen?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'medium',hour12:false}).format(new Date(browser.seen*1000))+'（北京时间）':'待上报');
+      content.append(heading,info,seen);row.append(content);
+      if(browser.online && browser.id!==primaryId) {
+        const button=document.createElement('button');button.type='button';button.textContent='设为文字主浏览器';
+        button.setAttribute('aria-label','将 '+browser.name+' 设为文字主浏览器');
+        button.onclick=()=>A.setPrimaryBrowser(browser.id,button);row.append(button);
+      }
+      list.append(row);
+    }
+  }
   function displaySettings() {
     if (!config) return;
     document.querySelectorAll('.web-llm-settings').forEach(root => {
@@ -144,7 +180,7 @@ WEB_LLM_JS = r"""
       root.querySelectorAll('[data-pool-limit]').forEach(input => {
         if(document.activeElement!==input) input.value=config.settings.concurrency?.[input.dataset.poolLimit] ?? (input.dataset.poolLimit==='total'?6:2);
       });
-      root.querySelector('.web-llm-connection').textContent = config.connection.connected ? '扩展在线 · 已绑定 ' + (config.connection.providers.join('、') || '尚无服务') : '尚未连接扩展，请在扩展中配对并启用';
+      displayBrowserConnections(root,config);
       const entries = root.querySelector('.web-llm-entry-settings');
       if (!entries.children.length) for (const [key, title] of Object.entries(config.entries)) {
         const fieldset=document.createElement('fieldset');fieldset.className='web-llm-provider-picker';
@@ -170,6 +206,15 @@ WEB_LLM_JS = r"""
       document.querySelectorAll('.web-llm-settings-status,.web-llm-route-status').forEach(el => {el.textContent = error.message;}); throw error;
     }).finally(() => {loading = null;});
     return loading;
+  };
+  A.setPrimaryBrowser = async function(clientId,button) {
+    const root=button.closest('.web-llm-settings');button.disabled=true;
+    try {
+      await api('/settings',{primary_text_client_id:clientId});
+      await A.refreshWebLLMSettings();
+      root.querySelector('.web-llm-settings-status').textContent='已保存主浏览器，原任务收尾后开始新任务。';
+    } catch(error) {root.querySelector('.web-llm-settings-status').textContent=error.message;}
+    finally {button.disabled=false;}
   };
   A.saveWebLLMDefault = async function(button) {
     const root = button.closest('.web-llm-settings'); button.disabled = true;
@@ -704,6 +749,18 @@ WEB_LLM_JS = r"""
   }
   new MutationObserver(()=>{clearTimeout(scheduled);scheduled=setTimeout(hydrate,100);}).observe(document.body,{childList:true,subtree:true});
   hydrate();
+  let refreshingConnections=false;
+  setInterval(async()=>{
+    const roots=[...document.querySelectorAll('.web-llm-settings')].filter(root=>root.getClientRects().length);
+    if(document.hidden || loading || refreshingConnections || !roots.length)return;
+    refreshingConnections=true;
+    try {
+      const value=await api('/settings');
+      for(const root of roots)displayBrowserConnections(root,value);
+    }catch(error){
+      for(const root of roots)root.querySelector('.web-llm-connection').textContent='连接状态刷新失败，请点击刷新重试。'+error.message;
+    }finally{refreshingConnections=false;}
+  },10000);
 })();
 """
 
@@ -711,6 +768,17 @@ WEB_LLM_CSS = """
 .web-llm-box{padding:16px;border:1px solid var(--border);border-radius:10px;background:var(--surface);margin:12px 0}
 .web-llm-box>h3{color:var(--text-title);font-size:16px;font-weight:700;line-height:1.45}
 .web-llm-box>p,.web-llm-connection{font-size:13px;color:var(--text-secondary);line-height:1.6}
+.web-llm-connection{display:block;margin:10px 0}
+.web-llm-browser-list{display:grid;gap:8px;margin:8px 0}
+.web-llm-browser-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-subtle);color:var(--text-body)}
+.web-llm-browser-row>div{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
+.web-llm-browser-heading{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:14px}
+.web-llm-browser-row p{margin:5px 0 0;font-size:13px;line-height:1.6;color:var(--text-secondary)}
+.web-llm-browser-state,.web-llm-browser-role{padding:2px 7px;border-radius:4px;font-size:12px;line-height:1.5}
+.web-llm-browser-state.is-online{background:var(--success-soft);color:var(--success-text)}
+.web-llm-browser-state.is-offline{background:var(--surface);color:var(--text-secondary);border:1px solid var(--border)}
+.web-llm-browser-role{background:var(--surface);color:var(--text-body);border:1px solid var(--border)}
+.web-llm-browser-row button{min-height:44px}
 .web-llm-entry-settings,.web-llm-route-row{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}
 .web-llm-entry-settings>.web-llm-provider-picker,.web-llm-route-row>.web-llm-provider-picker{flex:1 1 300px}
 .web-llm-box label{display:block;margin:8px 0}.web-llm-settings-status,.web-llm-route-status{display:block;font-size:12px;padding:4px;color:var(--text-secondary)}

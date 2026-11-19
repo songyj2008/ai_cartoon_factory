@@ -1113,6 +1113,17 @@ def _claim_runnable(active_counts, limits=None, *, active_learning=0):
         rows.sort(key=lambda row: _decode(row).get('kind') == 'video_learning')
         for row in rows:
             item = _decode(row)
+            batch_id = item.get('batch_id')
+            if batch_id and not item.get('batch_stage', '').endswith(':submit'):
+                parent = db.execute('SELECT * FROM operations WHERE id=?', (batch_id,)).fetchone()
+                if parent and _decode(parent)['kind'] == 'scene_video_batch':
+                    # Also serialize children already queued by older versions.
+                    # Service/provider capacity alone does not enforce batch order.
+                    running = db.execute("SELECT * FROM operations WHERE state='running'").fetchall()
+                    if any(other.get('batch_id') == batch_id
+                           and not other.get('batch_stage', '').endswith(':submit')
+                           for other in map(_decode, running)):
+                        continue
             if item.get('kind') == 'scene_state':
                 lane = (item['source'], item['args'][0]['context_id'])
                 active = db.execute("SELECT * FROM operations WHERE state IN ('running','waiting_children','needs_attention')").fetchall()

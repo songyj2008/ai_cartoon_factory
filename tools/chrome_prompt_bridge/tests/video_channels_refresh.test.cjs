@@ -5,7 +5,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 const source=fs.readFileSync(path.join(__dirname,'../../../ui/scripts.py'),'utf8');
 test('channel refresh enables Doubao after audio removal and retains a valid choice',async()=>{
-  function element(){return {addEventListener(){},children:[],style:{},isConnected:true,appendChild(x){this.children.push(x);},append(...xs){this.children.push(...xs);},remove(){this.isConnected=false;},querySelector(){return this.children.flatMap(x=>x.children||[]).find(x=>x.checked);}};}
+  function element(){return {setAttribute(){},addEventListener(){},children:[],style:{},isConnected:true,appendChild(x){this.children.push(x);},append(...xs){this.children.push(...xs);},remove(){this.isConnected=false;},querySelector(){return this.children.flatMap(x=>x.children||[]).find(x=>x.checked);}};}
   let field=element();
   field.children=[{children:[{checked:true,value:'comfyui'}]}];
   const pane={querySelector:()=>field,prepend:x=>{field=x;}};

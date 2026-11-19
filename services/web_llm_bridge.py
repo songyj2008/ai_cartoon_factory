@@ -169,6 +169,7 @@ def _connect():
     conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, runtime TEXT, status TEXT, created REAL, updated REAL, lease TEXT, payload TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, seen REAL, providers TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS browser_clients (id TEXT PRIMARY KEY, metadata TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS client_capabilities (id TEXT PRIMARY KEY, seen REAL, capabilities TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS task_tombstones (id TEXT PRIMARY KEY, deleted REAL)")
     conn.execute("CREATE TABLE IF NOT EXISTS queue_reset (id INTEGER PRIMARY KEY, epoch REAL NOT NULL)")
@@ -261,6 +262,24 @@ def save_settings(payload):
     with _connect() as db:
         db.execute("BEGIN IMMEDIATE")
         value = json.loads(db.execute("SELECT value FROM settings WHERE id=1").fetchone()[0])
+        if 'primary_text_client_id' in payload:
+            client = str(payload['primary_text_client_id'])
+            if not db.execute('SELECT 1 FROM clients WHERE id=?', (client,)).fetchone():
+                raise ValueError('浏览器实例不存在')
+            value['primary_text_client_id'] = client
+        if 'video_browser_defaults' in payload:
+            defaults = payload['video_browser_defaults']
+            if not isinstance(defaults, dict):
+                raise ValueError('视频浏览器默认配置格式错误')
+            for client in defaults.values():
+                if client and not db.execute('SELECT 1 FROM clients WHERE id=?', (str(client),)).fetchone():
+                    raise ValueError('视频浏览器实例不存在')
+            value.setdefault('video_browser_defaults', {}).update(defaults)
+        if 'video_browser_accounts' in payload:
+            accounts = payload['video_browser_accounts']
+            if not isinstance(accounts, dict) or any(not isinstance(v, str) for v in accounts.values()):
+                raise ValueError('视频账号标识格式错误')
+            value.setdefault('video_browser_accounts', {}).update({str(k): v.strip()[:100] for k, v in accounts.items()})
         value.setdefault('overrides', {})
         limits = value.setdefault('concurrency', _default_concurrency())
         for key, limit in (payload.get('concurrency') or {}).items():
@@ -623,6 +642,8 @@ def claim(client_id, providers, *, tab_id=None, capabilities=None):
     with _connect() as db:
         db.execute("BEGIN IMMEDIATE")
         _expire(db)
+        if not _text_owner(db, client_id):
+            return None
         db.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (client_id, time.time(), _dump(providers)))
         # Reserve capacity and the tab together in this transaction.
         active = [_decode(row) for row in db.execute(
@@ -748,12 +769,14 @@ def report(identifier, lease, status, *, result=None, message="", raw="", diagno
 
 
 def connection_status():
+    primary = get_settings().get('primary_text_client_id')
     with _connect() as db:
-        rows = db.execute("SELECT * FROM clients WHERE seen>?", (time.time() - 90,)).fetchall()
+        rows = db.execute("SELECT * FROM clients WHERE seen>? AND id=?", (time.time() - 90, primary)).fetchall()
     return {"connected": bool(rows), "providers": sorted({p for row in rows for p in json.loads(row["providers"])})}
 
 
-def heartbeat(client_id, providers, capabilities=None, provider_capabilities=None):
+def heartbeat(client_id, providers, capabilities=None, provider_capabilities=None, browser=None):
+    get_settings()
     if not client_id or len(client_id) > 100:
         raise ValueError("扩展客户端编号无效")
     providers = [p for p in providers if p in {x["id"] for x in PROVIDERS if x["available"]}]
@@ -768,17 +791,65 @@ def heartbeat(client_id, providers, capabilities=None, provider_capabilities=Non
                   if provider_capabilities is not None else
                   [v for v in capabilities or [] if isinstance(v, str)])
     with _connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         db.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (client_id, time.time(), _dump(providers)))
+        if browser is not None:
+            if not isinstance(browser, dict):
+                raise ValueError('浏览器信息格式错误')
+            if not isinstance(browser.get('channels', []), list):
+                raise ValueError('浏览器视频渠道格式错误')
+            info = {key: str(browser.get(key) or '')[:100] for key in ('name', 'type', 'version')}
+            info['channels'] = [str(v) for v in browser.get('channels', []) if isinstance(v, str)]
+            db.execute('INSERT OR REPLACE INTO browser_clients VALUES (?,?)', (client_id, _dump(info)))
+        _text_owner(db, client_id, register=True)
         db.execute('INSERT OR REPLACE INTO client_capabilities VALUES (?,?,?)',
                    (client_id, time.time(), _dump(advertised)))
 
 
+def browser_clients():
+    with _connect() as db:
+        rows = db.execute('SELECT clients.*,browser_clients.metadata FROM clients LEFT JOIN browser_clients ON clients.id=browser_clients.id').fetchall()
+    result = []
+    for row in rows:
+        info = json.loads(row['metadata'] or '{}')
+        result.append({'id': row['id'], **info, 'name': info.get('name') or row['id'][:8],
+                       'online': row['seen'] > time.time()-90, 'seen': row['seen']})
+    return result
+
+
+def _text_owner(db, client_id, *, register=False):
+    row = db.execute('SELECT value FROM settings WHERE id=1').fetchone()
+    if row is None:
+        return True
+    settings = json.loads(row[0])
+    primary = settings.get('primary_text_client_id')
+    if not primary:
+        if not register:
+            return True
+        primary = client_id
+        settings['primary_text_client_id'] = primary
+        db.execute('UPDATE settings SET value=? WHERE id=1', (_dump(settings),))
+    active = db.execute("SELECT payload FROM tasks WHERE status IN ('claimed','waiting')").fetchall()
+    owners = {json.loads(task[0]).get('claimed_client_id') for task in active}
+    return client_id == primary and not (owners - {None, primary})
+
+
+def text_owner(client_id):
+    get_settings()
+    with _connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        _expire(db)
+        return _text_owner(db, client_id)
+
+
 def supports_capability(capability, providers):
     with _connect() as db:
-        rows = db.execute('SELECT clients.providers,client_capabilities.capabilities FROM clients '
+        rows = db.execute('SELECT clients.id,clients.providers,client_capabilities.capabilities FROM clients '
                           'JOIN client_capabilities ON clients.id=client_capabilities.id '
                           'WHERE clients.seen>? AND client_capabilities.seen>?', (time.time()-90,time.time()-90)).fetchall()
     for row in rows:
+        if row['id'] != get_settings().get('primary_text_client_id'):
+            continue
         advertised = json.loads(row['capabilities'])
         shared = set(providers).intersection(json.loads(row['providers']))
         if isinstance(advertised, dict):

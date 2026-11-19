@@ -43,12 +43,14 @@ from ui.project_handlers import (
     clean_project,
     clear_quality_issues,
     current_default_video_model,
+    current_interface_mode,
     generate_story_with_duration,
     generate_novel_segments_with_duration,
     latest_final_video_preview_payload,
     mark_and_persist_quality_issues,
     novel_source_ui_update,
     restore_project_ui_state,
+    save_interface_mode,
     save_runtime_ui_options,
     save_service_keys,
     save_submit_backend_selection,
@@ -1249,6 +1251,11 @@ def _restore_page_state():
             gr.update(choices=_episode_choices(get_current_project_name()), value=get_current_episode_name()))
 
 
+def _interface_mode_updates(mode=None):
+    mode = current_interface_mode() if mode is None else save_interface_mode(mode)
+    return mode, mode, gr.update(open=mode == "novel")
+
+
 def _project_change(project_name, outgoing_topic=None):
     if _brand_blocked("change project"):
         return (
@@ -1539,7 +1546,10 @@ def bind_events(demo, components):
     project_assets_unbind_btn = components["project_assets_unbind_btn"]
     project_assets_status = components["project_assets_status"]
     merge_video_btn = components["merge_video_btn"]
-    minimal_mode_box = components["minimal_mode_box"]
+    interface_mode_picker = components["interface_mode_picker"]
+    interface_mode_outputs = [
+        interface_mode_picker, components["interface_mode_state"], components["novel_segments_panel"],
+    ]
     no_concat_box = components["no_concat_box"]
     one_click_full_btn = components["one_click_full_btn"]
     one_click_resume_mode = components["one_click_resume_mode"]
@@ -2167,12 +2177,15 @@ def bind_events(demo, components):
         queue=False,
         show_progress="hidden",
     )
-    minimal_mode_box.change(
-        fn=save_runtime_ui_options,
-        inputs=[dry_run_box, workflow_only_box, no_concat_box, auto_cleanup_box, workflow_mode_box, minimal_mode_box],
+    interface_mode_picker.input(
+        fn=_interface_mode_updates,
+        inputs=interface_mode_picker,
+        outputs=interface_mode_outputs,
+        trigger_mode="always_last",
         queue=False,
         show_progress="hidden",
     )
+    demo.load(fn=_interface_mode_updates, outputs=interface_mode_outputs, queue=False, show_progress="hidden")
     submit_comfyui_box.change(
         fn=_on_submit_comfyui_change,
         inputs=[submit_comfyui_box, submit_runninghub_box, workflow_only_box],

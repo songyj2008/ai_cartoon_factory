@@ -2062,9 +2062,9 @@ input[type="radio"]:disabled {
     max-width: 360px !important;
 }
 
-#minimal_mode_box,
-#minimal_mode_box label {
-    margin: 0 !important;
+#interface_mode_picker input:focus-visible {
+    outline: 2px solid currentColor !important;
+    outline-offset: 3px;
 }
 
 #story_editor textarea,
@@ -4029,24 +4029,20 @@ video.key-img-preview-img {
     text-align: center;
 }
 
-/* Hidden/auxiliary states */
-body:not(.minimal-mode) .one-click-action-row {
+body:not(:has(#interface_mode_state [data-interface-mode="minimal"])) .one-click-action-row,
+body:has(#interface_mode_state [data-interface-mode="minimal"]) .main-action-row,
+body:has(#interface_mode_state [data-interface-mode="novel"]) .main-action-row .full-mode-action,
+body:has(#interface_mode_state [data-interface-mode="novel"]) #story_summary_panel {
     display: none !important;
 }
 
-body.minimal-mode .main-action-row {
-    display: none !important;
+body:has(#interface_mode_state [data-interface-mode="novel"]) .main-action-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+    justify-items: end;
 }
 
-body.minimal-mode .one-click-action-row {
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-}
-
-body.minimal-mode .one-click-main {
-    width: 100% !important;
-    max-width: 360px;
+body:has(#interface_mode_state [data-interface-mode="novel"]) .main-action-row button {
+    width: min(100%, 180px) !important;
 }
 
 #status_log,
@@ -4363,36 +4359,6 @@ div[role="button"] {
 #main_page_tabs {
     margin-top: 0 !important;
     padding-top: 0 !important;
-}
-
-.aicf-force-hidden {
-    display: none !important;
-}
-
-.main-action-row.aicf-force-grid {
-    display: grid !important;
-}
-
-.one-click-action-row.aicf-force-flex {
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-}
-
-body:not(.minimal-mode) .one-click-action-row,
-body:not(.minimal-mode) .one-click-action-row.aicf-force-hidden {
-    display: none !important;
-}
-
-body.minimal-mode .main-action-row,
-body.minimal-mode .main-action-row.aicf-force-hidden {
-    display: none !important;
-}
-
-body.minimal-mode .one-click-action-row {
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
 }
 
 /* Model-factory controls stay compact and only appear inside their segment. */

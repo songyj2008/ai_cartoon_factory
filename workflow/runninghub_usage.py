@@ -90,7 +90,8 @@ def _number(value: Any) -> Decimal | None:
     if value is None or isinstance(value, bool) or str(value).strip() == "":
         return None
     try:
-        return Decimal(str(value).strip())
+        number = Decimal(str(value).strip())
+        return number if number.is_finite() and number >= 0 else None
     except (InvalidOperation, ValueError):
         return None
 
@@ -122,6 +123,8 @@ def task_usage_from_outputs(outputs: list[dict[str, Any]] | None) -> dict[str, A
     coins: list[Decimal] = []
     money: list[Decimal] = []
     third_party_money: list[Decimal] = []
+    points: list[Decimal] = []
+    task_totals: dict[str, Any] = {}
 
     for output in outputs or []:
         if not isinstance(output, dict):
@@ -130,13 +133,21 @@ def task_usage_from_outputs(outputs: list[dict[str, Any]] | None) -> dict[str, A
         consume_coins = _first_number(output, _COST_KEYS)
         consume_money = _first_number(output, _MONEY_KEYS)
         third_party = _first_number(output, _THIRD_PARTY_MONEY_KEYS)
+        charged_points = _first_number(output, ("chargedPoint", "consume_points"))
+        if output.get("_task_usage"):
+            task_totals.update({key: _json_number(value) for key, value in (
+                ("task_cost_seconds", task_cost), ("consume_points", charged_points),
+                ("consume_coins", consume_coins), ("consume_money", consume_money),
+                ("third_party_consume_money", third_party),
+            ) if value is not None})
+            continue
         node_id = str(output.get("nodeId") or output.get("node_id") or "").strip()
         file_url = str(output.get("fileUrl") or output.get("file_url") or output.get("url") or "").strip()
         signature = (node_id, file_url, str(output.get("fileType") or output.get("file_type") or "").strip())
         if signature in seen:
             continue
         seen.add(signature)
-        if all(value is None for value in (task_cost, consume_coins, consume_money, third_party)):
+        if all(value is None for value in (task_cost, consume_coins, consume_money, third_party, charged_points)):
             continue
         billing_outputs.append(
             {
@@ -145,6 +156,8 @@ def task_usage_from_outputs(outputs: list[dict[str, Any]] | None) -> dict[str, A
                 "file_type": str(output.get("fileType") or output.get("file_type") or "").strip(),
                 "task_cost_seconds": _json_number(task_cost),
                 "consume_coins": _json_number(consume_coins),
+                "consume_points": _json_number(charged_points),
+                "settle_mode": _text(output.get("settleMode")),
                 "consume_money": _json_number(consume_money),
                 "third_party_consume_money": _json_number(third_party),
             }
@@ -157,13 +170,18 @@ def task_usage_from_outputs(outputs: list[dict[str, Any]] | None) -> dict[str, A
             money.append(consume_money)
         if third_party is not None:
             third_party_money.append(third_party)
+        if charged_points is not None:
+            points.append(charged_points)
 
     return {
         "task_cost_seconds": _json_number(max(durations)) if durations else None,
         "consume_coins": _json_number(sum(coins, Decimal("0"))) if coins else None,
+        # chargedPoint is the task charge, repeated on output files by V1.
+        "consume_points": _json_number(max(points)) if points else None,
         "consume_money": _json_number(sum(money, Decimal("0"))) if money else None,
         "third_party_consume_money": _json_number(sum(third_party_money, Decimal("0"))) if third_party_money else None,
         "billing_outputs": billing_outputs,
+        **task_totals,
     }
 
 
@@ -216,12 +234,13 @@ def record_runninghub_attempt(
         attempt.pop("video_deleted_at", None)
     if outputs is not None:
         usage = task_usage_from_outputs(outputs)
+        attempt["usage_lookup_version"] = 2
         attempt.update({key: value for key, value in usage.items() if value is not None})
         # An empty response is meaningful while a task is still running, so
         # leave the entry open for a later sync rather than recording a fake 0.
-        if usage["task_cost_seconds"] is not None or usage["consume_coins"] is not None:
+        if usage["consume_points"] is not None or usage["consume_coins"] is not None:
             attempt["usage_status"] = "recorded"
-        elif attempt.get("status") in {"success", "succeeded", "finished", "completed", "complete", "done"}:
+        elif attempt.get("status") in {"success", "succeeded", "finished", "completed", "complete", "done", "failed", "failure", "cancelled", "canceled"}:
             attempt["usage_status"] = "unavailable"
         else:
             attempt["usage_status"] = "pending"
@@ -233,7 +252,9 @@ def attempt_needs_usage_sync(segment: dict[str, Any], task_id: str) -> bool:
     task_id = str(task_id or "").strip()
     for item in segment.get("runninghub_attempts") or []:
         if isinstance(item, dict) and str(item.get("task_id") or "").strip() == task_id:
-            return str(item.get("usage_status") or "").strip().lower() == "pending"
+            if item.get("usage_lookup_version") == 2:
+                return str(item.get("usage_status") or "").strip().lower() == "pending"
+            return True
     return bool(task_id)
 
 
@@ -242,12 +263,15 @@ def _summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     coins = [_number(item.get("consume_coins")) for item in attempts]
     known_durations = [value for value in durations if value is not None]
     known_coins = [value for value in coins if value is not None]
+    known_points = [value for item in attempts if (value := _number(item.get("consume_points"))) is not None]
     return {
         "generation_count": len(attempts),
         "total_task_cost_seconds": _json_number(sum(known_durations, Decimal("0"))),
         "task_cost_seconds_known": bool(known_durations),
         "total_consume_coins": _json_number(sum(known_coins, Decimal("0"))),
         "consume_coins_known": bool(known_coins),
+        "total_consume_points": _json_number(sum(known_points, Decimal("0"))),
+        "consume_points_known": bool(known_points),
     }
 
 
@@ -268,12 +292,17 @@ def refresh_runninghub_usage_summaries(payload: dict[str, Any]) -> dict[str, Any
     coins = [_number(item.get("total_consume_coins")) for item in segment_summaries]
     known_duration_count = sum(bool(item.get("task_cost_seconds_known")) for item in segment_summaries)
     known_coin_count = sum(bool(item.get("consume_coins_known")) for item in segment_summaries)
+    known_point_count = sum(bool(item.get("consume_points_known")) for item in segment_summaries)
     overall = {
         "generation_count": sum(int(item.get("generation_count") or 0) for item in segment_summaries),
         "total_task_cost_seconds": _json_number(sum((value for value in durations if value is not None), Decimal("0"))),
         "task_cost_seconds_known_segment_count": known_duration_count,
         "total_consume_coins": _json_number(sum((value for value in coins if value is not None), Decimal("0"))),
         "consume_coins_known_segment_count": known_coin_count,
+        "total_consume_points": _json_number(sum(
+            (_number(item.get("total_consume_points")) or Decimal("0") for item in segment_summaries), Decimal("0")
+        )),
+        "consume_points_known_segment_count": known_point_count,
         "segment_count": len(segment_summaries),
     }
     payload["runninghub_usage"] = overall
