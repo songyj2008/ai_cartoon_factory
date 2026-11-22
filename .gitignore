@@ -45,6 +45,7 @@ config.local.json
 *.tif
 *.tiff
 *.ico
+!/resources/brand/desktop-icon.ico
 *.safetensors
 *.ckpt
 *.pt
@@ -71,9 +72,11 @@ NUL
 
 # Media, local state and packaged artifacts
 *.png
+!/resources/brand/desktop-icon.png
 *.jpg
 *.jpeg
 *.webp
+!/web/task-center.webp
 *.gif
 *.svg
 *.zip

@@ -12,6 +12,13 @@
     <section aria-labelledby="backend-title">
       <h2 id="backend-title">连接项目后台</h2>
       <label for="browser-name">浏览器实例名称</label><input id="browser-name" placeholder="例如 Edge 视频账号">
+      <label for="browser-type">浏览器类型</label>
+      <select id="browser-type">
+        <option value="auto">自动识别</option><option value="Chrome">Chrome</option>
+        <option value="Edge">Edge</option><option value="Quark">夸克</option>
+        <option value="360">360 浏览器</option><option value="Chromium">其他 Chromium 浏览器</option>
+      </select>
+      <p class="hint">自动识别有误时，选择当前浏览器类型并保存连接。</p>
       <label for="backend-url">项目地址</label><input id="backend-url" value="http://127.0.0.1:7860" placeholder="http://127.0.0.1:7860">
       <label for="backend-token">配对码</label><input id="backend-token" type="password" placeholder="从项目设置中的网页 LLM 配置复制">
       <label for="backend-deepseek">DeepSeek 专用对话</label><select id="backend-deepseek"><option value="">自动发现并绑定</option></select>
@@ -72,6 +79,6 @@
     <details class="advanced"><summary>网页适配设置</summary><p class="hint">网页改版导致识别失败时，可为当前网站填写 CSS 选择器。留空使用默认值。千问已开放文字任务试用；最终回答选择器必须排除用户消息和思考过程，用户消息选择器只匹配已发送的消息。千问视频附件尚未启用。</p><label for="editor-selector">输入框选择器</label><input id="editor-selector" placeholder="默认自动识别"><label for="send-selector">发送按钮选择器</label><input id="send-selector" placeholder="默认按按钮标签识别"><label for="reply-selector">回答正文选择器（不能包含用户消息）</label><input id="reply-selector" placeholder="默认按网站识别"><label for="user-selector">用户消息选择器（千问会话绑定，可选）</label><input id="user-selector" placeholder="默认按消息角色识别"><button id="save-selectors" type="button">保存当前网站设置</button></details>
     <footer id="extension-version">项目后台桥接版 · 不使用 Codex 或 API 密钥</footer>
   </main>
-  <script src="protocol.js"></script><script src="text_provider_policy.js"></script><script src="panel.js"></script>
+  <script src="protocol.js"></script><script src="browser_identity.js"></script><script src="text_provider_policy.js"></script><script src="panel.js"></script>
 </body>
 </html>

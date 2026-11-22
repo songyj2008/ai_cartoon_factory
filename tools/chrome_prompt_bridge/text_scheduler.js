@@ -44,6 +44,7 @@
    return {requestTick,scheduleTask,
      scheduleDiscovery:run=>single('discovery',run),scheduleVideo:run=>single('video',run),
      forceTask:id=>{due.delete(id);if(tasks.has(id))forced.add(id);},deferTask:(id,ms=2000)=>due.set(id,{at:now()+ms,failures:0}),
+     hasRunningTasks:()=>tasks.size>0,
      isTaskRunning:id=>tasks.has(id),isTabRunning:id=>tabs.has(id)};
  }
  root.TextScheduler={createScheduler};

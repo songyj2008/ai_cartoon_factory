@@ -44,6 +44,23 @@ class RunningHubClient:
             headers.update(extra)
         return headers
 
+    def _response_data(self, response: requests.Response) -> Any:
+        # Vendor responses can be persisted in task history or logged on error.
+        def redact(value):
+            if isinstance(value, str):
+                return value.replace(self.api_key, "[已隐藏]")
+            if isinstance(value, list):
+                return [redact(item) for item in value]
+            if isinstance(value, dict):
+                return {redact(key): redact(item) for key, item in value.items()}
+            return value
+
+        response.raise_for_status()
+        try:
+            return redact(response.json())
+        except ValueError:
+            raise RuntimeError("RunningHub returned invalid JSON") from None
+
     def upload_media(self, local_path: str | Path) -> str:
         path = Path(local_path).resolve()
         if not path.exists():
@@ -56,8 +73,7 @@ class RunningHubClient:
                 files={"file": (path.name, file)},
                 timeout=120,
             )
-        response.raise_for_status()
-        data = response.json()
+        data = self._response_data(response)
         file_name = _find_first(data, ("fileName", "file_name", "name"))
         if not file_name:
             raise RuntimeError(f"RunningHub upload response missing fileName: {data}")
@@ -84,8 +100,7 @@ class RunningHubClient:
             headers=self._auth_headers({"Content-Type": "application/json"}),
             timeout=120,
         )
-        response.raise_for_status()
-        data = response.json()
+        data = self._response_data(response)
         task_id = _find_first(data, ("taskId", "task_id", "id"))
         if not task_id:
             code = str(data.get("code") or "") if isinstance(data, dict) else ""
@@ -103,8 +118,7 @@ class RunningHubClient:
             headers=self._auth_headers({"Content-Type": "application/json"}),
             timeout=60,
         )
-        response.raise_for_status()
-        data = response.json()
+        data = self._response_data(response)
         return data if isinstance(data, dict) else {"raw": data}
 
     def wait_for_task(self, task_id: str) -> dict[str, Any]:
@@ -133,8 +147,7 @@ class RunningHubClient:
         )
         if response.status_code == 404:
             return []
-        response.raise_for_status()
-        data = response.json()
+        data = self._response_data(response)
         outputs = _find_outputs(data)
         return outputs
 

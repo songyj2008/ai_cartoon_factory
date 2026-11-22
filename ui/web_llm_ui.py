@@ -147,7 +147,8 @@ WEB_LLM_JS = r"""
       }
       const info=document.createElement('p');
       const channels=(browser.channels || []).map(channel=>({doubao_web:'豆包网页视频',runninghub_web:'RunningHub 网页视频',runninghub_international_web:'RunningHub 国际网页视频'})[channel] || channel);
-      info.textContent=[browser.type,browser.version?'插件 '+browser.version:'',channels.length?'视频能力 '+channels.join('、'):'视频能力待插件上报'].filter(Boolean).join(' · ');
+      const browserType=({Quark:'夸克',360:'360 浏览器',Chromium:'Chromium（未识别）'})[browser.type] || browser.type;
+      info.textContent=[browserType,browser.version?'插件 '+browser.version:'',channels.length?'视频能力 '+channels.join('、'):'视频能力待插件上报'].filter(Boolean).join(' · ');
       const seen=document.createElement('p');
       seen.textContent='最近心跳 '+(browser.seen?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'medium',hour12:false}).format(new Date(browser.seen*1000))+'（北京时间）':'待上报');
       content.append(heading,info,seen);row.append(content);

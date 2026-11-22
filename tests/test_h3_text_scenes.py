@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from generation.pipelines.minimax_h3.semantic_bindings import (
-    BindingError, MODEL, binding_coverage_errors, normalize_beat_bindings,
+    MODEL, binding_coverage_errors, normalize_beat_bindings,
 )
 
 
@@ -39,14 +39,10 @@ def test_new_location_and_context_are_preserved_without_registration():
     assert binding_coverage_errors(result, [], bible=bible()) == ['入画人物缺少参考图：a']
 
 
-def test_registered_scene_without_image_is_allowed_but_roles_remain_strict():
+def test_registered_scene_without_image_is_allowed():
     result = normalize_beat_bindings(beat([shot('办公室')]), bible=bible())
     assert result['scene_id'] == 'office'
     assert binding_coverage_errors(result, [{'metadata': {'role_id': 'a'}}], bible=bible()) == []
-    unknown = shot()
-    unknown['visible_roles'] = ['新人物']
-    with pytest.raises(BindingError):
-        normalize_beat_bindings(beat([unknown]), bible=bible())
 
 
 def test_new_scene_does_not_match_other_scene_mentioned_in_action():
@@ -127,3 +123,22 @@ def test_single_background_is_not_applied_to_a_different_text_scene(tmp_path, mo
     assert '场景使用 <Subject' in shot_lines[0]
     assert '场景：西城城楼' in shot_lines[1]
     assert '场景使用 <Subject' not in shot_lines[1]
+
+
+@pytest.mark.parametrize('exclusions', [[], ['不要显示字幕', '避免镜头晃动']])
+def test_compiled_video_prompt_includes_default_limits(exclusions, monkeypatch):
+    from generation.pipelines.minimax_h3.asset_binder import H3AssetBinder
+    from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+    from generation.pipelines.minimax_h3.prompt_compiler import H3PromptCompiler
+
+    monkeypatch.setattr('generation.pipelines.minimax_h3.prompt_compiler.load_project_bible', bible)
+    segment = beat([shot()])
+    segment['model_hints'][MODEL]['exclusions'] = exclusions
+    config = H3GenerationConfig.from_mapping({})
+    prompt = H3PromptCompiler().compile(
+        segment, config, H3AssetBinder().bind(config), duration_sec=8, draft=True).text
+
+    limits = '限制：不要新增主要角色；不要改变或添加对白；不要显示字幕'
+    if exclusions:
+        limits += '；避免镜头晃动'
+    assert [line for line in prompt.splitlines() if line.startswith('限制：')] == [limits]

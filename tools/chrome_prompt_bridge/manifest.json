@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "视频提示词修正助手",
-  "version": "0.4.76",
+  "version": "0.4.79",
   "description": "自动处理已登录网页中的 LLM 文字任务与豆包、RunningHub 网页视频生成任务，并将结果回传本机项目。",
   "minimum_chrome_version": "120",
   "permissions": [

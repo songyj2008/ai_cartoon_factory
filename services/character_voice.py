@@ -107,6 +107,7 @@ def attach_character_voices(manifest, beat, assets_dir, project_bible=None):
     speakers = {str(unit.get(key) or "").strip() for unit in units
                 for key in ("speaker", "speaker_name", "speaker_id", "role_id")}
     speakers.discard("")
+    speakers.difference_update(beat.get("text_roles") or [])
     result = [dict(item) for item in manifest if (item.get("metadata") or {}).get("binding_source") != "character_voice"
               or speakers.intersection({str((item.get('metadata') or {}).get(k) or '') for k in ('role_id','identity_id','voice_speaker')})]
     bound = {str((item.get("metadata") or {}).get("identity_id")) for item in result if item.get("type") == "audio"}

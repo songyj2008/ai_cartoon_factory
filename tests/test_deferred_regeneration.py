@@ -35,7 +35,7 @@ def test_local_runninghub_queue_dispatches_through_the_segment_model(monkeypatch
 
     monkeypatch.setitem(segment_runner.CONFIG, "video_submit_backend", "runninghub")
     monkeypatch.setattr(segment_runner, "load_video_jobs", lambda: payload)
-    monkeypatch.setattr(segment_runner, "_video_submit_concurrency_limit", lambda: 3)
+    monkeypatch.setattr(segment_runner, "_video_submit_concurrency_limit", lambda backend: 3)
     monkeypatch.setattr("generation.service.get_generation_service", lambda: FakeService())
 
     result = segment_runner.dispatch_queued_runninghub_segments()
@@ -133,7 +133,7 @@ def test_runninghub_completion_applies_saved_edits_after_recording_the_result(mo
             return [{"fileUrl": "https://example.invalid/video.mp4", "consumeCoins": 12}]
 
     class FakeProvider:
-        def __init__(self, model_id):
+        def __init__(self, model_id, *, key_id):
             assert model_id == H3_MODEL_ID
             self.client = FakeClient()
 
@@ -197,7 +197,7 @@ def test_runninghub_completion_promotes_the_render_owned_by_the_latest_task(monk
             return [{"fileUrl": "https://example.invalid/new.mp4"}]
 
     class FakeProvider:
-        def __init__(self, model_id):
+        def __init__(self, model_id, *, key_id):
             self.client = FakeClient()
 
         def _download_first_video(self, outputs, part_id, task_id):

@@ -13,6 +13,9 @@ from generation.pipelines.minimax_h3.validator import H3Ref2VAValidator
 from services.project_bible import load_project_bible
 
 
+H3_VIDEO_PROMPT_LIMITS = ("不要新增主要角色", "不要改变或添加对白", "不要显示字幕")
+
+
 @dataclass(frozen=True)
 class H3CompiledPrompt:
     text: str
@@ -52,6 +55,8 @@ class H3PromptCompiler:
 
         references = self._retention_lines(segment, bindings)
         raw_shots = self._raw_shots(segment)
+        if 'text_roles' not in segment and config.extra.get('binding_schema_version'):
+            segment = {**segment, 'text_roles': self._unbound_shot_names(raw_shots, bindings)}
         visible = {r for shot in raw_shots for r in shot.get("visible_roles", [])} if raw_shots and all("visible_roles" in shot for shot in raw_shots) else None
         if not draft:
             H3Ref2VAValidator().validate_segment_structure(segment, duration_sec=duration_sec).raise_for_errors()
@@ -79,8 +84,8 @@ class H3PromptCompiler:
         exclusions = self._text_items(
             hints.get("exclusions") or segment.get("h3_exclusions") or segment.get("negative_constraints")
         )
-        if exclusions:
-            detail_lines.append("限制：" + "；".join(exclusions))
+        limits = dict.fromkeys((*H3_VIDEO_PROMPT_LIMITS, *exclusions))
+        detail_lines.append("限制：" + "；".join(limits))
         sections.append("【详细镜头描述】\n" + "\n".join(detail_lines))
         soundscape = self._overall_soundscape(segment)
         sections.append("【整体声音环境】\n" + (soundscape or "使用镜头中明确描述的对白、动作声与自然环境声。"))
@@ -464,7 +469,8 @@ class H3PromptCompiler:
         entries = self._subject_reference_entries(bindings)
         first_shot = self._raw_shots(segment)[0] if self._raw_shots(segment) else {}
         primary = self._entries_mentioned_in_text(str(first_shot.get("subject") or ""), entries)
-        body = self._replace_subject_mentions(core_idea, entries, primary_entries=primary)
+        body = self._replace_subject_mentions(core_idea, entries, primary_entries=primary,
+                                              text_roles=segment.get('text_roles') or ())
         task_types: list[str] = []
         if any(self._picture_anchor_role(binding.asset.metadata) for binding in bindings.images):
             task_types.append("keyframe completion")
@@ -686,12 +692,14 @@ class H3PromptCompiler:
         entries: list[dict[str, Any]],
         *,
         primary_entries: list[dict[str, Any]] | None = None,
+        text_roles=(),
     ) -> str:
         from generation.pipelines.minimax_h3.dialogue_text import transform_outside_dialogue
 
         return transform_outside_dialogue(
             str(text or "").strip(),
-            lambda value: self._replace_visual_subject_mentions(value, entries, primary_entries=primary_entries),
+            lambda value: self._replace_visual_subject_mentions(
+                value, entries, primary_entries=primary_entries, text_roles=text_roles),
         )
 
     def _replace_visual_subject_mentions(
@@ -700,6 +708,7 @@ class H3PromptCompiler:
         entries: list[dict[str, Any]],
         *,
         primary_entries: list[dict[str, Any]] | None = None,
+        text_roles=(),
     ) -> str:
         result = str(text or "")
         if not result:
@@ -710,12 +719,22 @@ class H3PromptCompiler:
                 alias_text = str(alias).strip()
                 if len(alias_text) >= 2:
                     replacements.append((alias_text, str(entry["subject_tag"])))
-        for alias, tag in sorted(replacements, key=lambda value: len(value[0]), reverse=True):
-            result = re.sub(re.escape(alias), tag, result, flags=re.IGNORECASE)
+        if text_roles:
+            tags_by_name = {name.casefold(): None for name in text_roles}
+            for alias, tag in replacements:
+                tags_by_name.setdefault(alias.casefold(), tag)
+            pattern = '|'.join(map(re.escape, sorted(tags_by_name, key=len, reverse=True)))
+            result = re.sub(pattern, lambda match: tags_by_name.get(match[0].casefold()) or match[0],
+                            result, flags=re.I)
+        else:
+            for alias, tag in sorted(replacements, key=lambda value: len(value[0]), reverse=True):
+                result = re.sub(re.escape(alias), tag, result, flags=re.IGNORECASE)
 
         # Editors may keep a tag beside its human-readable name. Replacing
         # that name must not leave two adjacent references to the same asset.
         result = re.sub(r"(<Subject\s+\d+>)(?:\s*\1)+", r"\1", result, flags=re.IGNORECASE)
+        if text_roles:
+            return result
         character_tags = {
             str(entry["subject_tag"]) for entry in entries if entry.get("asset_kind") == "character"
         }
@@ -794,6 +813,23 @@ class H3PromptCompiler:
         visual = {key: shot.get(key) for key in ("subject", "blocking", "action", "camera")}
         return any(alias in json.dumps(visual, ensure_ascii=False).lower() for alias in aliases)
 
+    def _unbound_shot_names(self, shots, bindings):
+        aliases = {str(alias).casefold() for entry in self._subject_reference_entries(bindings)
+                   for alias in [entry['subject_tag'], *entry['aliases']]}
+        voice_aliases = {str(name).casefold() for audio in bindings.audios
+                         for name in (audio.prompt_tag, audio.asset.metadata.get('role_id'),
+                                      audio.asset.metadata.get('identity_id'), audio.asset.role, audio.asset.label) if name}
+        names = set()
+        for shot in shots:
+            for field in ('visible_roles', 'offscreen_speakers', 'mentioned_roles'):
+                names.update(name.strip() for name in (shot.get(field) or [])
+                             if isinstance(name, str) and name.strip() and name.strip().casefold() not in aliases)
+            for dialogue in self._shot_dialogue_values(shot):
+                speaker, _, _, _ = self._dialogue_parts(dialogue)
+                if speaker and speaker.casefold() not in aliases | voice_aliases:
+                    names.add(speaker)
+        return sorted(names)
+
     def _shot_lines(
         self,
         segment: Mapping[str, Any],
@@ -806,12 +842,13 @@ class H3PromptCompiler:
         raw_shots = self._raw_shots(segment)
         lines: list[str] = []
         subject_entries = self._subject_reference_entries(bindings)
+        text_roles = set(segment.get('text_roles') or [])
         speaker_ids: dict[str, str] = {}
         for shot in raw_shots:
             for dialogue in self._shot_dialogue_values(shot):
                 speaker, _scope, line, _continuation = self._dialogue_parts(dialogue)
                 if speaker and line:
-                    key = self._speaker_key(speaker, subject_entries)
+                    key = self._speaker_key(speaker, subject_entries, text_roles=text_roles)
                     if key not in speaker_ids:
                         speaker_ids[key] = f"S{len(speaker_ids) + 1}"
         voice_refs = {}
@@ -834,6 +871,7 @@ class H3PromptCompiler:
                 subject_entries=subject_entries,
                 primary_entries=primary_entries,
                 voice_refs=voice_refs,
+                text_roles=text_roles,
             )
             if description:
                 reference_text = self._shot_reference_text(shot, index, bindings)
@@ -933,7 +971,12 @@ class H3PromptCompiler:
         subject_entries: list[dict[str, Any]],
         primary_entries: list[dict[str, Any]],
         voice_refs=None,
+        text_roles=(),
     ) -> str:
+        def render(text):
+            return self._replace_subject_mentions(text, subject_entries, primary_entries=primary_entries,
+                                                  text_roles=text_roles)
+
         parts: list[str] = []
         shot_size = str(shot.get("shot_size") or shot.get("framing") or "").strip()
         if shot_size:
@@ -949,7 +992,8 @@ class H3PromptCompiler:
             parts.append(f"{shot_sizes.get(shot_size.lower(), shot_size)}镜头")
         cast_tags: set[str] = set()
         if 'visible_roles' in shot:
-            cast = '、'.join(str(entry['subject_tag']) if (entry := self._subject_entry_for_name(str(role), subject_entries)) else str(role) for role in shot['visible_roles'])
+            cast = '、'.join(self._speaker_key(str(role), subject_entries, text_roles=text_roles)
+                            for role in shot['visible_roles'])
             parts.append('画面人物：' + (cast or '无人物'))
             cast_tags = set(re.findall(r'<Subject\s+\d+>', cast))
         seen = set()
@@ -959,7 +1003,7 @@ class H3PromptCompiler:
                 value = "、".join(str(item or "").strip() for item in raw if str(item or "").strip()).strip()
             else:
                 value = str(raw or "").strip()
-            rendered = self._replace_subject_mentions(value, subject_entries, primary_entries=primary_entries)
+            rendered = render(value)
             # The structured cast already names these people. A bare subject
             # or subject list adds no shot information; descriptive text does.
             if key == 'subject' and re.fullmatch(
@@ -979,31 +1023,29 @@ class H3PromptCompiler:
             speaker, scope, line, continuation = self._dialogue_parts(dialogue)
             if line:
                 prefix = "接着上个 Shot 继续说，" if continuation else ""
-                speaker_entry = self._subject_entry_for_name(speaker, subject_entries)
-                speaker_ref = str(speaker_entry["subject_tag"]) if speaker_entry else speaker or "说话人"
-                speaker_key = self._speaker_key(speaker, subject_entries)
-                speaker_id = str((speaker_ids or {}).get(speaker_key) or "").strip()
+                speaker_ref = self._speaker_key(speaker, subject_entries, text_roles=text_roles)
+                speaker_id = str((speaker_ids or {}).get(speaker_ref) or "").strip()
                 speaker_tag = f" ({speaker_id})" if speaker_id else ""
                 scope_text = {"narration":"以画外旁白", "telephone":"在画外通过电话"}.get(
                     scope, "在画外" if scope.startswith("offscreen") else "")
                 voice_id = dialogue.get('voice_asset_id') if isinstance(dialogue, Mapping) else None
                 if voice_id and voice_refs is not None and voice_id not in voice_refs:
                     raise ValueError('对白音色参考绑定不存在：' + str(voice_id))
-                audio_tag = (voice_refs or {}).get(voice_id) or (voice_refs or {}).get(speaker) or (voice_refs or {}).get(speaker_ref)
+                audio_tag = (voice_refs or {}).get(voice_id)
+                if not audio_tag and speaker not in text_roles:
+                    audio_tag = (voice_refs or {}).get(speaker) or (voice_refs or {}).get(speaker_ref)
                 if audio_tag:
                     parts.append(f'本句音色参考：{audio_tag}，仅用于{speaker_ref}的声音')
                 if isinstance(dialogue, Mapping) and dialogue.get("delivery_spans"):
-                    parts.append(self._replace_subject_mentions(render_delivery(dialogue, speaker_ref + speaker_tag), subject_entries, primary_entries=primary_entries))
+                    parts.append(render(render_delivery(dialogue, speaker_ref + speaker_tag)))
                 else:
                     parts.append(f"{prefix}{speaker_ref}{speaker_tag}{scope_text}说：<d>[Chinese]{line}</d>")
         audio = str(shot.get("audio") or shot.get("sound") or "").strip()
         if audio:
-            parts.append(f"声音：{self._replace_subject_mentions(audio, subject_entries, primary_entries=primary_entries)}")
+            parts.append(f"声音：{render(audio)}")
         continuity = str(shot.get("continuity") or "").strip()
         if continuity:
-            parts.append(
-                "连续性：" + self._replace_subject_mentions(continuity, subject_entries, primary_entries=primary_entries)
-            )
+            parts.append("连续性：" + render(continuity))
         return "；".join(parts).strip("；")
 
     @staticmethod
@@ -1042,7 +1084,9 @@ class H3PromptCompiler:
             None,
         )
 
-    def _speaker_key(self, speaker: str, entries: list[dict[str, Any]]) -> str:
+    def _speaker_key(self, speaker: str, entries: list[dict[str, Any]], *, text_roles=()) -> str:
+        if speaker in text_roles:
+            return speaker
         entry = self._subject_entry_for_name(speaker, entries)
         return str(entry["subject_tag"]) if entry else str(speaker or "说话人").strip()
 

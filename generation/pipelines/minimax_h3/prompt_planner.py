@@ -20,7 +20,8 @@ from services.logger import log
 _SYSTEM_PROMPT = """
 你是 H3 单段镜头规划器，只输出完整 JSON object。
 事实源：有 editor_prompt 时只采用当前编辑稿；否则采用 current_beat，已确认 source_dialogue 为对白权威。source_context 和前段状态只帮助理解，不补回旧剧情。
-自动规划的人物role_id必须已注册；scene_id有明确匹配时复用项目场景ID，没有匹配时保留剧情地点名称，并在镜头正文交代场景，让视频模型自行构建，不要求登记、生成背景参考图或强配其他场景。不生成Subject/Picture/Audio编号；已有编辑稿的标签按编辑稿合同处理。不创建全文scene_contexts。
+Project Bible 用于复用参考素材，不是人物白名单。有唯一匹配的人物使用其项目角色 ID；当前底稿中未登记的人物沿用原名，在 visible_roles、speaker 和镜头正文里保持一致，不新造 ID，不配其他人物的参考素材。不得从旧稿或素材新增人物。
+scene_id有明确匹配时复用项目场景ID，没有匹配时保留剧情地点名称，并在镜头正文交代场景，让视频模型自行构建，不要求登记、生成背景参考图或强配其他场景。不生成Subject/Picture/Audio编号；已有编辑稿的标签按编辑稿合同处理。不创建全文scene_contexts。
 返回 core_idea、shot_mode（one_take/multi_shot）、shots、exclusions、non_diegetic_music；shots 含 start_sec、end_sec、scene_id、visible_roles、subject、action、audio，字段职责按共同创作合同，其他导演字段按需。
 对白用speaker、scope、line；scope为onscreen/offscreen/telephone/narration，跨镜续说标记continues_previous，无发言镜头省略dialogue。表达职责按共同创作合同。
 """.strip()
@@ -385,7 +386,8 @@ def plan_h3_prompt(
         payload['fixed_shots']=fixed_shots
         system += '\n连续性规划：内部使用稳定role_id，不返回Subject/Picture编号。当前剧情、对白、镜头时间与必要动作保留。根据完整在场位置逐镜确定摄影机方向、构图、遮挡及visible_roles，既有在场人物因构图成为虚化或局部背景不算恢复旧剧情。不得无理由沿用漏人的原入画名单；也不强制全员入画。机位不充分时明确补充合理构图，不编造人物移动。每镜必须返回world_events数组，格式role_id及facts，每项fact含value（present为bool，其余文字或null），只记录实际状态变化，切镜不改变世界位置。人物关系用relative_to_role_id，不把别人姓名写入关系值。顶层返回scene_relation=immediate/new_scene/unclear；明确跳时换场为new_scene。不得为了构图发明入离场或对白。'
     if continuity_context:
-        system += ('\nworld_events结构示例：[{"role_id":"已登记角色ID","facts":'
+        system += ('\nworld_events及relative_to_role_id只用tracked_role_ids；未跟踪的剧情人物仍可在镜头描述中出现，不加入状态表。'
+                   '\nworld_events结构示例：[{"role_id":"已登记角色ID","facts":'
                    '{"position":{"value":"桌旁"},"present":{"value":true}}}]。'
                    'facts仅present、position、posture三个字段；posture只用站着、坐着、斜靠、仰卧、蹲着等简短基本姿势，不写表情、视线、语气或微动作。facts必须是以状态字段为键的JSON对象，不是fact/value数组；'
                    '没有实际变化时world_events填[]。同场切镜或重新交代全景不算new_scene，'

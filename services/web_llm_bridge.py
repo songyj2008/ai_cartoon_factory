@@ -170,6 +170,7 @@ def _connect():
     conn.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, runtime TEXT, status TEXT, created REAL, updated REAL, lease TEXT, payload TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, seen REAL, providers TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS browser_clients (id TEXT PRIMARY KEY, metadata TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS extension_updates (client_id TEXT PRIMARY KEY, value TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS client_capabilities (id TEXT PRIMARY KEY, seen REAL, capabilities TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS task_tombstones (id TEXT PRIMARY KEY, deleted REAL)")
     conn.execute("CREATE TABLE IF NOT EXISTS queue_reset (id INTEGER PRIMARY KEY, epoch REAL NOT NULL)")
@@ -644,6 +645,9 @@ def claim(client_id, providers, *, tab_id=None, capabilities=None):
         _expire(db)
         if not _text_owner(db, client_id):
             return None
+        from services.extension_updates import draining
+        if draining(db, client_id):
+            return None
         db.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (client_id, time.time(), _dump(providers)))
         # Reserve capacity and the tab together in this transaction.
         active = [_decode(row) for row in db.execute(
@@ -839,7 +843,8 @@ def text_owner(client_id):
     with _connect() as db:
         db.execute('BEGIN IMMEDIATE')
         _expire(db)
-        return _text_owner(db, client_id)
+        from services.extension_updates import draining
+        return not draining(db, client_id) and _text_owner(db, client_id)
 
 
 def supports_capability(capability, providers):

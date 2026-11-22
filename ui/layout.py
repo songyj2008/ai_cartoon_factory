@@ -20,6 +20,7 @@ from ui.project_handlers import (
     current_default_video_model,
     current_interface_mode,
     latest_final_video_path,
+    runninghub_key_options,
     secret_key_placeholders,
     workflow_model_settings,
 )
@@ -268,14 +269,14 @@ def build_layout():
                         gr.HTML("</div>")
 
                         with gr.Accordion(
-                            "已有完整小说？生成 Beats 再生成 Segments",
+                            "已有完整小说？生成分镜头",
                             open=initial_interface_mode == "novel",
                             elem_classes=["novel-segments-panel"],
                         ) as novel_segments_panel:
                             gr.HTML('<div class="section-subtitle">先把小说切分为 Beats（保留对白与原文），再按当前模型生成分段。会覆盖已有 Beats 与分段信息。</div>')
                             novel_text = gr.Textbox(label="完整小说段", lines=12, max_lines=36, placeholder="粘贴已有小说内容（支持几千字）。系统将保留小说对白与原文，按模型规则切分 Beats 后生成视频 Segments。", elem_id="novel_text_editor")
                             novel_segment_count = gr.Number(label="参考 Beat 数量", info="仅供参考，LLM 可按完整对白、事件边界和单段时长适当增减。", value=4, minimum=1, step=1, precision=0)
-                            generate_novel_segments_btn = gr.Button("生成 / 继续 Beats → Segments", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
+                            generate_novel_segments_btn = gr.Button("生成/继续分镜头", elem_id="generate_novel_segments_btn", elem_classes=["primary-btn", "step-action"])
 
                         with gr.Accordion("剧情简介（可编辑）", open=True, elem_id="story_summary_panel"):
                             story_json = gr.Textbox(
@@ -646,7 +647,7 @@ def build_layout():
                                 output_dir = gr.Textbox(value=str(get_project_dir()), lines=1, interactive=False)
                         submit_backends = CONFIG.get("submit_backends") if isinstance(CONFIG.get("submit_backends"), dict) else {}
                         comfy_backend = submit_backends.get("comfyui") if isinstance(submit_backends, dict) else {}
-                        runninghub_backend = submit_backends.get("runninghub") if isinstance(submit_backends, dict) else {}
+                        runninghub_choices, runninghub_selection = runninghub_key_options()
                         with gr.Column(elem_classes=["kv-settings-form"]):
                             with gr.Row(elem_classes=["kv-row"]):
                                 gr.HTML('<div class="kv-key">ComfyUI URL</div>')
@@ -659,7 +660,21 @@ def build_layout():
                                 runninghub_api_key_box = gr.Textbox(
                                     value=runninghub_key_value,
                                     placeholder="输入 RunningHub API Key",
+                                    info="保存到本机 config.json。运行时优先使用环境变量中的 Key。",
                                     type="password",
+                                    lines=1,
+                                )
+                            with gr.Row(elem_classes=["kv-row"]):
+                                gr.HTML('<div class="kv-key">RunningHub Key 使用方式</div>')
+                                runninghub_key_selection_box = gr.Dropdown(
+                                    choices=runninghub_choices, value=runninghub_selection, interactive=True,
+                                    info="轮询或指定 Key 只用于新提交的任务。",
+                                )
+                            with gr.Row(elem_classes=["kv-row"]):
+                                gr.HTML('<div class="kv-key">RunningHub Key 别名</div>')
+                                runninghub_key_alias_box = gr.Textbox(
+                                    placeholder="新增 Key 时填写，如 key-3",
+                                    info="输入已有别名可更新配置文件中的对应 Key。",
                                     lines=1,
                                 )
                             with gr.Row():

@@ -203,17 +203,11 @@ def _windows_broadcast_env_change() -> None:
         return
 
 
-def secret_value(name: str) -> str:
-    value = str(os.environ.get(name) or "").strip()
-    if value:
-        return _decrypt_for_machine(value, name)
-    value = _windows_user_env_get(name)
-    if not value:
-        value = _linux_user_env_get(name)
-    if value:
-        os.environ[name] = value
-        return _decrypt_for_machine(value, name)
-    return ""
+def secret_value(name: str, *, allow_plaintext: bool = False) -> str:
+    value = str(os.environ.get(name) or "").strip() or _windows_user_env_get(name) or _linux_user_env_get(name)
+    if allow_plaintext and not value.startswith(SECRET_PREFIX):
+        return value
+    return _decrypt_for_machine(value, name)
 
 
 def secret_is_configured(name: str) -> bool:

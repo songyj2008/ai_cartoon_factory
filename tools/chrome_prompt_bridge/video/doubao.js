@@ -73,7 +73,9 @@ if (!globalThis.__AICF_DOUBAO_VIDEO_ADAPTER__) {
     const images=composerImages(),root=composerRoot();
     return images.length>=expected && images.every(item=>item.complete!==false &&
       (typeof item.naturalWidth!=='number' || item.naturalWidth>0)) &&
-      ![...root.querySelectorAll('[role="progressbar"],[aria-busy="true"]')].some(visible) &&
+      ![...root.querySelectorAll('[role="progressbar"],[aria-busy="true"]')].some(item=>
+        visible(item) && (item.getAttribute('role')==='progressbar' ||
+          item.getAttribute('data-testid')!=='chat_input_action_model')) &&
       !findText(/上传中|正在上传|上传失败|重试上传/,root);
   };
   const editor = () => {
@@ -102,6 +104,11 @@ if (!globalThis.__AICF_DOUBAO_VIDEO_ADAPTER__) {
     if(!clicked?.ok)throw new Error(clicked?.error || '豆包'+description+'点击失败');
   }
   async function ensureVideoMode(taskId) {
+    try {
+      await waitFor(()=>document.visibilityState==='visible','可见的豆包视频标签页',10000);
+    } catch {
+      throw new Error('豆包视频标签页不可见，请将浏览器窗口恢复到前台后重试');
+    }
     if(videoModeReady())return;
     const control=await waitFor(()=>videoModeReady() ||
       findText(/^视频生成$/,document,nearComposer) || find(/视频生成/),

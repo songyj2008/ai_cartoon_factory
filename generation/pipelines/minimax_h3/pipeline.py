@@ -1064,6 +1064,7 @@ class MiniMaxH3Ref2VAPipeline:
                 submitted_prompt=job.prompt,
                 video_path=result.video_path,
                 model_id=self.spec.id,
+                key_id=str(submitted.get("key_id") or ""),
             )
 
     def _stage_saved_workflow_assets(self, workflow: dict[str, Any], job: H3VideoJob) -> bool:

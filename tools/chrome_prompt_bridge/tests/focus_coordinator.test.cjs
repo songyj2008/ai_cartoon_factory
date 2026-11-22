@@ -5,19 +5,43 @@ const {createCoordinator}=require('../focus_coordinator.js');
 function fixture(){
  const tabs=[{id:1,windowId:7,active:true},{id:2,windowId:7,active:false},
    {id:3,windowId:7,active:false}];
- const listeners=[],session={};let timer,focused=true;
+ const listeners=[],session={},windowUpdates=[];let timer,focused=true,windowState='normal';
  const chrome={tabs:{onActivated:{addListener:fn=>listeners.push(fn)},
    get:async id=>{const tab=tabs.find(t=>t.id===id);if(!tab)throw new Error('No tab');return {...tab};},
    query:async query=>tabs.filter(t=>!query.active || t.active).map(t=>({...t})),
    update:async(id,patch)=>{if(patch.active){tabs.forEach(t=>t.active=false);tabs.find(t=>t.id===id).active=true;
      listeners.forEach(fn=>fn({tabId:id,windowId:7}));}return {...tabs.find(t=>t.id===id)};}},
-   windows:{getLastFocused:async()=>({id:7,focused}),onFocusChanged:{addListener:()=>{}}},
+   windows:{getLastFocused:async()=>({id:7,focused}),onFocusChanged:{addListener:()=>{}},
+     get:async()=>({id:7,focused,state:windowState}),
+     update:async(id,patch)=>{windowUpdates.push({id,...patch});focused=patch.focused;windowState=patch.state||windowState;}},
    storage:{session:{get:async key=>({[key]:session[key]}),set:async patch=>Object.assign(session,patch),
      remove:async key=>{delete session[key];}}}};
  const focus=createCoordinator(chrome,{sleep:async()=>{},setTimer:fn=>{timer=fn;return 1;},clearTimer:()=>{}});
- return {focus,tabs,session,expire:()=>timer(),setFocused:value=>{focused=value;},userSwitch:id=>{
+ return {focus,tabs,session,windowUpdates,expire:()=>timer(),setFocused:value=>{focused=value;},
+   setWindowState:value=>{windowState=value;},userSwitch:id=>{
    tabs.forEach(t=>t.active=t.id===id);listeners.forEach(fn=>fn({tabId:id,windowId:7}));}};
 }
+
+test('video can restore a minimized window before operating on its active tab',async()=>{
+ const f=fixture();
+ f.setFocused(false);
+ f.setWindowState('minimized');
+ await f.focus.withVideoForeground({taskId:'doubao',tabId:2,focusWindow:true},async()=>{
+   assert.equal(f.tabs.find(tab=>tab.active).id,2);
+   assert.deepEqual(f.windowUpdates,[{id:7,focused:true,state:'normal'}]);
+ });
+ assert.equal(f.tabs.find(tab=>tab.active).id,1);
+});
+
+test('video brings an unfocused window forward only when requested',async()=>{
+ const f=fixture();
+ f.setFocused(false);
+ await f.focus.withVideoForeground({taskId:'runow',tabId:2},async()=>{});
+ assert.deepEqual(f.windowUpdates,[]);
+ await f.focus.withVideoForeground({taskId:'doubao',tabId:2,focusWindow:true},async()=>{
+   assert.deepEqual(f.windowUpdates,[{id:7,focused:true}]);
+ });
+});
 
 test('text wake restores focus on failure and does not override a user switch',async()=>{
  const f=fixture();

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,9 +18,21 @@ APP_NAME = "AI_Cartoon_Factory"
 INSTALLER_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
 
 
+def build_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key.upper() not in {"RUNNINGHUB_API_KEY", "RUNNINGHUB_API_KEYS"}}
+
+
+def verify_example_config(path: Path) -> None:
+    example = json.loads(path.read_text(encoding="utf-8-sig"))
+    if example.get("runninghub_api_keys"):
+        raise RuntimeError("Release example configuration contains RunningHub keys")
+
+
 def main() -> None:
     if sys.platform != "win32" or struct.calcsize("P") != 8:
         raise RuntimeError("Build this release on Windows x64")
+    verify_example_config(ROOT / "config.example.json")
     installer = ROOT / ".local" / "packaging" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
     installer.parent.mkdir(parents=True, exist_ok=True)
     if not installer.is_file():
@@ -33,7 +46,7 @@ def main() -> None:
         [shutil.which("pwsh") or "powershell.exe", "-NoProfile", "-Command",
          "$s = Get-AuthenticodeSignature -LiteralPath $env:AICF_WEBVIEW2_INSTALLER; "
          "if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { exit 1 }"],
-        env={**{key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"},
+        env={**{key: value for key, value in build_environment().items() if key.upper() != "PSMODULEPATH"},
              "AICF_WEBVIEW2_INSTALLER": str(installer)}, check=True,
     )
     if installer.stat().st_size < 50_000_000:
@@ -41,7 +54,7 @@ def main() -> None:
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "desktop_build.spec"],
         cwd=ROOT, check=True,
-        env={**os.environ, "PATH": str(Path(sys.prefix) / "Library" / "bin")
+        env={**build_environment(), "PATH": str(Path(sys.prefix) / "Library" / "bin")
              + os.pathsep + os.environ.get("PATH", "")},
     )
     verify_and_archive(ROOT / "dist" / APP_NAME)
@@ -55,6 +68,14 @@ def verify_and_archive(release: Path) -> None:
     for source in release.rglob("*"):
         relative = source.relative_to(release)
         if source.is_file() and (
+            source.name.lower() in {"config.json", "config.local.json", ".env"}
+            or source.name.lower().startswith("config.json.")
+            or (source.name.lower().startswith(".env.") and source.name.lower() != ".env.example")
+        ):
+            raise RuntimeError(f"Release contains private configuration: {relative}")
+        if source.is_file() and source.name.lower() == "config.example.json":
+            verify_example_config(source)
+        if source.is_file() and (
             source.suffix.lower() in video_suffixes
             or {"media_assets", "test_data"}.intersection(relative.parts)
         ):
@@ -64,7 +85,7 @@ def verify_and_archive(release: Path) -> None:
         test_app = Path(temp) / APP_NAME
         shutil.copytree(release, test_app)
         windows = Path(os.environ["SystemRoot"])
-        env = {key: value for key, value in os.environ.items()
+        env = {key: value for key, value in build_environment().items()
                if not key.startswith(("PYTHON", "CONDA", "AI_CARTOON_FACTORY", "GRADIO"))}
         env.update(PATH=str(windows / "System32"), AI_CARTOON_FACTORY_SMOKE="1",
                    LOCALAPPDATA=str(Path(temp) / "localappdata"))

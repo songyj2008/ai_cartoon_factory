@@ -71,6 +71,7 @@ def ui_launch_kwargs():
         "css": CSS,
         "js": APP_JS_FUNCTION,
         "theme": gr.themes.Base(),
+        "blocked_paths": [str(BASE_DIR / name) for name in ("config.json", "config.local.json")],
     }
 
 

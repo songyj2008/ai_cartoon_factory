@@ -31,7 +31,12 @@ def generate_story(topic, duration_sec=60, model_id=None):
         log("=" * 60)
         log(f"第一步开始：主题 -> 完整剧情，主题：{topic}，时长：{duration_sec}s")
         bible = ensure_project_bible(topic=topic, asset_index=load_asset_index())
-        bible_text = project_bible_prompt(bible, allow_text_scenes=model_rules.model_id == "minimax_h3_local_ref2va")
+        is_h3 = model_rules.model_id == "minimax_h3_local_ref2va"
+        bible_text = project_bible_prompt(bible, allow_text_scenes=is_h3, allow_text_characters=is_h3)
+        character_rule = (
+            "保留用户输入里的未登记人物及其对白和剧情职责，不自动配参考图，不凭空新增输入之外的具名人物。"
+            if is_h3 else "不新增未注册角色参与对白或推动剧情。"
+        )
         industry_profile = load_industry_profile(get_project_dir().name)
         industry_text = industry_profile_prompt(industry_profile)
 
@@ -50,7 +55,7 @@ def generate_story(topic, duration_sec=60, model_id=None):
 - 可以补充细节，但补充只能服务原主题，不能替换原主题。
 
 - 对白、动作、环境和镜头共同服务剧情；不要用无信息量语气词或机械动作口令凑内容。
-- 不新增未注册角色参与对白或推动剧情；背景群众不得承担明确身份和核心剧情。
+- {character_rule} 背景群众不得承担明确身份和核心剧情。
 
 【当前视频模型】
 - {model_rules.label}（{model_rules.model_id}）

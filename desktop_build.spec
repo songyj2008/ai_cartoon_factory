@@ -128,6 +128,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name=APP_NAME,
+    icon=str(PROJECT_DIR / "resources" / "brand" / "desktop-icon.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

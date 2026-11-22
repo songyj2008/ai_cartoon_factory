@@ -94,7 +94,8 @@ async function videoPage(task,type) {
   };
   if(foreground) {
     const {backend}=await chrome.storage.local.get('backend');
-    return focus.withVideoForeground({taskId:task.id,tabId:task.tabId,returnUrl:backend?.url},operate);
+    const focusWindow=task.channel==='doubao_web' && type==='AICF_VIDEO_SUBMIT';
+    return focus.withVideoForeground({taskId:task.id,tabId:task.tabId,returnUrl:backend?.url,focusWindow},operate);
   }
   return operate();
 }

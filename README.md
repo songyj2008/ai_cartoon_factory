@@ -6,6 +6,8 @@
 
 ## Windows 快速开始
 
+可从 [最新发布页](https://github.com/songyj2008/ai_cartoon_factory/releases/latest) 下载 Windows 应用包。首次安装时，按发布说明下载对应的基础运行包，将两包解压到同一目录后双击 `AI_Cartoon_Factory.exe`。基础运行包按内容复用，后续更新通常只需覆盖应用包。安装和备份步骤见 [Windows 使用指南](docs/windows.md)。
+
 打开 **Anaconda Prompt**，执行：
 
 ```bat
@@ -26,7 +28,7 @@ python app.py
 ## 配置与生成
 
 - `config.example.json` 是公开默认配置；复制得到的 `config.json` 是本机配置，Git 忽略它。更新示例不会自动覆盖已有设置。
-- 在应用设置中填写自己的 DeepSeek API Key；选择 RunningHub 时配置自己的 RunningHub API Key 和可用工作流。密钥通过应用在本机加密保存，不能直接设置为明文环境变量，也不要写入仓库。
+- 应用设置将 DeepSeek API Key 加密保存到本机。RunningHub API Key 可在设置中保存到私有 `config.json`，也可自行设置在系统环境变量中。选择 RunningHub 时请配置有权限使用的工作流。
 - 默认示例使用本地 ComfyUI `http://127.0.0.1:8188`。本项目不安装 ComfyUI、自定义节点或模型，须先在 ComfyUI 中确认工作流可运行。云端生成需要对应账号、权限和额度。
 - 当前源码保留 LTX / LiconMSR 与 MiniMax H3 / Ref2VA 模型注册；具体模板和节点映射以示例配置与 `templates/` 为准。LTX 默认 50 fps。网页生成渠道有独立的素材和时长限制，见 [渠道说明](docs/video_channels.md)。
 - 项目架构说明中记录的 `Ltx2.3_Licon-MSRV1_api.json` 在当前目录中缺失；现有配置指向 `Ltx2.3 Licon-MSRV2-bfs_api.json`。此处如实记录现状，发布不自动迁移模板或改写生成逻辑。

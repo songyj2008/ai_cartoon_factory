@@ -295,7 +295,9 @@ def match_beat_assets(
     asset_index = asset_index or load_asset_index()
     identity_by_id = _identity_by_id(asset_index)
     background_by_id = _background_by_id(asset_index)
-    if str(model_id) == "minimax_h3_local_ref2va" and beat.get("binding_schema_version"):
+    is_h3 = str(model_id or "").strip() == "minimax_h3_local_ref2va"
+    structured_h3 = bool(is_h3 and beat.get("binding_schema_version"))
+    if structured_h3:
         from generation.pipelines.minimax_h3.semantic_bindings import normalize_beat_bindings
         beat = normalize_beat_bindings(beat, bible=bible)
     text = _beat_text(beat)
@@ -330,7 +332,7 @@ def match_beat_assets(
         constraints = item.get("identity_constraints") if isinstance(item.get("identity_constraints"), dict) else {}
         item["identity_constraints"] = {
             **constraints,
-            "registered_identity_only": True,
+            "registered_identity_only": not structured_h3,
             "locked_roles": list(manual_roles),
         }
         item["auto_asset_match"] = {
@@ -346,8 +348,11 @@ def match_beat_assets(
         return item
 
     character_matches = []
+    allowed_roles = set(item['reference_roles']) if structured_h3 else None
     for character in _project_characters(bible):
         if not isinstance(character, dict):
+            continue
+        if allowed_roles is not None and str(character.get('id') or '') not in allowed_roles:
             continue
         identity = identity_by_id.get(str(character.get("asset_identity_id") or ""))
         score, reasons = _score(_character_tokens(character, identity), text)
@@ -362,7 +367,6 @@ def match_beat_assets(
         identity_by_id,
     )
 
-    is_h3 = str(model_id or "").strip() == "minimax_h3_local_ref2va"
     h3_backgrounds = _match_h3_shot_backgrounds(item, bible, background_by_id) if is_h3 else []
     if h3_backgrounds:
         first = h3_backgrounds[0]
@@ -402,7 +406,7 @@ def match_beat_assets(
         if bg_entry.get("id"):
             item["scene_id"] = str(bg_entry.get("id"))
 
-    if is_h3 and beat.get("binding_schema_version"):
+    if structured_h3:
         item["scene_id"] = str(beat.get("scene_id") or "")
     existing_roles = _as_list(item.get("important_roles"))
     explicit_h3_cast = is_h3 and ('visible_roles' in beat or 'reference_roles' in beat)
@@ -430,7 +434,7 @@ def match_beat_assets(
     identity_constraints = item.get("identity_constraints") if isinstance(item.get("identity_constraints"), dict) else {}
     item["identity_constraints"] = {
         **identity_constraints,
-        "registered_identity_only": True,
+        "registered_identity_only": not structured_h3,
         "locked_roles": list(item.get("reference_roles") or []),
     }
     item["auto_asset_match"] = {

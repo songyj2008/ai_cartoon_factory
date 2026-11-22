@@ -108,6 +108,24 @@ def test_dismiss_task_releases_segment_and_keeps_other_segments(tmp_path):
     assert jobs["segments"][1]["video_path"] == "done.mp4"
 
 
+def test_dismiss_completed_tasks_leaves_video_history_and_other_tasks(tmp_path):
+    media = tmp_path / "done.mp4"
+    media.write_bytes(b"saved video")
+    _write_jobs(tmp_path, [_queued_segment(), _queued_segment(
+        index=2, task_id="complete", status="success", video_path=str(media))])
+    jobs_before = (tmp_path / "video_jobs.json").read_bytes()
+    for state in ("complete", "error", "uncertain", "cancelled_unclaimed", "queued", "submitted"):
+        _seed_task(tmp_path, task_id=state, state=state)
+
+    assert bridge.dismiss_completed_tasks() == 1
+    assert bridge.dismiss_completed_tasks() == 0
+    assert _task("complete")["dismissed"] == 1
+    assert all(_task(state)["dismissed"] == 0 for state in (
+        "error", "uncertain", "cancelled_unclaimed", "queued", "submitted"))
+    assert (tmp_path / "video_jobs.json").read_bytes() == jobs_before
+    assert media.read_bytes() == b"saved video"
+
+
 def test_dismiss_rejects_live_task(tmp_path):
     _write_jobs(tmp_path, [_queued_segment()])
     _seed_task(tmp_path, state="claimed", created=time.time() - 5, updated=time.time() - 5)

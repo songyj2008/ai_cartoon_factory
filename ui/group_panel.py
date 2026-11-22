@@ -791,8 +791,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         <div class="right-panel">
             <div class="panel-heading">
                 <div>
-                    <div class="section-kicker">Segments</div>
-                    <div class="panel-title">视频分段</div>
+                    <div class="panel-title">视频分镜头</div>
                 </div>
             </div>
             <div class="empty-card">还没有视频分段。先生成 Beats，再生成对应模型的视频。</div>
@@ -921,11 +920,11 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
             if segment.get('novel_batch_id'):
                 prompt_regen_action_html = (
                     f'<button type="button" class="card-regen-btn" data-batch-id="{esc(segment["novel_batch_id"])}" '
-                    f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成 Segment</button>'
+                    f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成分镜头</button>'
                 )
             else:
                 prompt_regen_action_html = (
-                    f'<button type="button" class="card-regen-btn" onclick="return window.AICF.triggerSegmentRegen(\'{idx}\', this)">重新生成 Segment</button>'
+                    f'<button type="button" class="card-regen-btn" onclick="return window.AICF.triggerSegmentRegen(\'{idx}\', this)">重新生成分镜头</button>'
                 )
         else:
             editor_html = f"""
@@ -962,7 +961,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
         if segment.get('novel_batch_id'):
             prompt_regen_action_html = (
                 f'<button type="button" class="card-regen-btn" data-batch-id="{esc(segment["novel_batch_id"])}" '
-                f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成 Segment</button>'
+                f'onclick="return window.AICF.retryBeatSegment({idx}, this)">重新生成分镜头</button>'
             )
         planning_issues = segment.get('planning_issues') or []
         planning_label = {'ready': '分镜已规划', 'warning': '分镜有提示，待检查',
@@ -1060,8 +1059,7 @@ def render_groups_panel(groups_text, guides_text="", page=0, fast=False, unmarke
     <div class="right-panel">
         <div class="panel-heading">
             <div>
-                <div class="section-kicker">Segments</div>
-                <div class="panel-title">视频分段</div>
+                <div class="panel-title">视频分镜头</div>
             </div>
             <div class="stats-pill">{esc(stats)}</div>
         </div>

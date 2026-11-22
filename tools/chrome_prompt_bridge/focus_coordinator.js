@@ -58,7 +58,7 @@
        return await action();
      } finally {await restore(current);}
    }
-   async function withVideoForeground({taskId,tabId,returnUrl},action) {
+   async function withVideoForeground({taskId,tabId,returnUrl,focusWindow=false},action) {
      if(lease?.type==='video' && lease.taskId===taskId && lease.tabId===tabId)return action();
      while(lease)await wakeWait();
      // Reserve focus before the first browser API await so other channels wait.
@@ -81,6 +81,17 @@
        let completed=false;
        try {
          if(!target.active){expectedTab=tabId;await chromeApi.tabs.update(tabId,{active:true});}
+         if(focusWindow && !current.userInterrupted) {
+           try {
+             const window=await chromeApi.windows.get(target.windowId);
+             if(!current.userInterrupted && (!window.focused || window.state==='minimized')) {
+               const update=window.state==='minimized' ? {focused:true,state:'normal'} : {focused:true};
+               await chromeApi.windows.update(target.windowId,update);
+             }
+           } catch {
+             // The page checks its actual visibility before attempting input.
+           }
+         }
          const value=await action();completed=true;return value;
        } finally {
          if(completed && !current.userInterrupted && original && original.id!==tabId) {

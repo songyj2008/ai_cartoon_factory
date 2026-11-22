@@ -124,6 +124,15 @@ def register_web_llm_routes(app):
         except Exception as exc:
             return _error(exc)
 
+    @app.post('/api/web-llm/operations/clear-completed')
+    def clear_completed_operations(request: Request):
+        try:
+            _ui_origin(request)
+            with pin_runtime():
+                return {'ok':True, **text_jobs.clear_completed_tasks()}
+        except Exception as exc:
+            return _error(exc)
+
     @app.post('/api/web-llm/operations/clear-all')
     async def clear_all_operations(request: Request):
         try:
@@ -329,6 +338,24 @@ def register_web_llm_routes(app):
         except Exception as exc:
             return _error(exc)
 
+    @app.get('/api/web-llm/extension-update')
+    def extension_update_status(request: Request):
+        try:
+            _ui_origin(request)
+            from services.extension_updates import status
+            return {'ok': True, **status()}
+        except Exception as exc:
+            return _error(exc)
+
+    @app.post('/api/web-llm/extension-update')
+    def extension_update_request(request: Request):
+        try:
+            _ui_origin(request)
+            from services.extension_updates import request_update
+            return {'ok': True, **request_update()}
+        except Exception as exc:
+            return _error(exc)
+
     @app.post("/api/web-llm/bridge/ping")
     async def ping(request: Request):
         try:
@@ -336,7 +363,9 @@ def register_web_llm_routes(app):
             payload = await request.json()
             bridge.heartbeat(str(payload.get("client_id") or ""), payload.get("providers") or [],
                              payload.get('capabilities') or [], payload.get('provider_capabilities'), payload.get('browser'))
-            return {"ok": True, **bridge.pool_status(), 'text_enabled': bridge.text_owner(str(payload.get('client_id') or ''))}
+            from services.extension_updates import heartbeat
+            command = heartbeat(str(payload.get('client_id') or ''), payload.get('browser') or {}, payload.get('extension_update') or {})
+            return {"ok": True, **bridge.pool_status(), 'text_enabled': bridge.text_owner(str(payload.get('client_id') or '')), 'extension_update': command}
         except Exception as exc:
             return _error(exc)
 

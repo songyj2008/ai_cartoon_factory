@@ -68,6 +68,7 @@ function makePage(initialVideoMode, withImage = false, ratioCloses = false, targ
     (videoMode ? '描述你想要的视频' : '发消息或按住空格说话') : null;
   const document = {
     readyState: options.delayedLoad ? 'loading' : 'complete',
+    visibilityState: 'visible',
     activeElement: null,
     querySelectorAll(selector) {
       if (selector.includes('textarea')) return [editor];

@@ -11,12 +11,12 @@ def operation_store(tmp_path, monkeypatch):
     storage = tmp_path / 'operations'
     monkeypatch.setattr(text_jobs, 'root', lambda: storage)
 
-    def add(state):
+    def add(state, **fields):
         identifier = str(uuid.uuid4())
         work = storage / identifier / 'work'
         work.mkdir(parents=True)
         (work / 'candidate.json').write_text('{}', encoding='utf-8')
-        item = {'id': identifier, 'state': state, 'work': str(work)}
+        item = {'id': identifier, 'state': state, 'work': str(work), **fields}
         with text_jobs.database() as db:
             db.execute('INSERT INTO operations VALUES (?,?,?,?,?)',
                        (identifier, state, 1, 1, json.dumps(item)))
@@ -58,6 +58,33 @@ def test_clear_finished_removes_candidates_but_preserves_live_and_recovery_tasks
     with text_jobs.database() as db:
         states = {row['state'] for row in db.execute('SELECT state FROM operations')}
     assert states == {'queued', 'running', 'needs_attention'}
+
+
+def test_clear_completed_only_removes_successful_records(operation_store, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from services import web_video_bridge
+    from ui.web_llm_routes import register_web_llm_routes
+
+    _, completed_dir = operation_store('applied')
+    retained = [operation_store(state) for state in ('ready', 'running', 'queued', 'applying', 'needs_attention',
+                                                    'cancelled', 'error')]
+    parent, parent_dir = operation_store('applied', batch_version=1)
+    retained.append((parent, parent_dir))
+    retained.extend(operation_store(state, batch_id=parent) for state in ('error', 'applied'))
+    video_calls = []
+    monkeypatch.setattr(web_video_bridge, 'dismiss_completed_tasks', lambda: video_calls.append(True) or 2)
+    app = FastAPI()
+    register_web_llm_routes(app)
+    with TestClient(app) as client:
+        response = client.post('/api/web-llm/operations/clear-completed', json={})
+
+    assert response.json() == {'ok': True, 'deleted': 1, 'video_tasks': 2}
+    assert video_calls == [True]
+    assert not completed_dir.exists()
+    assert all((directory / 'work' / 'candidate.json').exists() for _, directory in retained)
+    with text_jobs.database() as db:
+        assert {row['id'] for row in db.execute('SELECT id FROM operations')} == {identifier for identifier, _ in retained}
 
 
 def test_history_retention_keeps_unapplied_results_and_recovery_work(operation_store):

@@ -29,3 +29,67 @@ test('panel opening during wait is not clicked closed',async()=>{
 test('missing settings reports page diagnostics without clicking',async()=>{
   const f=fixture(false,true);await assert.rejects(f.run(),/页面诊断.*readyState/);assert.equal(f.clicks.length,0);
 });
+
+function modeFixture(becomesVisible) {
+  const document={visibilityState:'hidden'};
+  const control={};
+  let ready=false,clicks=0;
+  const context={document,nearComposer:()=>true,videoModeReady:()=>ready,findText:()=>control,
+    trustedClick:async element=>{
+      assert.equal(document.visibilityState,'visible');
+      assert.equal(element,control);
+      clicks++;
+      ready=true;
+    },
+    waitFor:async(getter,description)=>{
+      if(description==='可见的豆包视频标签页') {
+        assert.equal(getter(),false);
+        assert.equal(clicks,0);
+        if(!becomesVisible)throw Error('timeout');
+        document.visibilityState='visible';
+      }
+      const result=getter();
+      assert.ok(result);
+      return result;
+    }};
+  const start=source.indexOf('  async function ensureVideoMode(taskId)');
+  const end=source.indexOf('  const durationPanel',start);
+  vm.runInNewContext(source.slice(start,end),context);
+  return {run:()=>context.ensureVideoMode('task'),get clicks(){return clicks;}};
+}
+
+test('video mode waits for page visibility before clicking',async()=>{
+  const page=modeFixture(true);
+  await page.run();
+  assert.equal(page.clicks,1);
+});
+
+test('video mode reports a hidden page without dispatching a click',async()=>{
+  const page=modeFixture(false);
+  await assert.rejects(page.run(),/视频标签页不可见/);
+  assert.equal(page.clicks,0);
+});
+
+test('reference upload ignores the model switcher busy state and waits for actual progress',()=>{
+  const node=attributes=>({getAttribute:name=>attributes[name]||null});
+  const modelSwitcher=node({'data-testid':'chat_input_action_model','aria-busy':'true'});
+  const image={complete:true,naturalWidth:1376};
+  let busyNodes=[modelSwitcher],loadingText=null;
+  const context={composerImages:()=>[image],composerRoot:()=>({querySelectorAll:()=>busyNodes}),
+    visible:()=>true,findText:()=>loadingText};
+  const start=source.indexOf('  const uploadComplete =');
+  const end=source.indexOf('  const editor =',start);
+  const uploadComplete=vm.runInNewContext(`${source.slice(start,end)}\nuploadComplete`,context);
+  assert.equal(uploadComplete(1),true);
+  assert.equal(uploadComplete(2),false);
+  busyNodes=[modelSwitcher,node({role:'progressbar'})];
+  assert.equal(uploadComplete(1),false);
+  busyNodes=[modelSwitcher,node({'aria-busy':'true'})];
+  assert.equal(uploadComplete(1),false);
+  busyNodes=[modelSwitcher];
+  image.complete=false;
+  assert.equal(uploadComplete(1),false);
+  image.complete=true;
+  loadingText={};
+  assert.equal(uploadComplete(1),false);
+});

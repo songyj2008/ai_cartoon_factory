@@ -89,9 +89,16 @@ def test_read_current_prompt_does_not_treat_mentions_or_dialogue_as_cast():
     assert 'visible_roles' not in doc['shots'][0]
 
 
-def test_read_current_prompt_rejects_unknown_cast_instead_of_silent_empty_shot():
-    with pytest.raises(ValueError,match='无法唯一对应'):
-        parse_prompt('【详细镜头描述】\n[Shot 1]（0–4 秒）：画面人物：未绑定的人物；中景。','test')
+def test_read_current_prompt_preserves_named_cast_without_a_reference():
+    from generation.pipelines.minimax_h3.shot_editor import dialogue_units
+
+    document = parse_prompt('【详细镜头描述】\n[Shot 1]（0–4 秒）：画面人物：阿尔·阿明；中景。；'
+                            '阿尔·阿明 (S1)说：<d>[Chinese]我到了。</d>；'
+                            'Jean-Luc Roy (S2)在画外通过电话说：<d>[Chinese]收到。</d>', 'test')
+    first = document['shots'][0]
+    assert first['visible_roles'] == ['阿尔·阿明']
+    assert [(unit['speaker'], unit['scope']) for unit in dialogue_units(first)] == [
+        ('阿尔·阿明', 'onscreen'), ('Jean-Luc Roy', 'telephone')]
 
 
 @pytest.mark.parametrize('description',[

@@ -10,7 +10,7 @@ import traceback
 from html import escape
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from threading import Lock
+from threading import RLock
 
 import gradio as gr
 
@@ -46,10 +46,10 @@ from services.context import (
 from services.duration import DEFAULT_DURATION_SECONDS, DURATION_PRESETS, duration_state_values, get_final_duration_seconds
 from services.file_utils import ensure_project_dirs, load_json_file, load_json_file_silent
 from services.logger import get_logs, log
+from services.runninghub_keys import AUTO, CONFIG_KEYS_FIELD, SELECTION_FIELD, runninghub_key_aliases, update_config_keys
 from services.ui_run_config import load_ui_run_config, update_ui_run_config
 from services.secrets import (
     DEEPSEEK_API_KEY_ENV,
-    RUNNINGHUB_API_KEY_ENV,
     masked_secret,
     set_secret,
 )
@@ -61,7 +61,7 @@ from ui.project_bible_panel import project_bible_ui_state
 QUALITY_ISSUES_FILE = "quality_issues.json"
 NOVEL_SOURCE_FILE = "novel_source.json"
 INTERFACE_MODE_CHOICES = [("完整模式", "full"), ("极简模式", "minimal"), ("完整小说模式", "novel")]
-_GLOBAL_CONFIG_LOCK = Lock()
+_GLOBAL_CONFIG_LOCK = RLock()
 
 
 def _quality_issues_path() -> Path:
@@ -1041,7 +1041,27 @@ def save_submit_backend_selection(backend: str = ""):
 
 
 def secret_key_placeholders() -> tuple[str, str]:
-    return masked_secret(DEEPSEEK_API_KEY_ENV), masked_secret(RUNNINGHUB_API_KEY_ENV)
+    runninghub = "***" if CONFIG.get(CONFIG_KEYS_FIELD) else ""
+    return masked_secret(DEEPSEEK_API_KEY_ENV), runninghub
+
+
+def runninghub_key_options() -> tuple[list[tuple[str, str]], str | None]:
+    try:
+        aliases = runninghub_key_aliases()
+    except ValueError:
+        aliases = []
+    selection = CONFIG.get(SELECTION_FIELD)
+    if not isinstance(selection, str) or not selection:
+        selection = AUTO
+    choices = [("自动轮询", AUTO), *((alias, alias) for alias in aliases)]
+    if selection != AUTO and selection not in aliases:
+        return choices, None
+    return choices, selection
+
+
+def runninghub_key_picker():
+    choices, selection = runninghub_key_options()
+    return gr.update(choices=choices, value=selection)
 
 
 def _save_global_config(**updates) -> None:
@@ -1049,7 +1069,8 @@ def _save_global_config(**updates) -> None:
         text = json.dumps({**CONFIG, **updates}, ensure_ascii=False, indent=2) + "\n"
         temp_path = None
         try:
-            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temp:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent,
+                                    suffix=".tmp", delete=False) as temp:
                 temp_path = Path(temp.name)
                 temp.write(text)
             temp_path.replace(CONFIG_PATH)
@@ -1145,19 +1166,34 @@ def save_service_keys(
     comfyui_backend_url: str = "",
     deepseek_model: str = "",
     fps_value=None,
+    runninghub_selection: str | None = None,
+    runninghub_alias: str = "",
 ):
     saved = []
     deepseek_key = str(deepseek_key or "").strip()
     runninghub_key = str(runninghub_key or "").strip()
     comfyui_backend_url = str(comfyui_backend_url or "").strip()
     deepseek_model = str(deepseek_model or "").strip()
+    runninghub_alias = str(runninghub_alias or "").strip()
     placeholders = {"***", "需重新配置"}
+    runninghub_updates = {}
+    with _GLOBAL_CONFIG_LOCK:
+        try:
+            if runninghub_key and runninghub_key not in placeholders:
+                runninghub_updates[CONFIG_KEYS_FIELD] = update_config_keys(
+                    CONFIG.get(CONFIG_KEYS_FIELD, {}), runninghub_alias, runninghub_key,
+                )
+            if runninghub_selection is not None and runninghub_selection != (CONFIG.get(SELECTION_FIELD) or AUTO):
+                if runninghub_selection != AUTO and runninghub_selection not in runninghub_key_aliases():
+                    raise ValueError("指定的 RunningHub Key 不可用，请重新选择")
+                runninghub_updates[SELECTION_FIELD] = runninghub_selection
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from None
+        if runninghub_updates:
+            _save_global_config(**runninghub_updates)
     if deepseek_key and deepseek_key not in placeholders:
         set_secret(DEEPSEEK_API_KEY_ENV, deepseek_key)
         saved.append("DeepSeek")
-    if runninghub_key and runninghub_key not in placeholders:
-        set_secret(RUNNINGHUB_API_KEY_ENV, runninghub_key)
-        saved.append("RunningHub")
     if comfyui_backend_url:
         submit_backends = CONFIG.setdefault("submit_backends", {})
         if not isinstance(submit_backends, dict):
@@ -1183,11 +1219,15 @@ def save_service_keys(
         log(f"[settings][warn] FPS 无效，已忽略: {fps_value}", "WARN")
     if saved:
         _save_global_config()
+    if CONFIG_KEYS_FIELD in runninghub_updates:
+        saved.append("RunningHub Key（本机配置文件）")
+    if SELECTION_FIELD in runninghub_updates:
+        saved.append("RunningHub Key 使用方式")
     if saved:
         log(f"[settings] 已保存 {'、'.join(saved)}", "STEP")
     else:
         log("[settings] 未输入新的 key 或 URL，保持现有配置不变", "STEP")
-    return (*secret_key_placeholders(), CONFIG.get("comfyui_url", ""), get_logs())
+    return (*secret_key_placeholders(), CONFIG.get("comfyui_url", ""), get_logs(), runninghub_key_picker(), "")
 
 def generate_story_with_duration(topic_text, duration_select, custom_duration):
     assert_current_runtime_writable("生成完整剧情")

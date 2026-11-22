@@ -128,6 +128,7 @@ def _record_runninghub_result(segment: dict[str, Any], result: dict[str, Any]) -
         outputs=outputs,
         submitted_prompt=submitted_prompt,
         video_path=str(result.get("video_path") or ""),
+        key_id=str(submitted.get("key_id") or ""),
     )
 
 

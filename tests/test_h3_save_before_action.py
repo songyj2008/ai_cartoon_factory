@@ -223,13 +223,14 @@ A.closePromptModal=()=>{};
 
 
 def test_clear_all_releases_only_the_cleared_modal_wait(tmp_path):
-    clear = 'async function clearAllTasks(button){' + PANEL_JS.split(
-        '  async function clearAllTasks(button){', 1)[1].split(
+    clear = 'async function clearAllTasks(button,propagate=false){' + PANEL_JS.split(
+        '  async function clearAllTasks(button,propagate=false){', 1)[1].split(
         '  function bindClearButton()', 1)[0]
     run_node(tmp_path, clear + r'''
-let tasksCache=[],videoTasks=[],signature='',seenStates={};
+let videoTasks=[],signature='',seenStates={},taskCleanupPending=false;
 const root=()=>({querySelector:()=>({})});
 const message=()=>{},toast=()=>{},refreshVideos=async()=>{},refresh=async()=>{};
+const updateCleanupButtons=()=>{button.disabled=taskCleanupPending;};
 const localStorage={removeItem(){}};
 let api=async()=>({deleted:1,video_tasks:0});
 (async()=>{

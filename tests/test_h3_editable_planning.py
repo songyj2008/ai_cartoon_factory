@@ -102,6 +102,7 @@ def test_segment_cards_render_issues_raw_reply_and_retry_for_missing_beats(monke
         {'title': 'first', 'estimated_duration_sec': 10}, {'title': 'second', 'estimated_duration_sec': 8}])
     monkeypatch.setattr(group_panel, '_h3_config_html', lambda *_: '<textarea>可编辑分镜</textarea>')
     with context.pin_runtime((tmp_path, 'test', '')):
+        empty_html = group_panel.render_groups_panel({'segments': []})
         html = group_panel.render_groups_panel({'novel_batch_id': 'batch', 'default_model_id': 'minimax_h3_local_ref2va',
             'segments': [{'segment_index': 1, 'model_id': 'minimax_h3_local_ref2va', 'novel_batch_id': 'batch',
                           'job': {'duration_sec': 18}, 'planning_state': 'warning',
@@ -109,7 +110,10 @@ def test_segment_cards_render_issues_raw_reply_and_retry_for_missing_beats(monke
                           'planning_raw_response': '<script>untrusted</script>'}]})
     assert '缺少第六句对白' in html and '分镜有提示，待检查' in html
     assert '预计总时长：26 秒' in html
-    assert html.count('重新生成 Segment') == 2
+    assert html.count('重新生成分镜头') == 2
+    for panel_html in (empty_html, html):
+        assert '<div class="panel-title">视频分镜头</div>' in panel_html
+        assert '>Segments</div>' not in panel_html
     assert '<script>untrusted</script>' not in html and '&lt;script&gt;' in html
 
 

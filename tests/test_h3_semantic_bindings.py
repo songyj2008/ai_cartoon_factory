@@ -65,9 +65,101 @@ def test_ambiguous_alias_requires_resolution(bible):
         normalize_beat_bindings(beat([shot(visible_roles=['经理'])]), bible=bible)
 
 
-def test_onscreen_speaker_must_be_visible(bible):
+def test_story_names_are_not_reference_roles(bible):
+    original = beat([shot(visible_roles=['经理', '小林'], mentioned_roles=['门卫'],
+        dialogues=[{'speaker': '小林', 'scope': 'onscreen', 'line': '我到了。'},
+                   {'speaker': '快递员', 'scope': 'telephone', 'line': '请签收。'}])])
+    result = normalize_beat_bindings(original, bible=bible)
+    assert result['visible_roles'] == ['a', '小林']
+    assert result['offscreen_speakers'] == ['快递员']
+    assert result['mentioned_roles'] == ['门卫']
+    assert result['reference_roles'] == ['a']
+    assert result['text_roles'] == ['小林', '快递员', '门卫']
+    assert binding_coverage_errors(result, [], bible=bible) == ['入画人物缺少参考图：a']
+    assert result == normalize_beat_bindings(result, bible=bible)
+
+
+@pytest.mark.parametrize('speaker', ['乙', '小林'])
+def test_onscreen_speaker_must_be_visible(bible, speaker):
     with pytest.raises(BindingError, match='说话人'):
-        normalize_beat_bindings(beat([shot(dialogue={'speaker': '乙', 'scope': 'onscreen'})]), bible=bible)
+        normalize_beat_bindings(beat([shot(dialogue={'speaker': speaker, 'scope': 'onscreen'})]), bible=bible)
+
+
+@pytest.mark.parametrize('name', ['', '<Subject 8>', '<Audio 2>', 'character_999'])
+def test_invalid_role_tokens_are_not_text_roles(bible, name):
+    with pytest.raises(BindingError):
+        normalize_beat_bindings(beat([shot(visible_roles=[name])]), bible=bible)
+
+
+@pytest.mark.parametrize('include_registered', [False, True])
+def test_novel_text_roles_survive_segment_compilation_and_submit_validation(
+        bible, tmp_path, monkeypatch, include_registered):
+    from generation.pipelines.minimax_h3 import prompt_planner
+    from generation.pipelines.minimax_h3.contracts import H3GenerationConfig
+    from generation.pipelines.minimax_h3.pipeline import MiniMaxH3Ref2VAPipeline
+    from generation.pipelines.minimax_h3.shot_editor import dialogue_units, parse_prompt
+    from generation.pipelines.minimax_h3.validator import H3Ref2VAValidator
+    from scripts.story_script import generate_beats
+
+    bible['core_characters'][0].update(aliases=['小满'], asset_identity_id='identity_a')
+    reference_path = tmp_path / 'a.png'
+    reference_path.write_bytes(b'reference')
+    index = {'characters': {'identities': [{
+        'id': 'identity_a', 'name_cn': '小满', 'images': [{'id': 'face', 'path': str(reference_path)}],
+    }]}, 'backgrounds': []}
+    for module in ('services.project_bible', 'workflow.asset_matcher',
+                   'generation.pipelines.minimax_h3.auto_binder', 'generation.pipelines.minimax_h3.prompt_compiler'):
+        monkeypatch.setattr(module + '.load_project_bible', lambda: bible)
+    for module in ('workflow.asset_matcher', 'generation.pipelines.minimax_h3.auto_binder'):
+        monkeypatch.setattr(module + '.load_asset_index', lambda: index)
+    monkeypatch.setattr('services.character_voice.attach_character_voices', lambda items, *args: items)
+
+    cast = ['甲', '苏小满'] if include_registered else ['苏小满']
+    action = '苏小满把信递给甲。' if include_registered else '苏小满把信放在桌上。'
+    excerpt = action + '苏小满说：“请查收。”'
+    authored = shot(start_sec=0, end_sec=8, scene_id='驿站', visible_roles=cast,
+                    subject='苏小满', action=action, audio='纸张摩擦声。',
+                    dialogue={'speaker': '苏小满', 'scope': 'onscreen', 'line': '请查收。'})
+    beat_shot = {key: value for key, value in authored.items() if key != 'subject'}
+    raw = {'title': '送信', 'locked_outcome': '信件送达。', 'beats': [dict(beat([beat_shot]),
+        title='送信', plot=action, source_excerpt=excerpt, estimated_duration_sec=8)]}
+    monkeypatch.setattr(generate_beats, '_call_deepseek_messages', lambda *args, **kwargs: copy.deepcopy(raw))
+    result = generate_beats.generate_novel_beats(
+        {'novel_text': excerpt, 'project_bible': bible, 'target_duration_sec': 8, 'target_beat_count': 1},
+        model_id=MODEL, config={}, temp_dir=tmp_path)
+    calls = []
+
+    def plan_model(system, payload, **kwargs):
+        calls.append(system)
+        return {'duration_sec': 8, 'duration_reason': '信件递送和一句对白。', 'core_idea': action,
+                'shots': [copy.deepcopy(authored)], 'shot_mode': 'one_take'}, 0
+
+    monkeypatch.setattr(prompt_planner, '_call_model', plan_model)
+    pipeline = MiniMaxH3Ref2VAPipeline()
+    segment = pipeline._prepare_segment(
+        {}, result['beats'][0], 1, {}, check_files=False, planning_only=True)
+    assert len(calls) == 1 and '未登记的人物沿用原名' in calls[0]
+    assert segment['planning_state'] == 'ready', segment['planning_issues']
+    refs = ['a'] if include_registered else []
+    manifest = segment['generation_config']['asset_manifest']
+    assert segment['visible_roles'] == refs + ['苏小满']
+    assert segment['reference_roles'] == [item['metadata']['role_id'] for item in manifest] == refs
+    prompt = segment['job']['prompt']
+    assert '苏小满 (S1)说：<d>[Chinese]请查收。</d>' in prompt
+    assert '苏小满把信' in prompt
+    parsed = parse_prompt(prompt, 'saved', manifest)['shots'][0]
+    assert parsed['visible_roles'] == refs + ['苏小满']
+    assert dialogue_units(parsed)[0]['speaker'] == '苏小满'
+    config = H3GenerationConfig.from_mapping(segment['generation_config'])
+    assert H3Ref2VAValidator().validate_binding_contract(segment, config, bible=bible).is_valid
+    if include_registered:
+        regenerated = pipeline._prepare_segment(
+            {}, result['beats'][0], 1, dict(segment, h3_force_replan=True, h3_editor_prompt=prompt),
+            check_files=False, planning_only=True)
+        assert regenerated['planning_state'] == 'ready', regenerated['planning_issues']
+        assert '苏小满 (S1)说：<d>[Chinese]请查收。</d>' in regenerated['job']['prompt']
+        assert H3Ref2VAValidator().validate_binding_contract(regenerated,
+            H3GenerationConfig.from_mapping(regenerated['generation_config']), bible=bible).is_valid
 
 
 def test_explicit_delivery_visibility_controls_reference_coverage(bible):

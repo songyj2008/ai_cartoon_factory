@@ -12,14 +12,13 @@ from .prompt_retimer import _SHOT, _seconds, _time_slots
 
 SECTION = re.compile(r"(?m)^【([^】]+)】[ \t]*$")
 _LINE = re.compile(r'<d>\s*(?:\[(?:Chinese|English|中文|英文)\])?(.*?)</d>', re.S | re.I)
-_OWNER = re.compile(r'(<Subject\s+\d+>|<Audio\s+\d+>|[\w\u4e00-\u9fff]+(?:[ \t]+[\w\u4e00-\u9fff]+)*)(?:\s*\(S\d+\))?([^<>；\n]*?)(?:说|报告)[：:]\s*$', re.I)
+_SPEAKER = r"(<Subject\s+\d+>|<Audio\s+\d+>|[\w·・.'’\-]+(?:[ \t]+[\w·・.'’\-]+)*)"
+_OWNER = re.compile(_SPEAKER + r'(?:\s*\(S\d+\))?([^<>；\n]*?)(?:说|报告)[：:]\s*$', re.I)
 _DELIVERY_OWNER = re.compile(
-    r'(<Subject\s+\d+>|<Audio\s+\d+>|[\w\u4e00-\u9fff]+?)'
-    r'(?:\s*\(S\d+\))?(在画外通过电话|在画外|以画外旁白)说[：:]\s*$', re.I)
+    _SPEAKER + r'(?:\s*\(S\d+\))?(在画外通过电话|在画外|以画外旁白)说[：:]\s*$', re.I)
 _LABELED_OWNER = re.compile(
     r'(?:对白标签[：:]\s*(?:onscreen|offscreen|telephone|narration)\s*[·；;，,]?\s*)?'
-    r'说话人[：:]\s*(<Subject\s+\d+>|<Audio\s+\d+>|[\w\u4e00-\u9fff]+)'
-    r'([^<>\n]*?)[：:]\s*$', re.I)
+    r'说话人[：:]\s*' + _SPEAKER + r'([^<>\n]*?)[：:]\s*$', re.I)
 _SILENT = '本镜无对白，画内人物不做说话口型。'
 _CONTINUATION = re.compile(r'接着上个\s*Shot\s*继续说[，,]\s*', re.I)
 
@@ -286,7 +285,8 @@ def read_visible_roles(body, options):
     for value in values:
         value=value.strip()
         matches={o['speaker'] for o in options if value in (o['tag'],o['speaker'],o['label'])}
-        if not matches and re.fullmatch(r'<Subject\s+\d+>',value) and not options:
+        if not matches and value and (not value.startswith('<') or
+                                      (not options and re.fullmatch(r'<Subject\s+\d+>', value))):
             matches={value}
         if len(matches)!=1:
             raise ValueError('入画人物无法唯一对应当前参考：'+value)

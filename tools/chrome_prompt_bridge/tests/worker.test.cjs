@@ -28,9 +28,11 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
   }} : TextProviderPolicy;
   const context = {
     PromptBridge: P,TextProviderPolicy:testPolicies,TextTaskStore,FocusCoordinator,
+    BrowserIdentity:require('../browser_identity.js'),
+    ExtensionUpdate:require('../extension_update.js'),EXTENSION_BUILD_ID:'',
     TextScheduler:{createScheduler:options=>TextScheduler.createScheduler({...options,now:()=>schedulerNow})},
     importScripts() {}, videoPumpFromStorage:async()=>{}, URL, Date,
-    navigator:{userAgent:'Chrome/130'},videoCatalog:async()=>[{id:'doubao_web'},{id:'runninghub_web'}],
+    navigator:{userAgent:'Chrome/130',userAgentData:{brands:[{brand:'Google Chrome'}]}},videoCatalog:async()=>[{id:'doubao_web'},{id:'runninghub_web'}],
     setTimeout:(fn,ms,...args)=>setTimeout(fn,ms===10000?5:ms===60000?50:ms,...args), clearTimeout, queueMicrotask,
     crypto: require('node:crypto').webcrypto, AbortSignal,
     fetch: async (url, opts) => {
@@ -134,6 +136,13 @@ function fixture(extraRemotes = [], sendBarrier = null, options = {}) {
     qianwenInput:(message,sender)=>new Promise(resolve=>listener({type:'AICF_QIANWEN_INPUT',...message},sender,resolve)),
     trustedClick:(message,sender={id:'ext',tab:{id:7},url:'https://chat.deepseek.com/a/chat/test',frameId:0})=>new Promise(resolve=>listener({type:'AICF_TRUSTED_CONTINUE_CLICK',...message},sender,resolve))};
 }
+
+test('saved Quark type reaches backend without renaming the browser instance',async()=>{
+ const f=fixture();f.store.browserType='Quark';f.store.browserName='夸克001';
+ await f.poll();
+ assert.equal(f.store.lastPing.browser.type,'Quark');
+ assert.equal(f.store.lastPing.browser.name,'夸克001');
+});
 
 test('secondary browser registers capabilities without claiming text or opening task tabs',async()=>{
  const f=fixture();f.store.textEnabled=false;

@@ -53,6 +53,7 @@ from ui.project_handlers import (
     save_interface_mode,
     save_runtime_ui_options,
     save_service_keys,
+    runninghub_key_picker,
     save_submit_backend_selection,
     save_workflow_config,
     save_story_and_beats_edits,
@@ -1595,6 +1596,8 @@ def bind_events(demo, components):
     fps_box = components["fps_box"]
     comfyui_backend_url_box = components["comfyui_backend_url_box"]
     runninghub_api_key_box = components["runninghub_api_key_box"]
+    runninghub_key_selection_box = components["runninghub_key_selection_box"]
+    runninghub_key_alias_box = components["runninghub_key_alias_box"]
     save_service_keys_btn = components["save_service_keys_btn"]
     save_workflow_config_btn = components["save_workflow_config_btn"]
     workflow_config_status = components["workflow_config_status"]
@@ -2491,10 +2494,14 @@ def bind_events(demo, components):
             comfyui_backend_url_box,
             deepseek_model_box,
             fps_box,
+            runninghub_key_selection_box,
+            runninghub_key_alias_box,
         ],
-        outputs=[deepseek_api_key_box, runninghub_api_key_box, comfyui_backend_url_box, status],
+        outputs=[deepseek_api_key_box, runninghub_api_key_box, comfyui_backend_url_box, status,
+                 runninghub_key_selection_box, runninghub_key_alias_box],
         queue=False,
     )
+    demo.load(fn=runninghub_key_picker, outputs=runninghub_key_selection_box, queue=False, show_progress="hidden")
 
     demo.load(
         fn=_restore_page_state,

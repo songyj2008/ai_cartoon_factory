@@ -194,6 +194,7 @@ def record_runninghub_attempt(
     submitted_prompt: str = "",
     video_path: str = "",
     model_id: str = "",
+    key_id: str = "",
 ) -> dict[str, Any] | None:
     """Create or update the one task-history entry belonging to ``task_id``.
 
@@ -222,6 +223,8 @@ def record_runninghub_attempt(
         resolved_model_id = "ltx23_licon_msr_v2"
     if resolved_model_id and not _text(attempt.get("model_id")):
         attempt["model_id"] = resolved_model_id
+    if key_id:
+        attempt.setdefault("key_id", key_id)
     if status:
         attempt["status"] = str(status).strip().lower()
     prompt_text = str(submitted_prompt or "").strip()

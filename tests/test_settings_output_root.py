@@ -29,4 +29,33 @@ def test_service_settings_binding_excludes_runtime_directory():
     assert [item.id for item in inputs.elts] == [
         "deepseek_api_key_box", "runninghub_api_key_box", "comfyui_backend_url_box",
         "deepseek_model_box", "fps_box",
+        "runninghub_key_selection_box", "runninghub_key_alias_box",
     ]
+
+
+def test_runninghub_page_saves_only_to_private_config(tmp_path, monkeypatch):
+    from services import runninghub_keys
+
+    settings = {}
+    config_path = tmp_path / "config.json"
+    environment = {runninghub_keys.RUNNINGHUB_API_KEYS_ENV: '{"env-account":"test-environment-key"}'}
+    monkeypatch.setattr(project_handlers, "CONFIG", settings)
+    monkeypatch.setattr(project_handlers, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(runninghub_keys, "CONFIG", settings)
+    monkeypatch.setattr(runninghub_keys, "secret_value", lambda name, **kwargs: environment.get(name, ""))
+
+    def unexpected_environment_write(*args):
+        raise AssertionError("RunningHub settings attempted to write an environment variable")
+
+    monkeypatch.setattr(project_handlers, "set_secret", unexpected_environment_write)
+    project_handlers.save_service_keys(runninghub_key="test-page-default")
+    result = project_handlers.save_service_keys(runninghub_key="test-page-extra", runninghub_alias="extra")
+    assert "test-page-extra" not in repr(result)
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved[runninghub_keys.CONFIG_KEYS_FIELD] == {
+        "default": "test-page-default", "extra": "test-page-extra",
+    }
+    assert runninghub_keys.resolve_runninghub_key().alias == "env-account"
+    environment.clear()
+    project_handlers.save_service_keys(runninghub_selection="extra")
+    assert runninghub_keys.resolve_runninghub_key().alias == "extra"

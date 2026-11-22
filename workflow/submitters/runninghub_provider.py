@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from services.context import get_project_dir
 from services.logger import log
-from services.secrets import RUNNINGHUB_API_KEY_ENV, secret_value
+from services.runninghub_keys import RunningHubKey, resolve_runninghub_key
 from workflow.runninghub_asset_cache import get_cached_file_name, put_cached_file_name
 from workflow.runninghub_client import RunningHubClient
 from workflow.submit_factory import submit_backend_config
@@ -28,36 +28,39 @@ def _filename_token(value: str, fallback: str) -> str:
 class RunningHubSubmitProvider:
     name = "runninghub"
 
-    def __init__(self, model_id: str | None = None) -> None:
+    def __init__(self, model_id: str | None = None, *, key_id: str | None = None) -> None:
         self.model_id = str(model_id or "").strip()
         self.config = submit_backend_config(self.name, model_id=self.model_id)
-        api_key = secret_value(RUNNINGHUB_API_KEY_ENV)
-        if not api_key:
-            raise ValueError(f"RunningHub API key is not configured. Set {RUNNINGHUB_API_KEY_ENV} in UI settings.")
+        self.reuse_uploaded_assets = bool(self.config.get("reuse_uploaded_assets", True))
+        self.key_id = None
+        if key_id is not None:
+            self._bind_key(resolve_runninghub_key(key_id))
+
+    def _bind_key(self, key: RunningHubKey) -> None:
+        self.key_id = key.id
         instance_type = str(self.config.get("instanceType") or self.config.get("instance_type") or "").strip()
         if not instance_type and bool(self.config.get("use_plus_instance")):
             instance_type = "plus"
         self.client = RunningHubClient(
             base_url=str(self.config.get("base_url") or "https://www.runninghub.cn"),
-            api_key=api_key,
+            api_key=key.value,
             workflow_id=str(self.config.get("workflow_id") or ""),
             poll_seconds=float(self.config.get("poll_seconds") or 5),
             timeout_seconds=int(self.config.get("timeout_seconds") or 7200),
             workflow_payload_mode=str(self.config.get("workflow_payload_mode") or "string"),
             instance_type=instance_type,
         )
-        self.reuse_uploaded_assets = bool(self.config.get("reuse_uploaded_assets", True))
 
     def _upload_or_reuse(self, local_path: str | Path) -> str:
         path = Path(local_path).resolve()
         if self.reuse_uploaded_assets:
-            cached = get_cached_file_name(path)
+            cached = get_cached_file_name(path, self.key_id)
             if cached:
                 log(f"[LICON_MSR][runninghub] upload cache hit: {path.name}", "STEP")
                 return cached
         log(f"[LICON_MSR][runninghub] upload media: {path.name}", "STEP")
         file_name = self.client.upload_media(path)
-        put_cached_file_name(path, file_name)
+        put_cached_file_name(path, file_name, self.key_id)
         return file_name
 
     def _patch_uploaded_media(self, api: dict[str, Any], job: Any) -> dict[str, Any]:
@@ -133,6 +136,15 @@ class RunningHubSubmitProvider:
         workflow_path: str | None = None,
         wait: bool = True,
     ) -> SubmitResult:
+        # H3 reuses a provider for an entire batch. Bind each task to its own
+        # client so a later submit cannot switch a pending task's credentials.
+        provider = copy.copy(self)
+        provider._bind_key(resolve_runninghub_key(self.key_id))
+        return provider._submit(api, job, workflow_path, wait)
+
+    def _submit(
+        self, api: dict[str, Any], job: Any, workflow_path: str | None, wait: bool,
+    ) -> SubmitResult:
         if not self.client.workflow_id:
             raise ValueError(f"RunningHub workflow_id is required for model deployment: {self.model_id or 'default'}")
         submit_api = self._patch_uploaded_media(api, job)
@@ -170,6 +182,6 @@ class RunningHubSubmitProvider:
             task_id=task_id,
             video_path=video_path,
             output_urls=output_urls,
-            submit_result={"task_id": task_id, "status": status, "outputs": outputs},
+            submit_result={"task_id": task_id, "key_id": self.key_id, "status": status, "outputs": outputs},
             raw={"workflow_path": workflow_path or "", "status": status, "outputs": outputs},
         )

@@ -862,11 +862,27 @@ def record_apply_error(identifier, message):
 
 def clear_finished():
     """Clear finished records and their snapshots, preserving live/recovery work."""
-    placeholders = ','.join('?' for _ in CLEARABLE)
+    return _clear_task_records(CLEARABLE)
+
+
+def clear_completed_tasks():
+    """Remove successful task records without discarding pending results or recovery work."""
+    from services.web_video_bridge import dismiss_completed_tasks
+
+    result = _clear_task_records(('applied',), preserve_unfinished_batches=True)
+    return {**result, 'video_tasks': dismiss_completed_tasks()}
+
+
+def _clear_task_records(states, *, preserve_unfinished_batches=False):
+    placeholders = ','.join('?' for _ in states)
     with _LOCK, database() as db:
         db.execute('BEGIN IMMEDIATE')
         items = [_decode(row) for row in db.execute(
-            f'SELECT * FROM operations WHERE state IN ({placeholders})', CLEARABLE).fetchall()]
+            f'SELECT * FROM operations WHERE state IN ({placeholders})', states).fetchall()]
+        if preserve_unfinished_batches:
+            parents = {row[0] for row in db.execute(
+                "SELECT DISTINCT json_extract(payload, '$.batch_id') FROM operations WHERE state != 'applied'")}
+            items = [item for item in items if item['id'] not in parents]
         clearing = {item['id'] for item in items}
         items = [item for item in items if not item.get('batch_id') or item['batch_id'] in clearing
                  or not db.execute('SELECT 1 FROM operations WHERE id=?', (item['batch_id'],)).fetchone()]

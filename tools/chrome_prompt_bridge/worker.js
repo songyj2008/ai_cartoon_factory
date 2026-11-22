@@ -1,5 +1,8 @@
 "use strict";
 importScripts("protocol.js");
+importScripts("extension_build.js");
+importScripts("extension_update.js");
+importScripts("browser_identity.js");
 importScripts("text_provider_policy.js");
 importScripts("text_task_store.js");
 importScripts("text_scheduler.js");
@@ -173,7 +176,7 @@ chrome.runtime.onInstalled.addListener(setup);
 chrome.runtime.onStartup.addListener(setup);
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "bridge-poll") scheduler.requestTick('alarm'); });
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.task || changes.backend)) scheduler.requestTick('storage');
+  if (area === "local" && (changes.task || changes.backend || changes.browserType || changes.browserName)) scheduler.requestTick('storage');
 });
 function baseUrl(value) {
   const url = new URL(value);
@@ -717,12 +720,18 @@ async function pump() {
     if (!saved.clientId) await chrome.storage.local.set({clientId});
     const advertised=Object.keys(PROVIDER_NAMES);
     const providerCapabilities=Object.fromEntries(advertised.map(id=>[id,TextProviderPolicy.policy(id).capabilities]));
-    const browserType=/Edg\//.test(navigator.userAgent)?'Edge':'Chrome';
+    const browserType=BrowserIdentity.resolve(saved,navigator);
     const pool=await api(config,'/ping',{client_id:clientId,providers:advertised,
       browser:{type:browserType,name:saved.browserName || browserType+' '+clientId.slice(0,8),
-        version:chrome.runtime.getManifest().version,channels:(await videoCatalog()).map(item=>item.id)},
+        version:chrome.runtime.getManifest().version,channels:(await videoCatalog()).map(item=>item.id),
+        update_capable:true,build:EXTENSION_BUILD_ID},
+      extension_update:await ExtensionUpdate.receipt(chrome,EXTENSION_BUILD_ID),
       capabilities:['video_learning_attachments_v1'],provider_capabilities:providerCapabilities});
     if(await syncQueueReset(pool,saved))return;
+    const updating=await ExtensionUpdate.handle(chrome,pool.extension_update,
+      pageFlights.size>0 || scheduler.hasRunningTasks() ||
+      (typeof videoPumpingChannels!=='undefined' && videoPumpingChannels.size>0));
+    if(updating)return;
     await chrome.storage.local.set({textEnabled:pool.text_enabled !== false});
     if(pool.text_enabled === false) {
       await chrome.storage.local.set({bridgeStatus:{message:'已连接 · 文字任务由主浏览器执行，当前浏览器接收指定视频任务',at:Date.now()}});

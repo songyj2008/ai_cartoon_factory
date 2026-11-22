@@ -23,6 +23,7 @@ import webview
 
 from app import allowed_paths, demo, ui_launch_kwargs
 from services.context import CONFIG
+from services.desktop_tray import register_windows_tray
 from services.windows_runtime_guard import install_windows_signal_guard
 
 
@@ -234,7 +235,7 @@ def main() -> None:
     from services.runninghub_worker import runninghub_worker
     runninghub_worker.start()
     _ensure_webview2_runtime()
-    webview.create_window(
+    window = webview.create_window(
         "AI Cartoon Factory",
         url,
         width=1440,
@@ -242,8 +243,11 @@ def main() -> None:
         min_size=(1120, 720),
         text_select=True,
     )
+    if os.name == "nt":
+        register_windows_tray(window)
+    icon = _app_base_dir() / "resources" / "brand" / "desktop-icon.ico"
     try:
-        webview.start(gui="edgechromium")
+        webview.start(gui="edgechromium", icon=str(icon))
     finally:
         runninghub_worker.stop()
     os._exit(0)

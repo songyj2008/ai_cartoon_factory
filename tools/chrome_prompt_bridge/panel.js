@@ -220,6 +220,7 @@ for (const key of draftKeys) $(key).addEventListener("input", () => {
   });
   const backend = (await chrome.storage.local.get("backend")).backend || {};
   $('browser-name').value=(await chrome.storage.local.get('browserName')).browserName || '';
+  $('browser-type').value=(await chrome.storage.local.get('browserType')).browserType || 'auto';
   $("backend-url").value = backend.url || "http://127.0.0.1:7860";
   $("backend-token").value = backend.token || "";
   const previousStatus = (await chrome.storage.local.get("bridgeStatus")).bridgeStatus;
@@ -232,7 +233,7 @@ for (const key of draftKeys) $(key).addEventListener("input", () => {
 
 $("connect-backend").addEventListener("click", runBackend(async () => {
   backendStatus("正在保存配置…");
-  await chrome.storage.local.set({browserName:$('browser-name').value.trim()});
+  await chrome.storage.local.set({browserName:$('browser-name').value.trim(),browserType:$('browser-type').value});
   const url = new URL($("backend-url").value.trim());
   if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname) || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("请输入本机 HTTP 地址，例如 http://127.0.0.1:7860。");
   const token = $("backend-token").value.trim();

@@ -144,13 +144,15 @@ def ensure_project_bible(topic="", asset_index=None):
     return bible
 
 
-def project_bible_prompt(bible, *, allow_text_scenes=False):
+def project_bible_prompt(bible, *, allow_text_scenes=False, allow_text_characters=False):
     from services.llm_payloads import project_bible_context
     bible = project_bible_context(bible)
     return (
         "PROJECT_BIBLE_JSON:\n"
         + json.dumps(bible, ensure_ascii=False, indent=2)
-        + "\nRules: Use only character ids from core_characters/supporting_characters. "
+        + "\nRules: "
+        + ("Reuse characters from core_characters/supporting_characters only when they match. Keep other characters already in the input by their original names, without assigning them reference assets. "
+           if allow_text_characters else "Use only character ids from core_characters/supporting_characters. ")
         + ("Reuse allowed_backgrounds only when they match. Other story locations may be described in text for the video model to create, without background reference images. "
            if allow_text_scenes else "Use only background ids from allowed_backgrounds. Do not invent new primary scenes. ")
         + "Anonymous extras are allowed only by extras_policy. Do not invent named main characters."
@@ -172,10 +174,10 @@ def background_by_id(bible):
 class ProjectBindingError(ValueError):
     @property
     def feedback(self):
-        return {"code": "INVALID_BINDING", "message": str(self), "expected": "已登记且完整的镜头绑定", "actual": str(self)}
+        return {"code": "INVALID_BINDING", "message": str(self), "expected": "完整的镜头绑定；已登记角色须唯一匹配", "actual": str(self)}
 
 
-def resolve_project_reference(value, entries, *, location):
+def resolve_project_reference(value, entries, *, location, allow_unregistered_text=False):
     text = str(value or "").strip()
     exact = [e for e in entries if str(e.get("id")) == text]
     if exact:
@@ -183,6 +185,8 @@ def resolve_project_reference(value, entries, *, location):
     matches = {str(e["id"]) for e in entries if text and text in
                [str(e.get("display_name") or ""), str(e.get("asset_identity_id") or ""),
                 str(e.get("asset_background_id") or ""), *map(str, e.get("aliases") or [])]}
+    if text and not matches and allow_unregistered_text:
+        return text
     if len(matches) != 1:
         raise ProjectBindingError(f"{location}: {'名称有歧义' if matches else '未登记名称'}「{text}」")
     return next(iter(matches))

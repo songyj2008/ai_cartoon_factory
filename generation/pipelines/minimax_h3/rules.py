@@ -128,14 +128,14 @@ H3_STORY_CONSTRAINTS = """
 
 H3_BEAT_WRITER_PROMPT = """
 【人物和场景结构必填】
-用户只输入小说，不需要提供内部 ID。根据 project_bible 的姓名、别名或 ID 填写结构。
+用户只输入小说，不需要提供内部 ID。Project Bible 是可复用角色素材，不是人物白名单。唯一匹配时用项目角色 ID 或姓名；未登记但原文已有的人物沿用原名，不强行套用项目角色，不新造 ID 或额外人物。
 每个 Shot 必须输出 visible_roles 数组，只含实际入画人物；空镜明确填 []，不要遗漏字段。
 每个 Shot 必须输出 scene_id：有明确匹配时复用项目场景名称或 ID，没有匹配时填写剧情地点名称，并在镜头正文交代环境，由视频模型自行构建；不要求先登记或生成背景参考图，不强配已有场景。明确无具体场景时填空字符串。
 从全文识别连续场景，后续段落未重复地点不表示换场。小说生成时输出顶层 scene_contexts 数组：
 每项包含 id、scene_id、source_excerpt；各 Shot 用 scene_context_id 引用，同一连续场景沿用同一上下文。
 已有 scene_contexts 时沿用对应场景，不因切镜、景别变化或说话人变化丢失场景。
 人物在场、实际入画、画外发声、台词提及必须区分；不得把站位说明里所有人强加入画。
-对白 speaker 使用项目角色姓名或 ID，保留原文和归属。镜头人物可以变化，不要求整段固定入画。
+对白 speaker 可用项目角色 ID、姓名或未登记人物的原名，同一人物前后使用一致写法，保留原文和归属。镜头人物可以变化，不要求整段固定入画。
 
 你是短视频叙事规划师，为 MiniMax H3 Ref2VA 生成可直接编译的语义 Beats。
 
@@ -154,7 +154,7 @@ H3_BEAT_WRITER_PROMPT = """
 - 台词长度与 Shot 时长匹配；跨 Shot 台词要明确连续说话，切镜要明确景别和承接主体。
 - 使用 visible_roles 明确实际入画人物，文本指代无歧义即可。
 - dialogue 使用 speaker、scope、line，跨镜片段标明 continues_previous。
-- Beat 阶段只写 Project Bible 中的角色名/角色 id，不自行生成 Subject、Picture、Video、Audio 素材标签；这些编号由后续 H3 AssetBinder 和提示词编译器统一绑定。
+- 未登记人物可入画、发声或被提及，在镜头正文中按剧情描述，不进入 reference_roles。只给匹配的已登记入画角色指定参考，不自行生成 Subject、Picture、Video、Audio 素材标签。
 - 默认可以切镜；用户要求一镜到底时只规划一个连续 Shot。
 - 如果有角色语义，保持 important_roles、visible_roles、reference_roles、offscreen_speakers、mentioned_roles、scene_id 一致。
 
@@ -192,9 +192,9 @@ H3_SPLITTER_PROMPT = """
 def build_h3_rule_set(model_id: str, label: str, min_duration: int, max_duration: int) -> ModelRuleSet:
     return ModelRuleSet(
         model_id=model_id,
-        revision="h3-planning-2026-10-v7",
+        revision="h3-planning-2026-11-v8",
         # Performance guidance changes creative output, not the Beat contract.
-        compatible_revisions=("h3-performance-2026-10-v4", "h3-manual-2026-08-v3"),
+        compatible_revisions=("h3-planning-2026-10-v7", "h3-performance-2026-10-v4", "h3-manual-2026-08-v3"),
         label=label,
         beat_min_duration_sec=min_duration,
         beat_max_duration_sec=max_duration,

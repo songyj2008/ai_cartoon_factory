@@ -28,7 +28,7 @@ python app.py
 
 进入应用设置，填写自己的 DeepSeek API Key，保存后再生成剧情或提示词。模型名称由 `config.json` 的 `deepseek_model` 指定，需与自己的服务权限一致。
 
-密钥由应用加密并绑定本机保存，Windows 使用当前用户环境存储。不要把 API Key 写进 JSON 或 Git，也不要把明文填到 `DEEPSEEK_API_KEY`、`RUNNINGHUB_API_KEY` 环境变量；当前读取逻辑要求应用生成的加密格式。迁移电脑后在新电脑的应用设置重新填写。
+DeepSeek 密钥由应用加密并绑定本机保存，Windows 使用当前用户环境存储。请在应用设置输入密钥，`DEEPSEEK_API_KEY` 环境变量使用应用生成的加密格式。迁移电脑后在新电脑的应用设置重新填写。
 
 也可使用网页 LLM：按下节安装扩展，再在设置选择相应服务。只打开项目页面不会自动建立模型网页登录状态。
 
@@ -55,7 +55,11 @@ JSON 路径可用 `/`，如使用反斜杠必须写成 `\\`。默认 `../ComfyUI
 
 ### RunningHub
 
-在应用设置保存自己的 RunningHub API Key，选择 RunningHub 渠道。核对 `models.<模型ID>.execution_profiles.runninghub.workflow_id` 是自己有权限运行的工作流，节点契约与本地模板一致。默认 ID 不保证所有账号均可调用。
+应用设置将 RunningHub API Key 保存到本机私有 `config.json` 顶层的 `runninghub_api_keys` 对象。添加多个 Key 时，逐个输入 Key 和别名并保存。选择「自动轮询」或指定别名后，点击「保存模型配置」。轮询按实际提交的新任务分配，已提交任务的查询和下载继续使用提交时的 Key。
+
+可以在系统中自行设置 `RUNNINGHUB_API_KEYS`，格式为 `{"key-1": "<自己的 API Key>"}`。运行时优先读取该环境变量，其次读取单 Key 变量 `RUNNINGHUB_API_KEY`，两者均未配置时使用私有 `config.json`。已有的本机加密环境变量仍可读取。手动修改环境变量或配置文件后重启应用。Git 和 Windows 发布包只分发示例配置。
+
+选择 RunningHub 渠道后，核对 `models.<模型ID>.execution_profiles.runninghub.workflow_id` 是各 Key 都有权限运行的工作流，节点契约与本地模板一致。默认 ID 不保证所有账号均可调用。
 
 云端排队与渲染独立于本地文字准备；视频提交成功不等于渲染完成。失败时先查看对应任务的错误，确认额度、工作流、节点和素材格式，再决定是否重试。
 
@@ -118,6 +122,10 @@ PowerShell 设置端口的写法是 `$env:AI_CARTOON_FACTORY_PORT = "7861"`。�
 
 ## 8. Windows EXE 发布包
 
+GitHub Releases 将 Windows 下载分为应用更新包和基础运行包。首次安装先解压发布说明链接中的基础运行包，再将应用包解压到同一目录，两包中的 `AI_Cartoon_Factory` 文件夹应合并。双击该文件夹内的 `AI_Cartoon_Factory.exe` 启动。后续升级先从托盘退出程序，备份本机配置和项目数据，再覆盖应用包；发布说明要求更换基础包时再下载对应版本。基础包包含 Python、第三方依赖、FFmpeg、ffprobe 和 WebView2 离线安装器，按内容标识复用。
+
+应用更新包包含程序、工作流、创作规则、界面资源和浏览器扩展，排除项目数据、素材、视频及私有配置。可用随包 SHA-256 文件检查下载内容。完整便携包也可用下面的命令在本机构建。
+
 在 Windows x64 的 Anaconda Prompt 中进入项目，执行以下命令构建便携包。
 
 ```bat
@@ -129,3 +137,5 @@ python scripts/package_windows.py
 构建需要 PATH 中可执行的 `ffmpeg` 和 `ffprobe`。首次构建会下载并验证微软签名的 WebView2 x64 离线安装器，缓存于 `.local/packaging/`。后续构建复用缓存。脚本在中文与空格路径的临时副本中清除 Python / Conda 路径，验证 EXE 启动、业务 API 和媒体工具，然后生成 `dist/AI_Cartoon_Factory_Windows_x64.zip` 及 SHA-256 文件。
 
 新电脑将完整 ZIP 解压到可写目录，双击 `AI_Cartoon_Factory.exe`。包内包含 Python、依赖、媒体工具和 WebView2 离线安装器。首次运行自动创建公开默认配置和空项目。生成服务、账号和素材按前文配置，迁移后在设置中重新填写密钥。便携包使用 Windows 10 / 11 x64 系统的 .NET Framework 4.8。详细启动说明随包附在 `使用说明.txt`。
+
+点击桌面窗口右上角的关闭按钮会收起到 Windows 通知区域，后台任务继续运行。点击托盘图标可恢复窗口；彻底关闭时，在托盘图标右键菜单选择「退出程序」。图标不在任务栏上时，可到右下角的「显示隐藏的图标」里找。

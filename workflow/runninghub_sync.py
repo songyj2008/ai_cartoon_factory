@@ -121,6 +121,25 @@ def _is_runninghub_pending(segment: dict[str, Any]) -> bool:
     return bool(task_id) and backend in {"", "runninghub"}
 
 
+def _task_key_id(segment: dict[str, Any], task_id: str) -> str:
+    from generation.render_history import find_render
+
+    render = find_render(segment, task_id=task_id)
+    if render:
+        result = (render.get("submission") or {}).get("submit_result") or {}
+        if isinstance(result, dict) and result.get("key_id"):
+            return str(result["key_id"])
+    for attempt in segment.get("runninghub_attempts") or []:
+        if isinstance(attempt, dict) and str(attempt.get("task_id") or "").strip() == task_id:
+            if attempt.get("key_id"):
+                return str(attempt["key_id"])
+    if _saved_task_id(segment) == task_id:
+        result = segment.get("submit_result") or {}
+        if isinstance(result, dict) and str(result.get("task_id") or "") == task_id:
+            return str(result.get("key_id") or "")
+    return ""
+
+
 def _sync_untracked_runninghub_tasks(segment: dict[str, Any]) -> bool:
     """Reconcile older accepted retries that the current-task poll cannot see."""
     from generation.render_history import find_render
@@ -144,7 +163,7 @@ def _sync_untracked_runninghub_tasks(segment: dict[str, Any]) -> bool:
             continue
         try:
             model_id = runninghub_attempt_model_id(segment, attempt) or resolved_model_id(segment)
-            provider = RunningHubSubmitProvider(model_id=model_id)
+            provider = RunningHubSubmitProvider(model_id=model_id, key_id=_task_key_id(segment, task_id))
             status = provider.client.get_task_status(task_id)
             text = _status_text(status)
             if _has_terminal_failure_status(status):
@@ -247,31 +266,32 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
         # Remote task ids belong to a particular model deployment.  Do not
         # assume that every persisted segment uses the project's *current*
         # default workflow: a project can change its default after jobs have
-        # already been submitted.  Cache clients by model so one sync pass
-        # still creates at most one client per deployment.
-        providers: dict[str, RunningHubSubmitProvider] = {}
+        # already been submitted. Cache clients by deployment and task key.
+        providers: dict[tuple[str, str], RunningHubSubmitProvider] = {}
 
         def provider_for(segment: dict[str, Any], task_id: str = "") -> RunningHubSubmitProvider:
             # A segment can later be prepared for another model.  Poll the
             # immutable render that owns this remote task rather than using the
             # segment's next selected model/workflow.
             model_id = ""
+            task_id = task_id or _saved_task_id(segment)
             try:
                 from generation.render_history import find_render
 
-                render = find_render(segment, task_id=task_id or _saved_task_id(segment))
+                render = find_render(segment, task_id=task_id)
                 model = render.get("model") if isinstance(render, dict) else {}
                 model_id = str((model or {}).get("id") or "").strip()
             except Exception:
                 model_id = ""
             model_id = model_id or resolved_model_id(segment, payload)
-            if model_id not in providers:
-                providers[model_id] = RunningHubSubmitProvider(model_id=model_id)
-            return providers[model_id]
+            key_id = _task_key_id(segment, task_id)
+            cache_key = (model_id, key_id)
+            if cache_key not in providers:
+                providers[cache_key] = RunningHubSubmitProvider(model_id=model_id, key_id=key_id)
+            return providers[cache_key]
 
         changed = recovered_deferred
         for segment, is_retired in pending:
-            provider = provider_for(segment)
             task_id = _saved_task_id(segment)
             part_id = str(segment.get("part_id") or (segment.get("job") or {}).get("part_id") or "part").strip()
             # Repair the top-level fields before polling, so recovered jobs stay recoverable.
@@ -282,6 +302,7 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
                 changed = True
                 log(f"[LICON_MSR][runninghub][sync] restored task metadata for {part_id}: {task_id}", "STEP")
             try:
+                provider = provider_for(segment, task_id)
                 try:
                     status = provider.client.get_task_status(task_id)
                 except Exception as status_exc:
@@ -430,10 +451,10 @@ def sync_runninghub_video_jobs() -> tuple[dict[str, Any], bool]:
         # task id but no history record.  Fetch their output metadata once so
         # old episode data can be included in the same totals.
         for segment, task_id in usage_backfill:
-            provider = provider_for(segment, task_id)
             if not attempt_needs_usage_sync(segment, task_id):
                 continue
             try:
+                provider = provider_for(segment, task_id)
                 outputs = provider.client.get_task_outputs(task_id)
                 record_runninghub_attempt(segment, task_id, outputs=outputs)
                 changed = True

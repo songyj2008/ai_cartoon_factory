@@ -885,7 +885,7 @@ NOVEL_BEATS_DIALOGUE_LTX = """
 
 
 NOVEL_BEATS_DIALOGUE_H3 = """
-台词必须逐字保留：小说里的每句对白都必须进入某个 beat 的 model_hints.minimax_h3_local_ref2va.shots[].dialogue.line；dialogue.speaker 归一化为角色 id，line 原文一个字都不能改、一句都不能丢。禁止把对白概括成“提问”“回答”“解释”等动作摘要。
+台词必须逐字保留：小说里的每句对白都必须进入某个 beat 的 model_hints.minimax_h3_local_ref2va.shots[].dialogue.line；dialogue.speaker 对已登记人物用角色 ID，未登记人物用小说中的原名。line 原文一个字都不能改、一句都不能丢。禁止把对白概括成“提问”“回答”“解释”等动作摘要。
 """.strip()
 
 

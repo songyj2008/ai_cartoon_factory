@@ -231,6 +231,11 @@ def _public(row, *, include_input=False):
 def claim(client_id: str, channels: list[str]):
     if not client_id or not channels:
         return None
+    from services import web_llm_bridge
+    from services.extension_updates import draining
+    with web_llm_bridge._connect() as db:
+        if draining(db, client_id):
+            return None
     with _LOCK, _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         from services.web_llm_bridge import get_settings, browser_clients
@@ -672,6 +677,12 @@ def dismiss_tasks(task_id: str | None = None) -> int:
         )]
     _release_segments_for_tasks(rows, reason="任务已从任务中心移除；本次网页任务未产出视频")
     return count
+
+
+def dismiss_completed_tasks() -> int:
+    """Hide successful tasks without touching video files or render history."""
+    with _LOCK, _connect() as conn:
+        return conn.execute("UPDATE tasks SET dismissed=1 WHERE dismissed=0 AND state='complete'").rowcount
 
 
 def clear_all_tasks():
